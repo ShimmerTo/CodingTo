@@ -1,0 +1,960 @@
+<script setup>
+import { computed, ref, watch } from 'vue'
+import { ArrowLeft, Award, Binary, Blocks, Bot, Check, FileText, Package, Pencil, RefreshCw, Settings, Shield, Sparkles, Trash2, X, Zap } from 'lucide-vue-next'
+import SkillCard from '../SkillCard.vue'
+import { useAppContext, agentAvatar } from '../../composables/appContext'
+import { extensionIcon } from '../../extensionIcons'
+import { listBrowserProfiles, deleteBrowserProfile, renameBrowserProfile } from '../../backend'
+import InstallDialog from '../../components/InstallDialog.vue'
+
+const { t, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, skills, refreshSkills, skillsLoading } = useAppContext()
+
+const activeTab = ref('basics')
+const availableSubagents = computed(() =>
+  (agentList.value || []).filter(agent => agent.id !== selectedAgent.value?.id)
+)
+const agentSkills = computed(() =>
+  (skills.value || [])
+    .filter(skill => (skill.agents || []).some(agent => agent.id === selectedAgent.value?.id))
+    .slice()
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+)
+watch(activeTab, (tab) => {
+  if (tab === 'skills') refreshSkills()
+})
+const avatarPresets = ['🤖', '🧠', '💡', '🚀', '🛠️', '📚', '🎯', '🔧', '⚡', '🌐', '🐙', '🦊', '🐳', '🐝', '🌟', '🔥']
+function selectAvatar(value) {
+  const agent = selectedAgent.value
+  if (!agent) return
+  agent.avatar = (value || '').trim().slice(0, 2)
+  persistAgentChange(agent)
+}
+const selectedDefaultModel = computed({
+  get: () => {
+    const agent = selectedAgent.value
+    return agent ? `${agent.defaultProvider || ''}/${agent.defaultModel || ''}` : ''
+  },
+  set: (value) => {
+    const agent = selectedAgent.value
+    const index = String(value).indexOf('/')
+    if (!agent || index < 0) return
+    agent.defaultProvider = value.slice(0, index)
+    agent.defaultModel = value.slice(index + 1)
+  },
+})
+
+async function saveAgentRuntimeConfig() {
+  if (!selectedAgent.value) return
+  const saved = await persistAgentChange(selectedAgent.value)
+  if (saved && selectedAgent.value.id === activeAgentId.value) await restartAgent()
+}
+
+function subagentEnabled(id) {
+  return selectedAgent.value?.subagents?.includes(id)
+}
+
+async function toggleSubagent(id) {
+  if (!selectedAgent.value) return
+  const current = new Set(selectedAgent.value.subagents || [])
+  if (current.has(id)) current.delete(id)
+  else current.add(id)
+  selectedAgent.value.subagents = [...current]
+  await saveAgentRuntimeConfig()
+}
+function subagentTooltip(agent) {
+  const lines = []
+  if (agent.description) lines.push(agent.description)
+  lines.push(`${t.value.agentSubagentsModel || '模型'}: ${agent.defaultProvider || '—'}/${agent.defaultModel || '—'}`)
+  lines.push(`${t.value.agentSubagentsId || 'ID'}: ${agent.id}`)
+  return lines.join('\n')
+}
+
+async function togglePiTool(key) {
+  if (!selectedAgent.value) return
+  selectedAgent.value.piTools ||= { read: true, bash: true, edit: true, write: true }
+  selectedAgent.value.piTools[key] = selectedAgent.value.piTools[key] === false
+  await saveAgentRuntimeConfig()
+}
+const RECOMMENDED_BROWSER_PROFILE_POLICY = {
+  existingProfileMode: 'headless',
+  interactiveLoginMode: 'headed',
+  authenticatedTaskMode: 'headless',
+}
+const showBrowserPolicyModal = ref(false)
+const browserPolicySaving = ref(false)
+const browserPolicyDraft = ref({ ...RECOMMENDED_BROWSER_PROFILE_POLICY })
+
+function normalizedBrowserPolicy(policy) {
+  return {
+    existingProfileMode: ['headed', 'headless'].includes(policy?.existingProfileMode)
+      ? policy.existingProfileMode
+      : RECOMMENDED_BROWSER_PROFILE_POLICY.existingProfileMode,
+    interactiveLoginMode: ['headed', 'headless'].includes(policy?.interactiveLoginMode)
+      ? policy.interactiveLoginMode
+      : RECOMMENDED_BROWSER_PROFILE_POLICY.interactiveLoginMode,
+    authenticatedTaskMode: ['headed', 'headless'].includes(policy?.authenticatedTaskMode)
+      ? policy.authenticatedTaskMode
+      : RECOMMENDED_BROWSER_PROFILE_POLICY.authenticatedTaskMode,
+  }
+}
+
+const browserPolicySummary = computed(() => {
+  const policy = normalizedBrowserPolicy(selectedAgent.value?.browserProfilePolicy)
+  const label = mode => mode === 'headed' ? t.value.browserModeHeaded : t.value.browserModeHeadless
+  return [
+    `${t.value.browserPolicyExistingShort}: ${label(policy.existingProfileMode)}`,
+    `${t.value.browserPolicyLoginShort}: ${label(policy.interactiveLoginMode)}`,
+    `${t.value.browserPolicyTaskShort}: ${label(policy.authenticatedTaskMode)}`,
+  ].join(' · ')
+})
+
+function openBrowserPolicyModal() {
+  browserPolicyDraft.value = normalizedBrowserPolicy(selectedAgent.value?.browserProfilePolicy)
+  showBrowserPolicyModal.value = true
+  loadManagedProfiles()
+}
+
+function useRecommendedBrowserPolicy() {
+  browserPolicyDraft.value = { ...RECOMMENDED_BROWSER_PROFILE_POLICY }
+}
+
+async function saveBrowserPolicy() {
+  if (!selectedAgent.value || browserPolicySaving.value) return
+  browserPolicySaving.value = true
+  const agentId = selectedAgent.value.id
+  const previous = selectedAgent.value.browserProfilePolicy
+  selectedAgent.value.browserProfilePolicy = normalizedBrowserPolicy(browserPolicyDraft.value)
+  try {
+    const saved = await persistAgentChange(selectedAgent.value)
+    if (saved) {
+      showBrowserPolicyModal.value = false
+      pushToast('success', t.value.browserPolicySaved)
+      if (agentId === activeAgentId.value) {
+        try {
+          await restartAgent()
+        } catch (error) {
+          pushToast('error', t.value.toastExtensionError.replace('{error}', String(error)))
+        }
+      }
+    } else {
+      selectedAgent.value.browserProfilePolicy = previous
+      pushToast('error', t.value.browserPolicySaveFailed)
+    }
+  } finally {
+    browserPolicySaving.value = false
+  }
+}
+
+const builtinBusy = ref('')
+const builtinStatusMap = computed(() => {
+  const map = {}
+  const agentId = selectedAgent.value?.id || ''
+  const list = extensionSnapshot.value?.builtins?.[agentId] || []
+  for (const s of list) map[s.key] = s
+  return map
+})
+function builtinStatus(key) {
+  return builtinStatusMap.value[key] || null
+}
+const rtkStatus = computed(() => {
+  const agentId = selectedAgent.value?.id || ''
+  return (extensionSnapshot.value?.recommended?.[agentId] || []).find(tool => tool.key === 'rtk') || null
+})
+const recommendedExtensions = computed(() => {
+  const agentId = selectedAgent.value?.id || ''
+  return extensionSnapshot.value?.recommended?.[agentId] || []
+})
+const installedPackages = computed(() => {
+  const agentId = selectedAgent.value?.id || ''
+  const managedPaths = new Set(
+    recommendedExtensions.value
+      .map(status => status.sourcePath)
+      .filter(Boolean),
+  )
+  return (extensionSnapshot.value?.packages?.[agentId] || [])
+    .filter(status => !status.sourcePath || !managedPaths.has(status.sourcePath))
+})
+const browserStatus = computed(() => {
+  return recommendedExtensions.value.find(tool => tool.key === 'browser-native') || null
+})
+const browserRuntimeStatus = computed(() => {
+  return (extensionSnapshot.value?.tools || []).find(tool => tool.key === 'agent-browser') || null
+})
+// Playwright 是全局插件：安装/更新在主菜单“插件”页完成，这里只读取版本用于展示。
+const playwrightStatus = computed(() => {
+  return (extensionSnapshot.value?.tools || []).find(tool => tool.key === 'playwright') || null
+})
+const piFigmaStatus = computed(() => {
+  return recommendedExtensions.value.find(tool => tool.key === 'figma') || null
+})
+async function installBrowserNative() {
+  if (!selectedAgent.value || extensionBusy.value === 'browser-install') return
+  if (!browserRuntimeStatus.value?.installed) {
+    pushToast('error', t.value.browserRuntimeMissing)
+    return
+  }
+  await installAgentExtension(selectedAgent.value.id, 'pi install npm:pi-agent-browser-native')
+}
+async function uninstallBrowserNative() {
+  if (!selectedAgent.value || extensionBusy.value === 'browser-install') return
+  await uninstallAgentExtension(selectedAgent.value.id, 'browser-native')
+}
+// 推荐/内置扩展按钮：未装入时直接安装；已装入时弹出二次确认再移除
+function onExtensionToggle(group, key, installed, name) {
+  if (installed) requestDeleteExtension({ type: 'toggle', group, key, name })
+  else toggleAgentExtension(group, key)
+}
+// 浏览器原生按钮：未安装时直接安装；已安装时弹出二次确认再移除
+function onBrowserToggle(installed) {
+  if (installed) requestDeleteExtension({ type: 'browser', name: browserStatus.value?.name || t.value.browserNative })
+  else installBrowserNative()
+}
+async function installPiFigma() {
+  if (!selectedAgent.value || extensionBusy.value === 'figma-agent-install') return
+  if (!figma.value.installed) {
+    pushToast('error', t.value.piFigmaGlobalMissing)
+    return
+  }
+  if (!figma.value.hasToken) {
+    pushToast('error', t.value.piFigmaAuthorizationMissing)
+    return
+  }
+  const result = await installAgentExtension(
+    selectedAgent.value.id,
+    'pi install npm:pi-mcp-adapter',
+    { busyKey: 'figma-agent-install', name: t.value.piFigma },
+  )
+  if (result?.success === true) await toggleAgentExtension('recommended', 'figma', true)
+}
+function onPiFigmaToggle(installed) {
+  if (installed) requestDeleteExtension({ type: 'toggle', group: 'recommended', key: 'figma', name: t.value.piFigma })
+  else installPiFigma()
+}
+
+// 安装扩展：弹窗输入完整安装命令，安装到当前 agent 的数据目录
+const showInstallModal = ref(false)
+const installCommand = ref('')
+const installing = ref(false)
+const installOutput = ref('')
+function openInstallModal() {
+  installCommand.value = ''
+  installOutput.value = ''
+  showInstallModal.value = true
+}
+async function runInstallCommand() {
+  if (!selectedAgent.value || !installCommand.value.trim()) return
+  installing.value = true
+  installOutput.value = ''
+  try {
+    const res = await installAgentExtension(selectedAgent.value.id, installCommand.value.trim())
+    installOutput.value = res?.output || res?.message || ''
+    if (res?.success) showInstallModal.value = false
+  } catch (err) {
+    installOutput.value = String(err)
+  } finally {
+    installing.value = false
+  }
+}
+async function updateBuiltinTool(key) {
+  if (!selectedAgent.value || builtinBusy.value) return
+  builtinBusy.value = key
+  try {
+    await persistAgentChange(selectedAgent.value)
+    await refreshAgentExtensions(selectedAgent.value.id)
+  } finally {
+    builtinBusy.value = ''
+  }
+}
+const extensionsBusy = ref(false)
+async function reloadExtensions() {
+  if (extensionsBusy.value) return
+  extensionsBusy.value = true
+  try {
+    await refreshAgentExtensions(selectedAgent.value?.id)
+  } finally {
+    extensionsBusy.value = false
+  }
+}
+
+
+// --- Prompt (AGENTS.md) ---
+const promptContent = ref('')
+const promptBusy = ref(false)
+const promptLoading = ref(false)
+const promptSaved = ref(false)
+const PROMPT_FILE = 'AGENTS.md'
+let promptLoadRequest = 0
+
+async function loadPrompt(agentId = selectedAgent.value?.id) {
+  if (!agentId) {
+    promptContent.value = ''
+    return
+  }
+  const request = ++promptLoadRequest
+  promptLoading.value = true
+  promptSaved.value = false
+  try {
+    const content = await readAgentFile(agentId, PROMPT_FILE)
+    if (request === promptLoadRequest && selectedAgent.value?.id === agentId) {
+      promptContent.value = content
+    }
+  } catch (err) {
+    if (request === promptLoadRequest && selectedAgent.value?.id === agentId) {
+      promptContent.value = ''
+    }
+  } finally {
+    if (request === promptLoadRequest) promptLoading.value = false
+  }
+}
+function onTabChange(tab) {
+  activeTab.value = tab
+  if (tab === 'prompt') loadPrompt()
+}
+async function savePrompt() {
+  if (!selectedAgent.value || promptBusy.value) return
+  promptBusy.value = true
+  promptSaved.value = false
+  try {
+    await writeAgentFile(selectedAgent.value.id, PROMPT_FILE, promptContent.value)
+    promptSaved.value = true
+    setTimeout(() => { promptSaved.value = false }, 2600)
+  } catch (err) {
+    pushToast('error', t.agentPromptSaveFailed.replace('{error}', String(err)))
+  } finally {
+    promptBusy.value = false
+  }
+}
+
+// 管理已有 Browser Profile 连接：列出当前 Agent 的持久浏览器连接，可重命名/删除。
+// 该列表直接展示在「配置」弹窗（browserPolicyModal）内，不再单独弹窗。
+const profileManageLoading = ref(false)
+const managedProfiles = ref([])
+const profileDeleteTarget = ref(null)
+const profileDeleting = ref(false)
+
+async function loadManagedProfiles() {
+  if (!selectedAgent.value) return
+  profileManageLoading.value = true
+  try {
+    const list = await listBrowserProfiles('')
+    managedProfiles.value = list || []
+  } catch (e) {
+    managedProfiles.value = []
+    pushToast('error', t.browserProfileManageLoadFailed.replace('{error}', String(e)))
+  } finally {
+    profileManageLoading.value = false
+  }
+}
+
+async function confirmDeleteBrowserProfile() {
+  const target = profileDeleteTarget.value
+  if (!target || profileDeleting.value || !selectedAgent.value) return
+  profileDeleting.value = true
+  try {
+    await deleteBrowserProfile(target.id)
+    managedProfiles.value = managedProfiles.value.filter(p => p.id !== target.id)
+    profileDeleteTarget.value = null
+    pushToast('success', t.browserProfileDeleteSuccess)
+  } catch (e) {
+    pushToast('error', t.browserProfileDeleteFailed.replace('{error}', String(e)))
+  } finally {
+    profileDeleting.value = false
+  }
+}
+
+// 重命名 Browser Profile 连接的显示名称
+const profileRenameTarget = ref(null)
+const renameName = ref('')
+const profileRenaming = ref(false)
+
+function openRenameDialog(profile) {
+  profileRenameTarget.value = profile
+  renameName.value = profile.name || profile.id || ''
+}
+function closeRenameDialog() {
+  profileRenameTarget.value = null
+  renameName.value = ''
+}
+async function confirmRenameBrowserProfile() {
+  const target = profileRenameTarget.value
+  const newName = renameName.value.trim()
+  if (!target || !newName || profileRenaming.value || !selectedAgent.value) return
+  profileRenaming.value = true
+  try {
+    await renameBrowserProfile(target.id, newName)
+    const idx = managedProfiles.value.findIndex(p => p.id === target.id)
+    if (idx !== -1) {
+      managedProfiles.value[idx] = { ...managedProfiles.value[idx], name: newName, updatedAt: new Date().toISOString() }
+    }
+    pushToast('success', t.browserProfileRenameSuccess)
+    closeRenameDialog()
+  } catch (e) {
+    pushToast('error', t.browserProfileRenameFailed.replace('{error}', String(e)))
+  } finally {
+    profileRenaming.value = false
+  }
+}
+
+// 顶部下拉切换正在配置的 Agent：复用 openAgentConfig 设置 editingAgentId 并切到配置页
+function switchAgent(agentId) {
+  const agent = agentList.value.find(a => a.id === agentId)
+  if (agent) openAgentConfig(agent)
+}
+
+// 切换正在配置的 Agent 时，刷新所有 tab 的数据（扩展/技能/提示词），
+// 否则切换后整页仍停留在上一个智能体的配置。
+watch(
+  () => selectedAgent.value?.id,
+  (id) => {
+    showBrowserPolicyModal.value = false
+    if (!id) return
+    void refreshAgentExtensions(id)
+    if (activeTab.value === 'prompt') loadPrompt(id)
+    else if (activeTab.value === 'skills') refreshSkills()
+  },
+  { immediate: true }
+)
+</script>
+
+<template>
+<section class="content-page agent-config-page">
+  <div class="page-heading">
+      <div class="page-heading__back">
+        <button class="icon-button" :title="t.back" @click="backToAgentList"><ArrowLeft :size="16" /></button>
+        <div class="agent-config-avatar">
+          <span v-if="agentAvatar(selectedAgent)" class="agent-config-avatar__emoji">{{ agentAvatar(selectedAgent) }}</span>
+          <Bot v-else :size="20" />
+        </div>
+        <div class="agent-config-title">
+          <select
+            class="agent-config-switcher"
+            :value="selectedAgent ? selectedAgent.id : ''"
+            :title="t.agentSwitchTitle || '切换 Agent'"
+            @change="switchAgent($event.target.value)"
+          >
+            <option v-for="agent in agentList" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
+          </select>
+          <p>{{ t.agentConfigIntro }}</p>
+        </div>
+      </div>
+    <button class="icon-button page-refresh" :title="t.refresh" :disabled="extensionsBusy" @click="reloadExtensions">
+      <RefreshCw v-if="extensionsBusy" class="spin" :size="15" /><RefreshCw v-else :size="15" />
+    </button>
+  </div>
+
+  <div v-if="!selectedAgent" class="agent-runtime-state">
+    <Bot :size="28" />
+    <strong>{{ t.agentNotFound }}</strong>
+    <button class="secondary-button" @click="backToAgentList"><ArrowLeft :size="14" />{{ t.back }}</button>
+  </div>
+
+  <div v-else class="agent-view agent-view--tabs">
+    <nav class="agent-config-tabs" aria-label="agent config sections">
+      <button :class="{ active: activeTab === 'basics' }" @click="onTabChange('basics')">
+        <Settings :size="15" />{{ t.agentTabBasics }}
+      </button>
+      <button :class="{ active: activeTab === 'extensions' }" @click="onTabChange('extensions')">
+        <Zap :size="15" />{{ t.agentTabExtensions }}
+      </button>
+      <button :class="{ active: activeTab === 'prompt' }" @click="onTabChange('prompt')">
+        <FileText :size="15" />{{ t.agentTabPrompt }}
+      </button>
+      <button :class="{ active: activeTab === 'security' }" @click="onTabChange('security')">
+        <Shield :size="15" />{{ t.agentTabSecurity }}
+      </button>
+      <button :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'">
+        <Sparkles :size="15" />{{ t.agentTabSkills }}
+      </button>
+    </nav>
+
+    <div class="agent-config-panel">
+      <section v-if="activeTab === 'basics'" class="agent-view__meta-block">
+        <div class="agent-view__meta-row">
+          <label>{{ t.agentName }}</label>
+          <input v-model="selectedAgent.name" @change="persistAgentChange(selectedAgent)" />
+        </div>
+        <div class="agent-view__meta-row">
+          <label>{{ t.agentDefault }}</label>
+          <label class="agent-basics-default-toggle">
+            <span class="switch">
+              <input
+                type="checkbox"
+                :checked="selectedAgent.id === defaultAgentId"
+                :disabled="selectedAgent.id === defaultAgentId"
+                @change="setDefaultAgent(selectedAgent, $event.target.checked)"
+              />
+              <span class="switch__track"></span>
+            </span>
+            <span>{{ selectedAgent.id === defaultAgentId ? t.agentDefaultEnabled : t.agentDefaultHint }}</span>
+          </label>
+        </div>
+        <div class="agent-view__meta-row">
+          <label>{{ t.agentDescription }}</label>
+          <input v-model="selectedAgent.description" @change="persistAgentChange(selectedAgent)" :placeholder="t.agentNoDescription" />
+        </div>
+        <div class="agent-view__meta-row agent-view__meta-row--avatar">
+          <label>{{ t.agentAvatar }}</label>
+          <div class="agent-avatar-picker">
+            <div class="agent-avatar-picker__presets">
+              <button
+                v-for="emoji in avatarPresets"
+                :key="emoji"
+                type="button"
+                class="agent-avatar-picker__preset"
+                :class="{ 'agent-avatar-picker__preset--active': selectedAgent.avatar === emoji }"
+                :title="emoji"
+                @click="selectAvatar(emoji)"
+              >{{ emoji }}</button>
+              <button
+                type="button"
+                class="agent-avatar-picker__preset agent-avatar-picker__preset--clear"
+                :title="t.agentAvatarClear"
+                @click="selectAvatar('')"
+              >{{ selectedAgent.avatar ? '×' : '—' }}</button>
+            </div>
+            <input
+              class="agent-avatar-picker__custom"
+              :value="selectedAgent.avatar"
+              maxlength="2"
+              :placeholder="t.agentAvatarClear"
+              @input="selectAvatar($event.target.value)"
+            />
+            <small>{{ t.agentAvatarHint }}</small>
+          </div>
+        </div>
+        <div class="agent-view__meta-row">
+          <label>{{ t.agentDefaultModel }}</label>
+          <select v-model="selectedDefaultModel" @change="saveAgentRuntimeConfig">
+            <option v-for="option in modelOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+          <small>{{ t.agentDefaultModelHint }}</small>
+        </div>
+        <div class="agent-view__meta-row">
+          <label>{{ t.agentSubagents }}</label>
+          <div v-if="availableSubagents.length" class="agent-subagent-list">
+            <label v-for="agent in availableSubagents" :key="agent.id" class="agent-subagent-option" :title="subagentTooltip(agent)">
+              <input type="checkbox" :checked="subagentEnabled(agent.id)" @change="toggleSubagent(agent.id)" />
+              <span class="agent-subagent-option__avatar">
+                <span v-if="agentAvatar(agent)" class="agent-subagent-option__emoji">{{ agentAvatar(agent) }}</span>
+                <Bot v-else :size="14" />
+              </span>
+              <span class="agent-subagent-option__name">{{ agent.name }}</span>
+            </label>
+          </div>
+          <small v-else>{{ t.agentSubagentsEmpty }}</small>
+        </div>
+        <div class="agent-view__meta-row agent-view__meta-row--top">
+          <label>{{ t.agentPiTools }}</label>
+          <div class="agent-pi-tool-list">
+            <label v-for="tool in ['read', 'bash', 'edit', 'write']" :key="tool" class="agent-pi-tool-option">
+              <input type="checkbox" :checked="selectedAgent?.piTools?.[tool] !== false" @change="togglePiTool(tool)" />
+              <span>
+                <strong>{{ tool }}</strong>
+                <small>{{ t.piDefaultTool }}</small>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div class="agent-view__meta-row">
+          <label>{{ t.agentDataDir }}</label>
+          <div class="agent-view__dir-pick">
+            <code>{{ selectedAgent.dataDir || t.agentDataDirDefault }}</code>
+            <button class="secondary-button compact" @click="pickAgentDataDir">{{ t.choose }}</button>
+          </div>
+        </div>
+      </section>
+
+      <div v-else-if="activeTab === 'extensions'" class="agent-extensions">
+        <div v-if="extensionLoading" class="agent-extensions__loading" role="status" aria-label="检查中…">
+          <RefreshCw class="spin" :size="20" />
+          <span>{{ t.checking }}</span>
+        </div>
+        <template v-else>
+        <div class="plugin-section recommended">
+          <div class="plugin-section__title">
+            <span class="plugin-section__title-left">
+              <span>{{ t.recommendedExtensions }}</span>
+              <small>{{ t.recommendedExtensionsHint }}</small>
+            </span>
+            <button class="secondary-button compact install-ext-trigger" @click="openInstallModal">+ {{ t.installExtension }}</button>
+          </div>
+          <div class="agent-ext-grid">
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('rtk')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>RTK</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.rtkDescription }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': rtkStatus && !rtkStatus.installed }">{{ !rtkStatus || !rtkStatus.installed ? t.rtkBinaryMissing : (rtkStatus.version || t.installed) }}</span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.recommended?.rtk }" :disabled="!rtkStatus?.installed && !selectedAgent?.recommended?.rtk" @click="onExtensionToggle('recommended', 'rtk', selectedAgent?.recommended?.rtk, 'RTK')"><span class="btn-install__install">{{ t.enable }}</span><span class="btn-install__delete">{{ t.delete }}</span></button>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('browser-native')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.browserNative }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.browserNativeDescription }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': browserStatus && !browserStatus.installed }">{{ !browserStatus || !browserStatus.installed ? t.notInstalled : (browserStatus.version || t.installed) }}</span>
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !browserRuntimeStatus?.installed }">{{ t.globalBrowserRuntime }}：{{ browserRuntimeStatus?.installed ? (browserRuntimeStatus.version || t.installed) : t.notInstalled }}</span>
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !playwrightStatus?.installed }">Playwright：{{ playwrightStatus?.installed ? (playwrightStatus.version || t.installed) : t.notInstalled }}</span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <template v-if="extensionLoading">
+                  <span class="pw-loading"><RefreshCw class="spin" :size="13" />{{ t.checking }}</span>
+                </template>
+                <template v-else>
+                  <button class="btn-install" :class="{ 'is-installed': browserStatus && browserStatus.installed }" :disabled="extensionBusy === 'browser-install'" @click="onBrowserToggle(browserStatus && browserStatus.installed)">
+                    <RefreshCw v-if="extensionBusy === 'browser-install'" class="spin" :size="13" />
+                    <span class="btn-install__install">{{ t.runInstall }}</span>
+                    <span class="btn-install__delete">{{ t.delete }}</span>
+                  </button>
+                </template>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('figma')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.piFigma }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.piFigmaDescription }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !figma.installed || !figma.hasToken }">
+                    {{ !figma.installed ? t.piFigmaNeedsGlobal : (!figma.hasToken ? t.figmaNotAuthorized : (piFigmaStatus?.installed ? (piFigmaStatus.version || t.installed) : t.notInstalled)) }}
+                  </span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button
+                  class="btn-install"
+                  :class="{ 'is-installed': piFigmaStatus?.installed }"
+                  :disabled="extensionBusy === 'figma-agent-install'"
+                  @click="onPiFigmaToggle(!!piFigmaStatus?.installed)"
+                >
+                  <RefreshCw v-if="extensionBusy === 'figma-agent-install'" class="spin" :size="13" />
+                  <span class="btn-install__install">{{ t.runInstall }}</span>
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div v-if="installedPackages.length" class="plugin-section installed">
+          <div class="plugin-section__title"><span>{{ t.installedExtensions }}</span></div>
+          <div class="agent-ext-grid">
+            <article v-for="extension in installedPackages" :key="extension.key" class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon(extension.key)" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ extension.name || extension.key }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ extension.description || extension.key }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !extension.installed }">
+                    {{ extension.installed ? (extension.version || t.installed) : t.notInstalled }}
+                  </span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button
+                  class="btn-install is-installed"
+                  :disabled="extensionDeleteBusy"
+                  @click="requestDeleteExtension({ type: 'package', key: extension.key, name: extension.name || extension.key })"
+                >
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="plugin-section builtins">
+          <div class="plugin-section__title"><span>{{ t.builtinTools }}</span><small>{{ t.extensionGroupHint }}</small></div>
+          <div class="agent-ext-grid">
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('subagent')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head"><h3>{{ t.subagentTool }}</h3></header>
+                <p class="agent-ext-row__description">{{ t.subagentToolDescription }}</p>
+                <div v-if="builtinStatus('subagent')" class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version agent-ext-row__version--latest">v{{ builtinStatus('subagent').currentVersion }}</span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.subagent }" @click="onExtensionToggle('builtin', 'subagent', selectedAgent?.builtin?.subagent, t.subagentTool)">
+                  <span class="btn-install__install">{{ t.runInstall }}</span>
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('document')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.documentTool }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.documentToolDescription }}</p>
+                <div v-if="builtinStatus('document')" class="agent-ext-row__meta">
+                  <span v-if="builtinStatus('document').installed && builtinStatus('document').installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ builtinStatus('document').installedVersion }}</span>
+                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ builtinStatus('document').currentVersion }}</span>
+                  <button v-if="builtinStatus('document').installed && builtinStatus('document').installedVersion && builtinStatus('document').installedVersion !== builtinStatus('document').currentVersion" class="primary-button compact" :disabled="builtinBusy === 'document'" @click="updateBuiltinTool('document')"><RefreshCw v-if="builtinBusy === 'document'" :size="13" />{{ t.updateBuiltin }}</button>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.document }" @click="onExtensionToggle('builtin', 'document', selectedAgent?.builtin?.document, t.documentTool)"><span class="btn-install__install">{{ t.runInstall }}</span><span class="btn-install__delete">{{ t.delete }}</span></button>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('plan')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.planTool }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.planToolDescription }}</p>
+                <div v-if="builtinStatus('plan')" class="agent-ext-row__meta">
+                  <span v-if="builtinStatus('plan').installed && builtinStatus('plan').installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ builtinStatus('plan').installedVersion }}</span>
+                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ builtinStatus('plan').currentVersion }}</span>
+                  <button v-if="builtinStatus('plan').installed && builtinStatus('plan').installedVersion && builtinStatus('plan').installedVersion !== builtinStatus('plan').currentVersion" class="primary-button compact" :disabled="builtinBusy === 'plan'" @click="updateBuiltinTool('plan')"><RefreshCw v-if="builtinBusy === 'plan'" :size="13" />{{ t.updateBuiltin }}</button>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.plan }" @click="onExtensionToggle('builtin', 'plan', selectedAgent?.builtin?.plan, t.planTool)"><span class="btn-install__install">{{ t.runInstall }}</span><span class="btn-install__delete">{{ t.delete }}</span></button>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('browser-profile')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.browserProfile }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.browserProfileDescription }}</p>
+                <p class="browser-policy-summary">{{ browserPolicySummary }}</p>
+                <div v-if="builtinStatus('browser-profile')" class="agent-ext-row__meta">
+                  <span v-if="builtinStatus('browser-profile').installed && builtinStatus('browser-profile').installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ builtinStatus('browser-profile').installedVersion }}</span>
+                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ builtinStatus('browser-profile').currentVersion }}</span>
+                  <button v-if="builtinStatus('browser-profile').installed && builtinStatus('browser-profile').installedVersion && builtinStatus('browser-profile').installedVersion !== builtinStatus('browser-profile').currentVersion" class="primary-button compact" :disabled="builtinBusy === 'browser-profile'" @click="updateBuiltinTool('browser-profile')"><RefreshCw v-if="builtinBusy === 'browser-profile'" :size="13" />{{ t.updateBuiltin }}</button>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="secondary-button compact browser-policy-button" :title="t.browserPolicyTitle" @click="openBrowserPolicyModal">
+                  <Settings :size="13" />{{ t.configure }}
+                </button>
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.['browser-profile'] }" @click="onExtensionToggle('builtin', 'browser-profile', selectedAgent?.builtin?.['browser-profile'], t.browserProfile)">
+                  <span class="btn-install__install">{{ t.runInstall }}</span>
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+          </div>
+        </div>
+        </template>
+      </div>
+
+      <InstallDialog
+        v-if="showInstallModal"
+        mode="command"
+        :title="t.installExtension"
+        :hint="t.installExtensionHint"
+        :command="installCommand"
+        :command-placeholder="t.installCommandPlaceholder"
+        :running="installing"
+        :run-text="t.runInstall"
+        :log="installOutput ? [installOutput] : []"
+        @update:command="installCommand = $event"
+        @run="runInstallCommand"
+        @close="showInstallModal = false"
+      />
+
+      <section v-else-if="activeTab === 'prompt'" class="agent-prompt">
+        <div class="agent-prompt__head">
+          <div>
+            <h2>{{ t.agentPromptTitle }}</h2>
+            <p>{{ t.agentPromptIntro }}</p>
+          </div>
+          <code class="agent-prompt__file">{{ t.agentPromptFile }}</code>
+        </div>
+        <div v-if="promptLoading" class="agent-prompt__loading">{{ t.agentPromptLoading }}</div>
+        <textarea
+          v-else
+          v-model="promptContent"
+          class="agent-prompt__editor"
+          :placeholder="t.agentPromptPlaceholder"
+          spellcheck="false"
+        ></textarea>
+        <div class="agent-prompt__actions">
+          <span v-if="promptSaved" class="agent-prompt__saved"><Check :size="14" />{{ t.agentPromptSaved }}</span>
+          <button class="primary-button" :disabled="promptBusy || promptLoading" @click="savePrompt">
+            <RefreshCw v-if="promptBusy" class="spin" :size="14" />{{ t.agentPromptSave }}
+          </button>
+        </div>
+      </section>
+
+      <section v-else-if="activeTab === 'security'" class="agent-security">
+        <div class="agent-security__empty">
+          <Shield :size="28" />
+          <strong>{{ t.agentSecurityComingSoonTitle }}</strong>
+          <p>{{ t.agentSecurityComingSoonIntro }}</p>
+        </div>
+      </section>
+
+      <section v-else-if="activeTab === 'skills'" class="agent-skills-tab">
+        <div class="agent-skills-tab__head">
+          <div>
+            <h2>{{ t.agentTabSkills }}</h2>
+            <p>{{ t.agentSkillsIntro }}</p>
+          </div>
+          <button class="secondary-button compact" :disabled="skillsLoading" @click="refreshSkills">
+            <RefreshCw :size="14" :class="{ spin: skillsLoading }" />{{ t.refresh }}
+          </button>
+        </div>
+        <div v-if="!agentSkills.length" class="agent-skills-empty">
+          <Sparkles :size="26" />
+          <strong>{{ t.agentSkillsEmpty || '该 Agent 还没有分配 Skill' }}</strong>
+          <p>{{ t.agentSkillsEmptyHint || '在「Skill 管理」页面安装并分配给本 Agent 后，会在此显示。' }}</p>
+        </div>
+        <ul v-else class="agent-skills-list">
+          <li v-for="skill in agentSkills" :key="skill.id" class="agent-skill-item">
+            <div class="agent-skill-item__icon"><Sparkles :size="16" /></div>
+            <SkillCard :skill="skill" />
+            <div class="agent-skill-item__meta">
+              <span class="agent-skill-badge" :class="skill.loadMode === 'skills_list' ? 'badge--list' : 'badge--startup'">{{ skill.loadMode === 'skills_list' ? (t.agentSkillListMode || '按需加载') : (t.agentSkillStartup || '随启动加载') }}</span>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+      <div v-if="showBrowserPolicyModal" class="modal-backdrop" @click.self="showBrowserPolicyModal = false">
+        <div class="agent-editor-dialog browser-policy-dialog">
+          <header class="agent-editor-dialog__head">
+            <h2>{{ t.browserPolicyTitle }}</h2>
+            <button class="icon-button" :title="t.closeDialog" @click="showBrowserPolicyModal = false"><X :size="16" /></button>
+          </header>
+          <div class="agent-editor-dialog__body">
+            <p class="browser-policy-intro">{{ t.browserPolicyIntro }}</p>
+            <div class="browser-policy-list">
+              <label class="browser-policy-row">
+                <span>
+                  <strong>{{ t.browserPolicyExisting }}</strong>
+                  <small>{{ t.browserPolicyExistingHint }}</small>
+                </span>
+                <select v-model="browserPolicyDraft.existingProfileMode">
+                  <option value="headless">{{ t.browserModeHeadless }}（{{ t.browserPolicyRecommended }}）</option>
+                  <option value="headed">{{ t.browserModeHeaded }}</option>
+                </select>
+              </label>
+              <label class="browser-policy-row">
+                <span>
+                  <strong>{{ t.browserPolicyLogin }}</strong>
+                  <small>{{ t.browserPolicyLoginHint }}</small>
+                </span>
+                <select v-model="browserPolicyDraft.interactiveLoginMode">
+                  <option value="headed">{{ t.browserModeHeaded }}（{{ t.browserPolicyRecommended }}）</option>
+                  <option value="headless">{{ t.browserModeHeadless }}</option>
+                </select>
+              </label>
+              <label class="browser-policy-row">
+                <span>
+                  <strong>{{ t.browserPolicyTask }}</strong>
+                  <small>{{ t.browserPolicyTaskHint }}</small>
+                </span>
+                <select v-model="browserPolicyDraft.authenticatedTaskMode">
+                  <option value="headless">{{ t.browserModeHeadless }}（{{ t.browserPolicyRecommended }}）</option>
+                  <option value="headed">{{ t.browserModeHeaded }}</option>
+                </select>
+              </label>
+            </div>
+            <div class="browser-profile-manage-inline">
+              <h3 class="browser-profile-manage-inline__title">{{ t.browserProfileManageTitle }}</h3>
+              <p v-if="profileManageLoading" class="browser-profile-manage-empty">{{ t.browserProfileManageLoading }}</p>
+              <p v-else-if="!managedProfiles.length" class="browser-profile-manage-empty">{{ t.browserProfileManageEmpty }}</p>
+              <div v-else class="agent-ext-grid browser-profile-manage-list">
+                <article v-for="profile in managedProfiles" :key="profile.id" class="agent-ext-row">
+                  <span class="agent-ext-row__icon"><Globe2 /></span>
+                  <div class="agent-ext-row__body">
+                    <header class="agent-ext-row__head">
+                      <h3>{{ profile.name || profile.id }}</h3>
+                      <small v-if="profile.loginUrl || (profile.origins && profile.origins.length)">{{ profile.loginUrl || profile.origins.join(', ') }}</small>
+                    </header>
+                    <div v-if="profile.credentialConfigured" class="agent-ext-row__meta">
+                      <span class="browser-profile-tag">{{ t.browserProfileSavedCredential }}</span>
+                    </div>
+                  </div>
+                  <div class="agent-ext-row__actions">
+                    <button class="secondary-button" :disabled="profileRenaming" @click="openRenameDialog(profile)"><Pencil :size="14" />{{ t.rename }}</button>
+                    <button class="danger-button" :disabled="profileDeleting || profileRenaming" @click="profileDeleteTarget = profile"><Trash2 :size="14" />{{ t.delete }}</button>
+                  </div>
+                </article>
+              </div>
+            </div>
+          </div>
+          <footer class="agent-editor-dialog__footer browser-policy-footer">
+            <button class="secondary-button" :disabled="browserPolicySaving" @click="useRecommendedBrowserPolicy">{{ t.browserPolicyUseRecommended }}</button>
+            <span class="browser-policy-footer__spacer"></span>
+            <button class="secondary-button" :disabled="browserPolicySaving" @click="showBrowserPolicyModal = false">{{ t.cancel }}</button>
+            <button class="primary-button" :disabled="browserPolicySaving" @click="saveBrowserPolicy">
+              <RefreshCw v-if="browserPolicySaving" class="spin" :size="13" />{{ t.saveItem }}
+            </button>
+          </footer>
+        </div>
+      </div>
+
+      <div v-if="profileDeleteTarget" class="modal-backdrop" @click.self="profileDeleteTarget = null">
+        <div class="agent-editor-dialog browser-profile-delete-dialog">
+          <header class="agent-editor-dialog__head">
+            <h2>{{ t.browserProfileManageTitle }}</h2>
+            <button class="icon-button" :title="t.closeDialog" @click="profileDeleteTarget = null"><X :size="16" /></button>
+          </header>
+          <div class="agent-editor-dialog__body">
+            <p class="browser-profile-delete-confirm">{{ t.browserProfileDeleteConfirm.replace('{name}', profileDeleteTarget.name || profileDeleteTarget.id) }}</p>
+          </div>
+          <footer class="agent-editor-dialog__footer">
+            <button class="secondary-button" :disabled="profileDeleting" @click="profileDeleteTarget = null">{{ t.cancel }}</button>
+            <button class="primary-button danger" :disabled="profileDeleting" @click="confirmDeleteBrowserProfile">
+              <Trash2 v-if="!profileDeleting" :size="13" /><RefreshCw v-else class="spin" :size="13" />{{ profileDeleting ? t.browserProfileDeleteBusy : t.delete }}
+            </button>
+          </footer>
+        </div>
+      </div>
+
+      <div v-if="profileRenameTarget" class="modal-backdrop" @click.self="closeRenameDialog">
+        <div class="agent-editor-dialog browser-profile-rename-dialog">
+          <header class="agent-editor-dialog__head">
+            <h2>{{ t.browserProfileRenameTitle }}</h2>
+            <button class="icon-button" :title="t.closeDialog" @click="closeRenameDialog"><X :size="16" /></button>
+          </header>
+          <div class="agent-editor-dialog__body">
+            <form class="browser-profile-form" @submit.prevent="confirmRenameBrowserProfile">
+              <label>
+                {{ t.browserProfileRenameName }}
+                <input v-model="renameName" :placeholder="profileRenameTarget?.name || profileRenameTarget?.id" maxlength="64" autofocus />
+              </label>
+            </form>
+          </div>
+          <footer class="agent-editor-dialog__footer">
+            <button class="secondary-button" :disabled="profileRenaming" @click="closeRenameDialog">{{ t.cancel }}</button>
+            <button class="primary-button" :disabled="profileRenaming || !renameName.trim()" @click="confirmRenameBrowserProfile">
+              <RefreshCw v-if="profileRenaming" class="spin" :size="13" />{{ profileRenaming ? t.browserProfileRenameBusy : t.rename }}
+            </button>
+          </footer>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+</template>

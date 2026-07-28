@@ -1,0 +1,8 @@
+{
+  "name": "Document",
+  "version": "1.0.0",
+  "tool_name": "codingto_document",
+  "description": "解析、创建和分发文档：读取、搜索、解析 PDF/DOCX/XLSX/CSV/文本/图片；可创建 zip/pdf/xlsx/md/docx 文件；可生成对话内可下载文件列表。",
+  "tool_description": "Inspect, search and read local documents and images; create zip/pdf/xlsx/md/docx files; and produce a downloadable file list rendered in the chat.",
+  "actions": ["inspect","read","search","sheet","image","preview","create","download_list"]
+}

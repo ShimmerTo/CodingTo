@@ -1,0 +1,38 @@
+version: '3'
+
+vars:
+  APP_NAME: "CodingTo"
+  BIN_DIR: "bin"
+  PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
+  VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
+  GOOS: '{{.GOOS | default OS}}'
+
+includes:
+  common: ./build/Taskfile.yml
+  windows: ./build/windows/Taskfile.yml
+  darwin: ./build/darwin/Taskfile.yml
+  linux: ./build/linux/Taskfile.yml
+
+tasks:
+  build:
+    summary: Builds CodingTo for the current or selected platform
+    cmds:
+      - task: "{{.GOOS}}:build"
+
+  package:
+    summary: Packages CodingTo for the current or selected platform
+    cmds:
+      - task: "{{.GOOS}}:package"
+
+  run:
+    summary: Runs CodingTo
+    cmds:
+      - task: "{{.GOOS}}:run"
+
+  dev:
+    deps:
+      - task: common:build:document-bridge
+      - task: common:build:subagent-bridge
+    summary: Runs CodingTo in development mode
+    cmds:
+      - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}

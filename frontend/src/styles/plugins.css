@@ -1,0 +1,36 @@
+.plugin-notice { position: relative; display: flex; flex-direction: column; gap: 7px; margin: -12px 0 18px; padding: 11px 38px 11px 13px; border: 1px solid #b9dfca; border-radius: 8px; color: #337b55; background: #edf8f2; font-size: 13px; }
+.plugin-notice.error { border-color: rgba(209,75,66,.3); color: var(--danger); background: rgba(209,75,66,.07); }
+.plugin-notice code, .plugin-notice pre { margin: 0; overflow: auto; white-space: pre-wrap; font: 12px "SFMono-Regular", Consolas, monospace; }
+.plugin-notice button { position: absolute; top: 8px; right: 8px; border: 0; color: inherit; background: transparent; cursor: pointer; }
+:root[data-theme="dark"] .plugin-notice:not(.error) { border-color: #315b43; color: #80c99f; background: #20382a; }
+.plugin-section, .plugin-config { margin: 0 0 28px; }
+.plugin-section__title { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.plugin-section__title span { font-size: 13px; font-weight: 650; }
+.plugin-section__title small { color: var(--faint); font-size: 13px; }
+.plugin-section__title-left { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.install-ext-trigger { white-space: nowrap; }
+.plugin-row { min-height: 98px; display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--border); border-bottom: 0; background: var(--surface); }
+.plugin-row:first-of-type { border-radius: 10px 10px 0 0; }
+.plugin-row:last-child { border-bottom: 1px solid var(--border); border-radius: 0 0 10px 10px; }
+.plugin-icon { width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center; border: 1px solid var(--border-soft); border-radius: 10px; color: var(--muted); background: var(--surface-2); }
+.plugin-copy { flex: 1; min-width: 0; }
+.plugin-name { display: flex; align-items: center; gap: 7px; }
+.plugin-name strong { font-size: 13px; }
+.plugin-name small { color: var(--muted); font-size: 13px; }
+.status-dot { width: 6px; height: 6px; border-radius: 50%; background: #c5c5bf; }
+.status-dot.active { background: #39a56c; box-shadow: 0 0 0 3px rgba(57,165,108,.12); }
+.status-dot.missing { background: #d19a42; }
+.plugin-copy p { max-width: 640px; margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.plugin-copy code { display: block; max-width: 620px; margin-top: 5px; overflow: hidden; color: var(--faint); font: 12px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-copy .plugin-error { color: var(--danger); }
+.plugin-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
+.plugin-actions button { white-space: nowrap; }
+.plugin-actions > a { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: var(--muted); }
+.plugin-actions > a:hover { color: var(--text); background: var(--hover); }
+.plugin-config { padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.plugin-config .section-heading span { color: var(--faint); font: 12px "SFMono-Regular", Consolas, monospace; }
+.plugin-config .check-label { min-height: 32px; flex-direction: row; align-items: center; padding-top: 14px; }
+.plugin-config .check-label input { width: 14px; height: 14px; }
+.plugin-config__footer { display: flex; justify-content: flex-end; margin-top: 14px; }
+.stats-panel pre { max-height: 430px; margin: 0; padding: 13px; overflow: auto; border-radius: 7px; color: var(--muted); background: var(--surface); font: 12px/1.6 "SFMono-Regular", Consolas, monospace; }
+.plugin-section.builtins { padding-top: 4px; }

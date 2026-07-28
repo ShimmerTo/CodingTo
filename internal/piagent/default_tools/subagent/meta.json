@@ -1,0 +1,7 @@
+{
+  "name": "Subagent",
+  "version": "1.0.0",
+  "tool_name": "codingto_subagent",
+  "description": "调用当前 Agent 已授权的其他 Agent 完成独立子任务，并返回对话与文件产出。",
+  "tool_description": "Delegate a bounded task to an authorized CodingTo agent and return its final response and produced files."
+}

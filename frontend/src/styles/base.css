@@ -1,0 +1,135 @@
+:root {
+  font-family: Inter, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #242422;
+  background: #f7f7f5;
+  font-synthesis: none;
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --sidebar: #efefec;
+  --surface-2: #f4f4f1;
+  --text: #242422;
+  --muted: #71716d;
+  --faint: #9b9b95;
+  --border: #deded9;
+  --border-soft: #e9e9e5;
+  --accent: #171716;
+  --accent-fg: #fff;
+  --link: #2563eb;
+  --hover: #e6e6e1;
+  --danger: #d14b42;
+  --amber: #d9a441;
+  --shadow: 0 12px 35px rgba(20, 20, 18, .08);
+  scrollbar-color: var(--amber) transparent;
+  scrollbar-width: thin;
+}
+
+:root[data-theme="dark"] {
+  color: #e9e9e7;
+  background: #1b1b1a;
+  --bg: #1b1b1a;
+  --surface: #222221;
+  --sidebar: #181817;
+  --surface-2: #292928;
+  --text: #e9e9e7;
+  --muted: #aaa9a3;
+  --faint: #777771;
+  --border: #3a3a37;
+  --border-soft: #30302e;
+  --accent: #efefec;
+  --accent-fg: #1b1b1a;
+  --link: #6ea8fe;
+  --hover: #2d2d2b;
+  --danger: #ef6a60;
+  --shadow: 0 14px 40px rgba(0, 0, 0, .25);
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: var(--amber); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--amber) 75%, #000); }
+::-webkit-scrollbar-track { background: transparent; }
+
+* { box-sizing: border-box; }
+html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-size: 14px; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+button, input, textarea, select { font: inherit; }
+
+/* 等宽场景统一字体栈：Windows 优先 Consolas，macOS 用 SF Mono，避免裸 <code> 落到 Courier New 出现锯齿 */
+code, pre, kbd, samp { font-family: Consolas, "SFMono-Regular", "Cascadia Code", "JetBrains Mono", monospace; }
+button { color: inherit; }
+
+/* Global buttons */
+.secondary-button, .primary-button, .text-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 7px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.secondary-button { min-height: 30px; padding: 0 10px; border: 1px solid var(--border); background: var(--surface); }
+.primary-button { min-width: 110px; min-height: 34px; padding: 0 14px; border: 0; color: var(--accent-fg); background: var(--accent); }
+.text-button { min-height: 28px; padding: 0 5px; border: 0; color: var(--muted); background: transparent; }
+.primary-button.compact { min-width: 72px; min-height: 30px; }
+.primary-button:disabled, .secondary-button:disabled { opacity: .45; cursor: default; }
+.danger-button { min-height: 30px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid rgba(209,75,66,.38); border-radius: 7px; color: var(--danger); background: transparent; cursor: pointer; font-size: 13px; }
+.danger-button:hover:not(:disabled) { background: rgba(209,75,66,.08); }
+.danger-button:disabled { opacity: .38; cursor: not-allowed; }
+.danger-button--solid { min-width: 92px; border-color: var(--danger); color: #fff; background: var(--danger); }
+.danger-button--solid:hover:not(:disabled) { background: #bd4038; }
+
+/* Global dialogs / modals */
+.modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(10,10,9,.46); backdrop-filter: blur(2px); }
+.confirm-dialog { width: min(420px, 100%); padding: 24px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: 0 24px 70px rgba(0,0,0,.22); }
+.confirm-dialog__icon { width: 38px; height: 38px; display: grid; place-items: center; margin-bottom: 16px; border-radius: 10px; color: var(--danger); background: rgba(209,75,66,.1); }
+.confirm-dialog h2 { margin: 0 0 8px; font-size: 16px; }
+.confirm-dialog p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.confirm-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.install-dialog { width: min(520px, 100%); padding: 24px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: 0 24px 70px rgba(0,0,0,.22); }
+.install-dialog h3 { margin: 0 0 6px; font-size: 16px; }
+.install-dialog__hint { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.install-dialog__input { width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface-2); font: 13px "SFMono-Regular", Consolas, monospace; }
+.install-dialog__input:focus { outline: none; border-color: var(--accent); }
+.install-dialog__output { max-height: 240px; margin: 12px 0 0; padding: 12px; overflow: auto; border-radius: 8px; color: var(--muted); background: var(--surface-2); font: 12px/1.6 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
+.install-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+/* Global utilities */
+.spin { animation: spin .9s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+
+.field-hint { display: block; margin-top: 1px; color: var(--faint) !important; font-size: 11px !important; line-height: 1.4; }
+
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.form-grid label { display: flex; flex-direction: column; gap: 5px; }
+.form-grid label span { color: var(--muted); font-size: 13px; }
+.form-grid input, .form-grid select, .form-grid textarea, .model-editor input, .model-editor select, .provider-title { min-width: 0; height: 34px; border: 1px solid var(--border); outline: 0; border-radius: 7px; padding: 0 10px; color: var(--text); background: var(--surface); font-size: 13px; }
+.form-grid textarea { height: auto; min-height: 78px; padding-top: 8px; resize: vertical; line-height: 1.5; }
+.form-grid input:focus, .form-grid select:focus, .form-grid textarea:focus, .model-editor input:focus, .model-editor select:focus { border-color: var(--faint); box-shadow: 0 0 0 2px rgba(113,113,109,.08); }
+.form-grid .check-field { flex-direction: row; align-items: center; align-self: end; height: 32px; }
+.form-grid .check-field input { width: 14px; height: 14px; }
+
+.icon-button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
+.icon-button:hover { background: var(--hover); }
+.icon-button.danger:hover { color: var(--danger); }
+.runtime-info > div { display: grid; grid-template-columns: 140px 1fr; padding: 9px 0; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+.runtime-info span { color: var(--muted); }
+.runtime-info strong { overflow: hidden; text-overflow: ellipsis; font-family: "SFMono-Regular", Consolas, monospace; font-weight: 400; }
+.runtime-info strong.bad { color: var(--danger); }
+.runtime-info .secondary-button { margin-top: 13px; }
+.runtime-info .pi-version { margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent-fg); background: color-mix(in srgb, var(--accent) 16%, transparent); vertical-align: middle; }
+.runtime-info .runtime-row--env { display: flex; align-items: center; gap: 12px; }
+.runtime-info .runtime-row--env strong { flex: 1; min-width: 0; }
+.runtime-info .runtime-row--env .secondary-button { margin-top: 0; flex-shrink: 0; }
+.spinning { animation: pi-spin 0.8s linear infinite; }
+@keyframes pi-spin { to { transform: rotate(360deg); } }
+
+/* Pi Agent update dialog reuses .install-dialog (see InstallDialog.vue) */
+.primary-button.compact, .secondary-button.compact { padding: 7px 14px; font-size: 13px; }
+
+.save-bar { position: sticky; z-index: 3; bottom: -80px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin: 25px auto -80px; padding: 14px 0; background: linear-gradient(transparent, var(--surface) 25%); }
+.save-bar span { display: flex; align-items: center; gap: 5px; color: #399162; font-size: 13px; }
+
+/* Toasts */
+.toast-stack { position: fixed; top: 54px; right: 14px; z-index: 200; display: flex; flex-direction: column; gap: 9px; pointer-events: none; }
+.toast { display: flex; align-items: center; gap: 9px; min-width: 220px; max-width: 360px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-size: 13px; animation: toast-in .18s ease; }
+.toast--success { border-color: #b9dfca; color: #2f7a52; background: #edf8f2; }
+.toast--error { border-color: #e5a29d; color: #a92f28; background: #fff0ef; box-shadow: 0 12px 30px rgba(126,31,25,.16); }
+.toast--info { border-color: var(--border); color: var(--muted); background: var(--surface); }
+.toast svg { flex: 0 0 auto; }
+.toast--success svg { color: #39a56c; }
+.toast--error svg { color: var(--danger); }
+.toast--info svg { color: var(--faint); }
+:root[data-theme="dark"] .toast--success { border-color: #315b43; color: #80c99f; background: #20382a; }
+:root[data-theme="dark"] .toast--error { border-color: #5b2f2c; color: #ef6a60; background: #2f211f; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }

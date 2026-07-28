@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodingTo Plan Mode Contract",
+  "description": "Plan Mode 的数据模型与事件格式定义。前端 plan-todos widget 通过 setWidget 消费 lines，confirm 弹窗通过 extension_ui_request/response 消费确认结果。",
+  "definitions": {
+    "PlanStep": {
+      "type": "object",
+      "description": "计划中的单个步骤（计划数据模型）",
+      "properties": {
+        "index": { "type": "number", "description": "步骤序号，从 1 开始连续编号" },
+        "text": { "type": "string", "description": "步骤描述" },
+        "completed": { "type": "boolean", "description": "是否已完成" }
+      },
+      "required": ["index", "text", "completed"]
+    },
+    "PlanPresentParams": {
+      "type": "object",
+      "description": "codingto_plan_present 入参（输出计划事件）",
+      "properties": {
+        "title": { "type": "string" },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "index": { "type": "number" },
+              "text": { "type": "string" }
+            },
+            "required": ["index", "text"]
+          }
+        },
+        "confirm_prompt": { "type": "string" }
+      },
+      "required": ["steps"]
+    },
+    "PlanPresentResult": {
+      "type": "object",
+      "description": "codingto_plan_present 返回",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "confirmed": { "type": "boolean", "description": "用户是否确认" },
+        "plan": { "type": "array", "items": { "$ref": "#/definitions/PlanStep" } }
+      }
+    },
+    "PlanUpdateParams": {
+      "type": "object",
+      "description": "codingto_plan_update 入参（更新计划事件）",
+      "properties": {
+        "index": { "type": "number", "description": "目标步骤序号" },
+        "status": { "type": "string", "enum": ["done", "pending"], "description": "done=标记完成，pending=重开" }
+      },
+      "required": ["index", "status"]
+    },
+    "PlanUpdateResult": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "updated": { "$ref": "#/definitions/PlanStep" }
+      }
+    },
+    "PlanTodosWidgetLine": {
+      "type": "string",
+      "description": "plan-todos widget 的每一行格式：(completed ? '☑ ' : '☐ ') + text。前缀 ☑/✓ 或包裹 ~~删除线~~ 表示已完成，其它表示待办。",
+      "pattern": "^(☑|✓|☐|○|~~)?\\s?.*$"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "Plan Mode",
+  "version": "1.0.1",
+  "tool_name": "codingto_plan",
+  "description": "让 AI 在执行任何改动前先输出计划并经用户确认；执行过程中逐步更新计划完成状态，显示在对话底部计划面板。包含两个工具：codingto_plan_present（输出计划+确认）、codingto_plan_update（更新步骤完成态）。",
+  "tool_description": "Present an execution plan and wait for user confirmation before any mutating action; track step completion in the bottom plan panel via codingto_plan_present / codingto_plan_update.",
+  "parameters": [
+    {"name": "title", "type": "string", "description": "计划标题", "required": false},
+    {"name": "steps", "type": "array", "description": "有序步骤列表，每项含 index 与 text", "required": true},
+    {"name": "confirm_prompt", "type": "string", "description": "确认弹窗标题", "required": false}
+  ]
+}

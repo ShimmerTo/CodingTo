@@ -1,0 +1,7 @@
+{
+  "name": "Browser Profile",
+  "version": "6.0.0",
+  "tool_name": "codingto_browser_prepare",
+  "description": "登录态管理器：用户选择同域 Profile，由 CodingTo Go 服务独占持有 Chrome、CDP 和租约；AI 只接收 leaseId。",
+  "tool_description": "Login-state manager backed by CodingTo's Go browser-session service. Chrome, CDP and profile ownership stay in Go; the agent receives only a short-lived leaseId."
+}
