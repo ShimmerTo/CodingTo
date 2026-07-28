@@ -17,7 +17,7 @@ import (
 
 // appVersion is the version of the CodingTo client itself. It is kept in sync
 // with the value reported by GetBootstrap so the UI and the update check agree.
-const appVersion = "0.1.0"
+const appVersion = "0.1.1"
 
 // appUpdateRepo is the GitHub repository that publishes client releases.
 const appUpdateRepo = "ShimmerTo/CodingTo"
