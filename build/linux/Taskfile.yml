@@ -1,0 +1,52 @@
+version: '3'
+
+includes:
+  common: ../Taskfile.yml
+
+tasks:
+  build:
+    summary: Builds the application for Linux
+    cmds:
+      - task: build:native
+        vars:
+          ARCH: '{{.ARCH}}'
+          DEV: '{{.DEV}}'
+          EXTRA_TAGS: '{{.EXTRA_TAGS}}'
+    platforms: [linux]
+
+  build:native:
+    summary: Builds the application natively on Linux
+    internal: true
+    deps:
+      - task: common:go:mod:tidy
+      - task: common:build:frontend
+        vars:
+          DEV:
+            ref: .DEV
+          BUILD_FLAGS:
+            ref: .BUILD_FLAGS
+    cmds:
+      - go build {{.BUILD_FLAGS}} -o "{{.BIN_DIR}}/{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}" ./cmd/codingto
+    vars:
+      BUILD_FLAGS: '{{if eq .DEV "true"}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s"{{end}}'
+    env:
+      GOOS: linux
+      GOARCH: '{{.ARCH | default ARCH}}'
+      CGO_ENABLED: 1
+
+  package:
+    summary: Packages the Linux binary as a tar.gz archive
+    deps:
+      - task: build
+    cmds:
+      - tar -czf "{{.BIN_DIR}}/{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}.tar.gz" -C "{{.BIN_DIR}}" "{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}"
+    platforms: [linux]
+
+  run:
+    deps:
+      - task: build
+        vars:
+          DEV: "true"
+    cmds:
+      - '"./{{.BIN_DIR}}/{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}"'
+    platforms: [linux]
