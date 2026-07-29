@@ -1,0 +1,4 @@
+# Normalize all text files to LF on checkout/commit to avoid CRLF churn
+# (the repo is edited on both Windows and Unix). Binary files are left to
+# Git's automatic content detection.
+* text=auto eol=lf

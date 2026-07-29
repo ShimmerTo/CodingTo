@@ -3,31 +3,36 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 )
 
 // webViewInstalled reports whether the platform webview backend is available.
-// macOS ships WKWebView with the OS; Linux needs WebKitGTK 4.1.
+// macOS ships WKWebView with the OS; the default Wails GTK4 build on Linux
+// needs WebKitGTK 6.0.
 func webViewInstalled() bool {
 	switch runtime.GOOS {
 	case "darwin":
 		return true
 	case "linux":
-		candidates := []string{
-			"/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0",
-			"/usr/lib64/libwebkit2gtk-4.1.so.0",
-			"/usr/lib/libwebkit2gtk-4.1.so.0",
+		if output, err := exec.Command("ldconfig", "-p").Output(); err == nil &&
+			bytes.Contains(output, []byte("libwebkitgtk-6.0")) {
+			return true
 		}
-		for _, c := range candidates {
-			if _, err := os.Stat(c); err == nil {
+
+		patterns := []string{
+			"/usr/lib/*-linux-gnu/libwebkitgtk-6.0.so.*",
+			"/usr/lib64/libwebkitgtk-6.0.so.*",
+			"/usr/lib/libwebkitgtk-6.0.so.*",
+			"/lib/*-linux-gnu/libwebkitgtk-6.0.so.*",
+		}
+		for _, pattern := range patterns {
+			if matches, err := filepath.Glob(pattern); err == nil && len(matches) > 0 {
 				return true
 			}
-		}
-		if err := exec.Command("sh", "-c", "ldconfig -p | grep -q webkit2gtk-4.1").Run(); err == nil {
-			return true
 		}
 		return false
 	default:
@@ -37,7 +42,8 @@ func webViewInstalled() bool {
 
 func showWebViewMissingDialog() {
 	const url = "https://webkitgtk.org/"
-	fmt.Println("CodingTo 需要系统 WebView 运行时（Linux 需安装 webkit2gtk-4.1）才能启动，但未检测到。")
+	fmt.Println("CodingTo 需要 GTK4 和 WebKitGTK 6.0 才能在 Linux 上启动，但未检测到 WebKitGTK 6.0。")
+	fmt.Println("Ubuntu 24.04 可运行：sudo apt install libgtk-4-1 libwebkitgtk-6.0-4")
 	fmt.Printf("请安装对应依赖后重新启动程序。安装指引：%s\n", url)
 	openInBrowser(url)
 }

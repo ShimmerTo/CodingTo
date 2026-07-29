@@ -34,3 +34,4 @@ frontend/bindings/
 # information for Eclipse / Flash Builder.
 *test.go
 *test.js
+/.workbuddy/
