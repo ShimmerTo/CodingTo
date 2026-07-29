@@ -36,6 +36,10 @@ func main() {
 			return
 		}
 	}
+	// 图形界面依赖系统 webview 运行时（Windows 为 WebView2）。缺失时窗口无法渲染，
+	// 因此在创建窗口前用原生对话框提示用户前往下载安装，确认后退出由用户安装后重开。
+	requireWebView()
+
 	browserSessions, err := browsersession.New(browsersession.Options{})
 	if err != nil {
 		log.Fatal(err)

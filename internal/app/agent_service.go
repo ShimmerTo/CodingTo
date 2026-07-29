@@ -260,7 +260,9 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 		req.Model = profile.DefaultModel
 	}
 	if req.Provider == "" || req.Model == "" {
-		req.Provider, req.Model = cfg.DefaultProvider, cfg.DefaultModel
+		if p, m, ok := profile.ResolveDefaultModel(cfg.Providers); ok {
+			req.Provider, req.Model = p, m
+		}
 	}
 	if err := piagent.ValidateProviders(cfg.Providers, req.Provider, req.Model); err != nil {
 		return err

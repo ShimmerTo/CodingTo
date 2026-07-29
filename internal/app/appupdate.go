@@ -3,13 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +11,7 @@ import (
 
 // appVersion is the version of the CodingTo client itself. It is kept in sync
 // with the value reported by GetBootstrap so the UI and the update check agree.
-const appVersion = "0.1.1"
+const appVersion = "0.1.0"
 
 // appUpdateRepo is the GitHub repository that publishes client releases.
 const appUpdateRepo = "ShimmerTo/CodingTo"
@@ -43,22 +37,21 @@ type AppUpdateStatus struct {
 	Current     string `json:"current"`         // running client version
 	Latest      string `json:"latest"`          // latest release tag (no leading v)
 	HasNewer    bool   `json:"hasNewer"`        // latest release is higher than current
-	Available   bool   `json:"available"`       // newer release AND a matching asset exists
-	AssetName   string `json:"assetName"`       // matched asset file name
-	DownloadURL string `json:"downloadUrl"`     // matched asset download URL
+	Available   bool   `json:"available"`       // a newer release exists; user opens the release page to download
+	DownloadURL string `json:"downloadUrl"`     // GitHub release page URL the UI opens
 	Notes       string `json:"notes"`           // release notes (changelog)
-	Platform    string `json:"platform"`        // detected os/arch
 	Error       string `json:"error,omitempty"` // non-empty when the check failed
 }
 
 // CheckAppUpdate queries the GitHub latest release for the CodingTo client and
-// reports whether a newer version with an asset for the current platform exists.
+// reports whether a newer version exists. Update detection is purely version
+// based: if the latest release tag is higher than the running version, the user
+// is pointed to the release page and downloads manually — no platform/asset
+// guessing is involved, so variant builds (e.g. a WebView-bundled "-full") keep
+// working without touching this logic.
 func (a *App) CheckAppUpdate() AppUpdateStatus {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
 	status := AppUpdateStatus{
-		Current:  appVersion,
-		Platform: fmt.Sprintf("%s/%s", goos, goarch),
+		Current: appVersion,
 	}
 
 	release, statusCode, err := fetchLatestRelease(appUpdateRepo)
@@ -76,63 +69,11 @@ func (a *App) CheckAppUpdate() AppUpdateStatus {
 	status.Latest = latest
 	status.Notes = release.Body
 	status.HasNewer = compareVersions(latest, appVersion) > 0
-
-	asset, ok := matchPlatformAsset(release.Assets, goos, goarch)
-	if ok {
-		status.AssetName = asset.Name
-		status.DownloadURL = asset.BrowserDownloadURL
-	}
-	// A "download and install" button only makes sense when there is both a
-	// newer version and an installable asset for this platform.
-	status.Available = ok && status.HasNewer
+	// Newer release => let the user open the GitHub release page and pick the
+	// build that fits them. DownloadURL is the page URL the UI opens.
+	status.DownloadURL = release.HTMLURL
+	status.Available = status.HasNewer
 	return status
-}
-
-// DownloadAndInstallApp downloads the given release asset to a temporary file
-// and opens it with the operating system's default handler. Installers
-// (.exe/.msi/.dmg) launch automatically; archives open for the user to extract.
-func (a *App) DownloadAndInstallApp(downloadURL string) error {
-	if downloadURL == "" {
-		return fmt.Errorf("下载地址为空")
-	}
-
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(downloadURL)
-	if err != nil {
-		return fmt.Errorf("下载失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
-	}
-
-	tmpDir, err := os.MkdirTemp("", "codingto-update")
-	if err != nil {
-		return err
-	}
-	ext := filepath.Ext(downloadURL)
-	if u, perr := url.Parse(downloadURL); perr == nil {
-		if e := filepath.Ext(u.Path); e != "" {
-			ext = e
-		}
-	}
-	if ext == "" {
-		ext = ".tmp"
-	}
-	tmpPath := filepath.Join(tmpDir, "codingto-update"+ext)
-
-	out, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		out.Close()
-		return fmt.Errorf("写入失败: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		return err
-	}
-	return openFile(tmpPath)
 }
 
 // fetchLatestRelease calls the GitHub API for the latest non-draft, non-prerelease.
@@ -159,41 +100,6 @@ func fetchLatestRelease(repo string) (githubRelease, int, error) {
 		return githubRelease{}, resp.StatusCode, err
 	}
 	return release, resp.StatusCode, nil
-}
-
-// matchPlatformAsset returns the asset for the running os/arch. It first keeps
-// assets whose name implies the current platform, then prefers an exact arch
-// match, falling back to the first platform candidate.
-func matchPlatformAsset(assets []githubAsset, goos, goarch string) (githubAsset, bool) {
-	var candidates []githubAsset
-	for _, asset := range assets {
-		name := strings.ToLower(asset.Name)
-		switch goos {
-		case "windows":
-			if (strings.Contains(name, "windows") || strings.Contains(name, "win")) &&
-				(strings.Contains(name, goarch) ||
-					(goarch == "amd64" && (strings.Contains(name, "x64") || strings.Contains(name, "x86_64")))) {
-				candidates = append(candidates, asset)
-			}
-		case "darwin":
-			if strings.Contains(name, "darwin") || strings.Contains(name, "macos") || strings.Contains(name, "mac") {
-				candidates = append(candidates, asset)
-			}
-		default:
-			if strings.Contains(name, goos) {
-				candidates = append(candidates, asset)
-			}
-		}
-	}
-	if len(candidates) == 0 {
-		return githubAsset{}, false
-	}
-	for _, asset := range candidates {
-		if strings.Contains(strings.ToLower(asset.Name), goarch) {
-			return asset, true
-		}
-	}
-	return candidates[0], true
 }
 
 // compareVersions compares two dotted version strings (major.minor.patch).
@@ -224,18 +130,4 @@ func splitVersion(v string) [3]int {
 		out[i] = n
 	}
 	return out
-}
-
-// openFile opens a file with the operating system's default handler.
-func openFile(path string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", path)
-	case "darwin":
-		cmd = exec.Command("open", path)
-	default:
-		cmd = exec.Command("xdg-open", path)
-	}
-	return cmd.Start()
 }

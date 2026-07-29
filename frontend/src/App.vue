@@ -5,6 +5,7 @@ import {
   Minus, Network, Plus, Settings, Sparkles,
   X
 } from 'lucide-vue-next'
+import { Call } from '@wailsio/runtime'
 import { extensionIcon } from './extensionIcons'
 import {
   abortPrompt, chooseSessionDir, chooseWorkspace, closeWindow, createSession, deleteAgent,
@@ -21,6 +22,8 @@ import { buildT } from './i18n'
 import ChatView from './ChatView.vue'
 import logo from './assets/logo.png'
 import AppDialogs from './components/AppDialogs.vue'
+import InstallLogModal from './components/InstallLogModal.vue'
+import PiInstallGate from './components/PiInstallGate.vue'
 import AgentsPage from './components/pages/AgentsPage.vue'
 import AgentConfigPage from './components/pages/AgentConfigPage.vue'
 import DocsPage from './components/pages/DocsPage.vue'
@@ -56,6 +59,8 @@ function goHome() { activePage.value = 'chat' }
 const environmentTab = ref('workspace')
 const sidebarOpen = ref(true)
 const bootstrap = ref(null)
+// 客户端自身更新：启动后后台检查一次，有新版本时为 true，用于设置菜单红点。
+const appUpdateAvailable = ref(false)
 const config = reactive({
   preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441' },
   providers: [],
@@ -402,11 +407,16 @@ const thinkingLevels = computed(() => {
   return mapping ? known.filter(level => level === 'off' || mapping[level] !== null) : known
 })
 const selectedModelValue = computed({
-  get: () => `${config.defaultProvider}/${config.defaultModel}`,
+  get: () => `${selectedAgent.value?.defaultProvider || ''}/${selectedAgent.value?.defaultModel || ''}`,
   set: value => {
     const index = value.indexOf('/')
-    config.defaultProvider = value.slice(0, index)
-    config.defaultModel = value.slice(index + 1)
+    if (!selectedAgent.value) return
+    selectedAgent.value.defaultProvider = value.slice(0, index)
+    selectedAgent.value.defaultModel = value.slice(index + 1)
+    // 保留 config 上的镜像字段，仅用于向后兼容（配置文件/持久化）。
+    config.defaultProvider = selectedAgent.value.defaultProvider
+    config.defaultModel = selectedAgent.value.defaultModel
+    persist()
   }
 })
 
@@ -477,6 +487,21 @@ async function load() {
   await refreshSkills()
   applyTheme()
   connected.value = true
+}
+
+// 启动后静默检查一次新版本，用于设置菜单红点。Wails 桥接在 onMounted 时可能
+// 尚未就绪，故失败重试几次（每次间隔 800ms），全部失败则保持无红点。
+async function checkUpdateOnStartup(retries = 4) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await Call.ByName('codingto/internal/app.App.CheckAppUpdate')
+      if (res && res.available) appUpdateAvailable.value = true
+      return
+    } catch {
+      if (i === retries - 1) return
+      await new Promise(r => setTimeout(r, 800))
+    }
+  }
 }
 
 async function installPiNow() {
@@ -1336,6 +1361,14 @@ async function ensureConversation(title) {
     provider: agent?.defaultProvider || config.defaultProvider,
     model: agent?.defaultModel || config.defaultModel
   })
+  // 若 agent 未单独设置默认模型，用首个启用服务商的首个模型兜底，
+  // 防止 createSession 落到一个不存在的全局默认模型（如 openai/gpt-5.6-terra）。
+  if (!agent?.defaultProvider || !agent?.defaultModel) {
+    const first = config.providers.find(p => p.enabled !== false && (p.models || []).length)
+    if (first && !task.provider) {
+      task = { ...task, provider: first.name, model: first.models[0].id }
+    }
+  }
   tasks.value.unshift(task)
   activeTaskId.value = task.id
   return task
@@ -2014,6 +2047,10 @@ async function runPrompt({ message, images, attachments: promptAttachments, skil
       message,
       provider: task.provider || provider || promptAgent?.defaultProvider || config.defaultProvider,
       model: task.model || model || promptAgent?.defaultModel || config.defaultModel,
+      // 当 agent 未单独设置默认模型，且前端也没显式指定时，回退到首个启用服务商，
+      // 避免把空 provider/model 发到后端去触发全局 openai 默认。
+      fallbackProvider: selectedAgent.value?.defaultProvider || config.defaultProvider,
+      fallbackModel: selectedAgent.value?.defaultModel || config.defaultModel,
       workDir: workDir || config.lastEnvironment,
       mode: promptMode || mode.value,
       thinkingLevel: promptThinking || thinkingLevel.value,
@@ -2097,8 +2134,8 @@ async function sendPrompt() {
     attachments: safeClone(attachments.value),
     createdAt: Date.now(),
     agentId: selectedAgent.value?.id,
-    provider: config.defaultProvider,
-    model: config.defaultModel,
+    provider: selectedAgent.value?.defaultProvider || config.defaultProvider,
+    model: selectedAgent.value?.defaultModel || config.defaultModel,
     workDir: config.lastEnvironment,
     mode: mode.value,
     thinkingLevel: thinkingLevel.value,
@@ -2167,6 +2204,12 @@ async function chatNewSession() {
   if (defaultAgent?.defaultProvider && defaultAgent?.defaultModel) {
     config.defaultProvider = defaultAgent.defaultProvider
     config.defaultModel = defaultAgent.defaultModel
+  } else {
+    // agent 未单独设置默认模型时，回退到首个启用服务商的首个模型，
+    // 避免出现空默认模型导致后端校验拦截（config 字段仅作镜像）。
+    const first = config.providers.find(p => p.enabled !== false && (p.models || []).length)
+    config.defaultProvider = first?.name || ''
+    config.defaultModel = first?.models?.[0]?.id || ''
   }
   thinkingLevel.value = defaultThinkingLevelForModel(selectedModel.value)
   changeRefreshRequest += 1
@@ -2278,6 +2321,10 @@ function chatSelectAgent(agent) {
   if (agent.defaultProvider && agent.defaultModel) {
     config.defaultProvider = agent.defaultProvider
     config.defaultModel = agent.defaultModel
+  } else {
+    const first = config.providers.find(p => p.enabled !== false && (p.models || []).length)
+    config.defaultProvider = first?.name || ''
+    config.defaultModel = first?.models?.[0]?.id || ''
   }
   persist()
 }
@@ -2937,7 +2984,8 @@ provide(appContextKey, {
   removeFigmaAuthorization,
   readAgentFile,
   writeAgentFile,
-  pushToast
+  pushToast,
+  appUpdateAvailable
 })
 
 onMounted(async () => {
@@ -2946,6 +2994,9 @@ onMounted(async () => {
     if (files.length) void onAddAttachments(files)
   })
   await load()
+  // 启动后后台静默检查一次客户端新版本（不弹提示，仅用于设置菜单红点）。
+  // Wails 桥接在 onMounted 时可能尚未就绪，因此失败重试几次。
+  void checkUpdateOnStartup()
   offEvent = onEvent('agent:event', handleAgentEvent)
   offSubagentEvent = onEvent('subagent:event', handleSubagentEvent)
   offDocumentPreview = onEvent('document:preview', async request => {
@@ -3093,11 +3144,25 @@ onBeforeUnmount(() => {
         </Teleport>
 
         <div class="sidebar__bottom">
-          <button :class="{ active: activePage === 'settings' }" @click="activePage = 'settings'"><Settings :size="17" /><span v-if="sidebarOpen">{{ t.settings }}</span></button>
+          <button :class="{ active: activePage === 'settings' }" @click="activePage = 'settings'">
+            <span class="sidebar__icon-wrap">
+              <Settings :size="17" />
+              <span v-if="appUpdateAvailable" class="sidebar__badge" :title="t.new_version_dot"></span>
+            </span>
+            <span v-if="sidebarOpen">{{ t.settings }}</span>
+          </button>
         </div>
       </aside>
 
       <main class="main-content">
+        <PiInstallGate
+          v-if="bootstrap && !bootstrap.piInstalled"
+          :on-install="installPiNow"
+          :busy="piInstallBusy"
+          :error="piInstallError"
+        />
+        <div v-else-if="!bootstrap" class="pi-gate-loading">正在加载…</div>
+        <template v-else>
         <section v-if="activePage === 'chat'" class="command-page">
           <ChatView
             :config="config"
@@ -3164,9 +3229,11 @@ onBeforeUnmount(() => {
         <section v-else class="page-view">
         <component :is="pageComponent" />
         </section>
+        </template>
       </main>
     </div>
 
     <AppDialogs />
+    <InstallLogModal />
   </div>
 </template>

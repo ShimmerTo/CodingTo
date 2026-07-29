@@ -6,7 +6,7 @@ import { useAppContext } from '../../composables/appContext'
 import InstallDialog from '../../components/InstallDialog.vue'
 import { renderMarkdown } from '../../components/chat/chatFormatters.js'
 
-const { t, config, bootstrap, pickSessionDirectory, persist } = useAppContext()
+const { t, config, bootstrap, pickSessionDirectory, persist, appUpdateAvailable } = useAppContext()
 
 const piVersion = ref('')
 const checkingUpdate = ref(false)
@@ -69,7 +69,6 @@ async function checkForUpdate() {
 
 // ---- 客户端自身更新（GitHub Release）----
 const appChecking = ref(false)
-const appDownloading = ref(false)
 const appStatus = ref(null) // AppUpdateStatus | null
 
 async function checkAppUpdate() {
@@ -79,6 +78,8 @@ async function checkAppUpdate() {
   try {
     const res = await Call.ByName('codingto/internal/app.App.CheckAppUpdate')
     appStatus.value = res || {}
+    // 探测到新版本时点亮侧边栏设置菜单红点；无论来源于启动静默检查还是手动点检。
+    if (res && res.available) appUpdateAvailable.value = true
   } catch (e) {
     appStatus.value = { error: String(e) }
   } finally {
@@ -86,16 +87,19 @@ async function checkAppUpdate() {
   }
 }
 
-async function downloadAndInstallApp() {
-  if (!appStatus.value?.downloadUrl || appDownloading.value) return
-  appDownloading.value = true
-  try {
-    await Call.ByName('codingto/internal/app.App.DownloadAndInstallApp', appStatus.value.downloadUrl)
-  } catch (e) {
-    openInfo(t.value.app_update_failed, String(e))
-  } finally {
-    appDownloading.value = false
-  }
+// 进入设置页即刷新一次更新状态：既为展示最新结果，也在启动静默检查未命中时
+// 补齐侧边栏红点。红点不再因"打开设置"而被清除，仅在用户真正去下载时消除，
+// 保证"检测到新版 → 菜单红点常驻提醒"这一预期行为。
+onMounted(() => {
+  if (!appStatus.value) void checkAppUpdate()
+})
+
+function downloadAndInstallApp() {
+  if (!appStatus.value?.downloadUrl) return
+  // 用户已着手处理更新，消除侧边栏红点（再次进入设置页若仍有新版会重新点亮）。
+  appUpdateAvailable.value = false
+  // Open the GitHub release page in the browser so the user can download manually.
+  window.open(appStatus.value.downloadUrl, '_blank', 'noopener')
 }
 
 function cleanupEvents() {
@@ -220,22 +224,20 @@ async function pickDir() {
               <div>
                 <label>{{ t.current_version }} v{{ bootstrap?.version }}</label>
               </div>
-              <button class="secondary-button" type="button" :disabled="appChecking" @click="checkAppUpdate">
-                <RefreshCw :size="15" :class="{ spinning: appChecking }" />{{ appChecking ? t.checking_new_version : t.check_new_version }}
-              </button>
-            </div>
-
-            <div v-if="appStatus" class="app-update-line">
-              <template v-if="appStatus.available">
-                <button class="primary-button" type="button" :disabled="appDownloading" @click="downloadAndInstallApp">
-                  <Download :size="15" />{{ appDownloading ? t.downloading : t.download_and_install }}
+              <div class="app-update-actions">
+                <template v-if="appStatus && appStatus.available">
+                  <strong class="app-update-new">{{ t.new_version_available.replace('{latest}', appStatus.latest) }}</strong>
+                  <button class="link-button" type="button" @click="downloadAndInstallApp">
+                    <Download :size="14" />{{ t.download_and_install }}
+                  </button>
+                </template>
+                <span v-else-if="appStatus && appStatus.error" class="app-update-error">{{ appStatus.error }}</span>
+                <span v-else-if="appStatus && appStatus.latest" class="app-update-note">{{ t.already_latest.replace('{version}', appStatus.current) }}</span>
+                <span v-else-if="appStatus" class="app-update-note">{{ t.no_release }}</span>
+                <button class="secondary-button" type="button" :disabled="appChecking" @click="checkAppUpdate">
+                  <RefreshCw :size="15" :class="{ spinning: appChecking }" />{{ appChecking ? t.checking_new_version : t.check_new_version }}
                 </button>
-                <strong class="app-update-new">{{ t.new_version_available.replace('{latest}', appStatus.latest) }}</strong>
-              </template>
-              <span v-else-if="appStatus.error" class="app-update-error">{{ appStatus.error }}</span>
-              <span v-else-if="appStatus.hasNewer" class="app-update-note">{{ t.no_asset_for_platform.replace('{latest}', appStatus.latest).replace('{platform}', appStatus.platform) }}</span>
-              <span v-else-if="appStatus.latest" class="app-update-note">{{ t.already_latest.replace('{version}', appStatus.current) }}</span>
-              <span v-else class="app-update-note">{{ t.no_release }}</span>
+              </div>
             </div>
 
             <div class="setting-row">
@@ -308,13 +310,26 @@ async function pickDir() {
 .update-log-md :deep(td) { min-width: 90px; padding: 6px 9px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
 .update-log-md :deep(th) { background: var(--surface-2); font-weight: 650; }
 
-.app-update-line {
-  display: flex;
+.app-update-actions {
+  display: inline-flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin: 4px 0 12px;
 }
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link-button:hover { opacity: .8; }
 .app-update-new { color: var(--accent); font-weight: 650; }
 .app-update-note { color: var(--muted); }
 .app-update-error { color: #ef4444; }

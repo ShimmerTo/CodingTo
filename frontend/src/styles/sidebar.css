@@ -16,8 +16,11 @@
 .recent-list button:hover { color: var(--text); background: var(--hover); }
 .recent-list p { margin: 8px 9px; color: var(--faint); font-size: 13px; }
 .sidebar__bottom { display: flex; border-top: 1px solid var(--border-soft); padding-top: 8px; }
-.sidebar__bottom button { width: 100%; display: flex; justify-content: flex-start; gap: 10px; padding: 0 9px; }
+.sidebar__bottom button { width: 100%; display: flex; justify-content: flex-start; align-items: center; gap: 10px; padding: 0 9px; }
 .sidebar__bottom button.active { color: var(--text); background: var(--surface); }
+/* 设置菜单新版本红点：包裹齿轮图标，红点绝对定位于右上角 */
+.sidebar__icon-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.sidebar__badge { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 2px var(--sidebar, #fff); }
 .sidebar-browser { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 18px; }
 .sidebar-browser__heading { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 7px; color: var(--faint); font-size: 14px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .sidebar-browser__heading--sessions { margin-top: 12px; }

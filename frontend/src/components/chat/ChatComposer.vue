@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   Bot, Brain, Check, ChevronDown, CircleStop, File, FileAudio, FileText, FileVideo, Image,
-  LoaderCircle, Paperclip, Pencil, RotateCcw, Send, Sparkles, Trash2, X
+  LoaderCircle, Paperclip, Pencil, Send, Sparkles, Trash2, X
 } from 'lucide-vue-next'
 import { formatFileSize, formatTokenCount, imageSrc } from './chatFormatters.js'
 import { agentAvatar } from '../../composables/appContext'
@@ -435,12 +435,14 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
             <span><b>{{ formatTokenCount(tokenStats.cached) }}</b> {{ t.tokenCached }}</span>
             <span><b>{{ formatTokenCount(tokenStats.output) }}</b> {{ t.tokenOutput }}</span>
           </div>
+          <!-- 注释压缩（压缩上下文）按钮：按需求暂时注释
           <button
             class="compact-button"
             :disabled="!compaction.available || compaction.running || running || !hasMessages"
             :title="compaction.available ? (t.compactContext || 'Compact context') : t.compactContextUnavailable"
             @click="emit('compact')"
           ><RotateCcw :class="{ spin: compaction.running }" :size="13" /></button>
+          -->
         </div>
 
         <div ref="agentWrapEl" class="composer-agent-wrap">

@@ -97,3 +97,19 @@ func InstallWithProgress(onLine func(string)) (string, error) {
 	pw.Close()
 	return "", runErr
 }
+
+// NpmInstalled reports whether the npm CLI is discoverable on PATH.
+func NpmInstalled() bool {
+	npm := "npm"
+	if runtime.GOOS == "windows" {
+		npm = "npm.cmd"
+	}
+	_, err := exec.LookPath(npm)
+	return err == nil
+}
+
+// NodeInstalled reports whether the node runtime is discoverable on PATH.
+func NodeInstalled() bool {
+	_, err := exec.LookPath("node")
+	return err == nil
+}

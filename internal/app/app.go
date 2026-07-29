@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"codingto/internal/browserworkflow"
 	"codingto/internal/extensions"
@@ -239,24 +240,51 @@ func (a *App) UpdatePi() error {
 	return err
 }
 
-// InstallPi installs the Pi CLI, verifies that it is discoverable, then
-// initializes the first agent in the same operation.
+// InstallPi installs the Pi CLI, verifying that it is discoverable, then
+// initializes the first agent in the same operation. When npm is missing it
+// first bootstraps Node.js (which bundles npm), so a fresh machine can install
+// Pi Agent end-to-end from this single entry point.
 func (a *App) InstallPi() (Bootstrap, error) {
 	a.piInstall.Lock()
 	defer a.piInstall.Unlock()
 
-	if _, installed := piagent.FindExecutable(); !installed {
-		output, err := piagent.Install()
-		if err != nil {
-			return Bootstrap{}, fmt.Errorf("install Pi Agent: %w\n%s", err, output)
-		}
+	app := application.Get()
+	installID := fmt.Sprintf("pi-%d", time.Now().UnixNano())
+	app.Event.Emit("install:start", map[string]any{"installId": installID, "title": "Pi Agent 安装"})
+	success := true
+	onLog := func(line string) {
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": line})
 	}
-	if _, installed := piagent.FindExecutable(); !installed {
-		return Bootstrap{}, errors.New("Pi Agent installation completed, but the Pi CLI is not available on PATH")
+	defer func() {
+		app.Event.Emit("install:done", map[string]any{"installId": installID, "success": success})
+	}()
+
+	if !piagent.NpmInstalled() {
+		onLog("未检测到 npm，需要先安装 Node.js（npm 随 Node.js 一同安装）…")
+		if err := piagent.InstallNode(onLog); err != nil {
+			onLog("Node.js 安装失败：" + err.Error())
+			success = false
+			return Bootstrap{}, err
+		}
+		if !piagent.NpmInstalled() {
+			onLog("Node.js 已安装，但仍未找到 npm，请重启 CodingTo 后重试")
+			success = false
+			return Bootstrap{}, errors.New("npm 仍不可用，请重启程序后重试")
+		}
+		onLog("Node.js 安装完成。")
+	}
+
+	onLog("开始安装 Pi Agent…")
+	if _, err := piagent.InstallWithProgress(onLog); err != nil {
+		onLog("Pi Agent 安装失败：" + err.Error())
+		success = false
+		return Bootstrap{}, err
 	}
 	if _, err := a.store.EnsureDefaultAgent(); err != nil {
+		success = false
 		return Bootstrap{}, fmt.Errorf("initialize default agent: %w", err)
 	}
+	onLog("Pi Agent 安装完成。")
 	return a.GetBootstrap(), nil
 }
 

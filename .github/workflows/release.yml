@@ -1,0 +1,223 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate tag and project versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fq "version: \"${version}\"" build/config.yml
+          grep -Fq "const appVersion = \"${version}\"" internal/app/appupdate.go
+          node -e "const p=require('./frontend/package.json'); if (p.version !== process.argv[1]) process.exit(1)" "${version}"
+
+  windows:
+    name: Windows amd64 (NSIS)
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install matching Wails CLI
+        shell: pwsh
+        run: |
+          $wailsVersion = go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@$wailsVersion"
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress --yes
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: wails3 task windows:package ARCH=amd64
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodingTo-windows-amd64
+          path: |
+            bin/CodingTo-windows-amd64.exe
+            bin/CodingTo-windows-amd64-installer.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    name: Linux amd64 (tar.gz)
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            pkg-config
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install matching Wails CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          wails_version="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)"
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@${wails_version}"
+
+      - name: Build Linux archive
+        run: wails3 task linux:package ARCH=amd64 EXTRA_TAGS=gtk3
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodingTo-linux-amd64
+          path: bin/CodingTo-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS universal (.app.zip)
+    needs: validate
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install matching Wails CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          wails_version="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)"
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@${wails_version}"
+
+      - name: Build universal macOS app
+        run: wails3 task darwin:package:universal
+
+      - name: Archive app bundle
+        run: ditto -c -k --sequesterRsrc --keepParent bin/CodingTo.app bin/CodingTo-darwin-universal.zip
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodingTo-darwin-universal
+          path: bin/CodingTo-darwin-universal.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - windows
+      - linux
+      - macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: CodingTo-windows-amd64
+          path: release
+
+      - name: Download Linux package
+        uses: actions/download-artifact@v4
+        with:
+          name: CodingTo-linux-amd64
+          path: release
+
+      - name: Download macOS package
+        uses: actions/download-artifact@v4
+        with:
+          name: CodingTo-darwin-universal
+          path: release
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" release/* \
+              --verify-tag \
+              --generate-notes \
+              --title "${GITHUB_REF_NAME}"
+          fi

@@ -30,6 +30,10 @@
 .change-root { margin: 0; padding: 0 10px 7px; overflow: hidden; color: var(--faint); font: 11px/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 /* Git 仓库快照 */
 .git-panel { display: flex; flex-direction: column; gap: 10px; padding: 8px; }
+.git-panel__tabs { display: flex; gap: 4px; padding: 0 2px 4px; }
+.git-panel__tab { flex: 1; height: 30px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 12.5px; transition: color .15s, background .15s; }
+.git-panel__tab:hover { color: var(--text); background: var(--hover); }
+.git-panel__tab.is-active { color: var(--accent-fg); background: var(--accent); }
 .git-panel__toolbar { min-height: 28px; display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
 .git-panel__toolbar button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; }
 .git-panel__toolbar button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
@@ -64,8 +68,23 @@
 .git-file__numbers { flex: 0 0 auto; display: flex; gap: 6px; }
 .git-section__empty { margin: 0; padding: 20px 12px; color: var(--faint); font-size: 12px; line-height: 1.55; text-align: center; }
 .git-base-picker { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 400; }
-.git-base-picker select { min-width: 0; height: 27px; flex: 1 1 auto; padding: 0 26px 0 8px; border: 1px solid var(--border-soft); outline: 0; border-radius: 6px; color: var(--text); background: var(--surface-2); font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
-.git-base-picker select:focus { border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); }
+.git-base-picker__label { flex: none; white-space: nowrap; }
+.git-base-select { position: relative; flex: 1 1 auto; min-width: 0; }
+.git-base-select.is-disabled { opacity: .6; }
+.git-base-select__trigger { width: 100%; height: 27px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-2); color: var(--text); cursor: pointer; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
+.git-base-select__trigger:disabled { cursor: not-allowed; }
+.git-base-select__trigger:focus { outline: 0; border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); }
+.git-base-select__value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.git-base-select__caret { flex: none; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--muted); }
+.git-base-select.is-open .git-base-select__caret { transform: rotate(180deg); }
+.git-base-select__pop { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); overflow: hidden; }
+.git-base-select__filter { width: 100%; height: 30px; box-sizing: border-box; padding: 0 10px; border: 0; border-bottom: 1px solid var(--border-soft); outline: 0; background: var(--surface-2); color: var(--text); font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
+.git-base-select__filter::placeholder { color: var(--faint); }
+.git-base-select__list { max-height: 180px; overflow-y: auto; margin: 0; padding: 4px; list-style: none; }
+.git-base-select__empty { padding: 8px; color: var(--faint); font-size: 12px; text-align: center; }
+.git-base-select__option { padding: 6px 8px; border-radius: 5px; color: var(--text); cursor: pointer; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-base-select__option:hover { background: var(--hover); }
+.git-base-select__option.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
 /* 时间线（节点产物） */
 .timeline { display: flex; flex-direction: column; gap: 7px; padding: 7px 8px 10px; }
 .timeline__node { position: relative; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface); transition: border-color .15s ease; }

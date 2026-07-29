@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ChevronRight, Download, FileCode2, FilePlus2, FileText, FileX2,
   GitBranch, Image as ImageIcon, LoaderCircle, RefreshCw, X
@@ -44,6 +44,11 @@ const gitOverride = ref(null)
 const gitLoading = ref(false)
 const gitLoaded = ref(false)
 const selectedBase = ref('')
+const baseSelectOpen = ref(false)
+const baseFilter = ref('')
+const baseSelectRef = ref(null)
+const baseFilterInput = ref(null)
+const gitTab = ref('worktree') // 默认展示「当前工作区变更」
 const gitDialog = ref({ open: false, scope: 'worktree', files: [], index: 0 })
 let gitRequestNonce = 0
 const gitSnapshot = computed(() => (
@@ -272,10 +277,60 @@ async function refreshGitSnapshot(baseBranch = selectedBase.value) {
   }
 }
 
-function selectBaseBranch(event) {
-  selectedBase.value = event.target.value
-  refreshGitSnapshot(selectedBase.value)
+function toggleBaseSelect() {
+  if (gitLoading.value || !gitSnapshot.value.baseBranches?.length) return
+  baseSelectOpen.value = !baseSelectOpen.value
+  if (baseSelectOpen.value) {
+    baseFilter.value = ''
+    nextTick(() => baseFilterInput.value?.focus())
+  }
 }
+
+const filteredBaseBranches = computed(() => {
+  const all = gitSnapshot.value.baseBranches || []
+  const q = baseFilter.value.trim().toLowerCase()
+  if (!q) return all
+  return all.filter(branch => branch.toLowerCase().includes(q))
+})
+
+function chooseBaseBranch(branch) {
+  closeBaseSelect()
+  selectedBase.value = branch
+  refreshGitSnapshot(branch)
+}
+
+function closeBaseSelect() {
+  baseSelectOpen.value = false
+  baseFilter.value = ''
+}
+
+function closeBaseSelectIfOutside(event) {
+  if (baseSelectOpen.value && baseSelectRef.value && !baseSelectRef.value.contains(event.target)) {
+    closeBaseSelect()
+  }
+}
+
+function onBaseSelectKeydown(event) {
+  if (event.key === 'Escape') closeBaseSelect()
+}
+
+function onBaseFilterKeydown(event) {
+  if (event.key === 'Escape') {
+    closeBaseSelect()
+  } else if (event.key === 'Enter') {
+    const first = filteredBaseBranches.value[0]
+    if (first) chooseBaseBranch(first)
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', closeBaseSelectIfOutside)
+  document.addEventListener('keydown', onBaseSelectKeydown)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', closeBaseSelectIfOutside)
+  document.removeEventListener('keydown', onBaseSelectKeydown)
+})
 
 function openGitDiff(scope, files, index) {
   gitDialog.value = { open: true, scope, files, index }
@@ -633,7 +688,22 @@ function startResize(event) {
           </div>
 
           <template v-else>
-            <section class="git-section">
+            <div class="git-panel__tabs">
+              <button
+                type="button"
+                class="git-panel__tab"
+                :class="{ 'is-active': gitTab === 'worktree' }"
+                @click="gitTab = 'worktree'"
+              >{{ t.gitWorkspaceChanges }}</button>
+              <button
+                type="button"
+                class="git-panel__tab"
+                :class="{ 'is-active': gitTab === 'branch' }"
+                @click="gitTab = 'branch'"
+              >{{ t.gitBranchChanges }}</button>
+            </div>
+
+            <section v-if="gitTab === 'worktree'" class="git-section">
               <header class="git-section__head">
                 <div>
                   <strong>{{ t.gitWorkspaceChanges }}</strong>
@@ -674,20 +744,49 @@ function startResize(event) {
               <p v-else class="git-section__empty">{{ t.gitCleanWorktree }}</p>
             </section>
 
-            <section class="git-section">
+            <section v-else-if="gitTab === 'branch'" class="git-section">
               <header class="git-section__head">
                 <div>
                   <strong>{{ t.gitBranchChanges }}</strong>
                   <label class="git-base-picker">
-                    <span>{{ t.gitBaseBranch }}</span>
-                    <select
-                      :value="selectedBase || gitSnapshot.baseBranch"
-                      :disabled="gitLoading || !gitSnapshot.baseBranches?.length"
-                      @change="selectBaseBranch"
+                    <span class="git-base-picker__label">{{ t.gitBaseBranch }}</span>
+                    <div
+                      ref="baseSelectRef"
+                      class="git-base-select"
+                      :class="{ 'is-open': baseSelectOpen, 'is-disabled': gitLoading || !gitSnapshot.baseBranches?.length }"
                     >
-                      <option v-if="!gitSnapshot.baseBranches?.length" value="">{{ t.gitBaseUnavailable }}</option>
-                      <option v-for="branch in gitSnapshot.baseBranches" :key="branch" :value="branch">{{ branch }}</option>
-                    </select>
+                      <button
+                        type="button"
+                        class="git-base-select__trigger"
+                        :disabled="gitLoading || !gitSnapshot.baseBranches?.length"
+                        :title="(selectedBase || gitSnapshot.baseBranch) || t.gitBaseUnavailable"
+                        @click="toggleBaseSelect"
+                      >
+                        <span class="git-base-select__value">{{ selectedBase || gitSnapshot.baseBranch || t.gitBaseUnavailable }}</span>
+                        <span class="git-base-select__caret"></span>
+                      </button>
+                      <div v-if="baseSelectOpen && gitSnapshot.baseBranches?.length" class="git-base-select__pop">
+                        <input
+                          ref="baseFilterInput"
+                          v-model="baseFilter"
+                          class="git-base-select__filter"
+                          type="text"
+                          :placeholder="t.gitBaseFilterPlaceholder"
+                          @keydown.stop="onBaseFilterKeydown"
+                        />
+                        <ul class="git-base-select__list">
+                          <li v-if="!filteredBaseBranches.length" class="git-base-select__empty">{{ t.gitBaseNoMatch }}</li>
+                          <li
+                            v-for="branch in filteredBaseBranches"
+                            :key="branch"
+                            class="git-base-select__option"
+                            :class="{ 'is-active': (selectedBase || gitSnapshot.baseBranch) === branch }"
+                            :title="branch"
+                            @click="chooseBaseBranch(branch)"
+                          >{{ branch }}</li>
+                        </ul>
+                      </div>
+                    </div>
                   </label>
                   <small v-if="gitSnapshot.baseBranch">{{ gitSnapshot.currentBranch || 'HEAD' }} → {{ gitSnapshot.baseBranch }}</small>
                 </div>

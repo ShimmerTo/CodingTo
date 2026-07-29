@@ -130,8 +130,6 @@ func DefaultAgentProfile() AgentProfile {
 		Builtin:              map[string]bool{"plan": true, "document": true, "skills-list": true},
 		SubAgents:            []string{},
 		PiTools:              defaultPiTools(),
-		DefaultProvider:      "openai",
-		DefaultModel:         "gpt-5.6-terra",
 		BrowserProfilePolicy: DefaultBrowserProfilePolicy(),
 	}
 }
@@ -218,6 +216,27 @@ func (a *AgentProfile) Normalize(index int) {
 	a.BrowserProfilePolicy.Normalize()
 }
 
+// ResolveDefaultModel returns the agent's configured default provider/model.
+// When the agent has not pinned a default, it falls back to the first model of
+// the first enabled provider in the supplied list, so the system never assumes
+// a specific vendor (e.g. openai) when no model has been chosen. The returned
+// booleans report whether a usable default was found.
+func (a AgentProfile) ResolveDefaultModel(providers []piagent.Provider) (provider, model string, ok bool) {
+	if a.DefaultProvider != "" && a.DefaultModel != "" {
+		return a.DefaultProvider, a.DefaultModel, true
+	}
+	for _, p := range providers {
+		if p.Enabled == false {
+			continue
+		}
+		if len(p.Models) == 0 {
+			continue
+		}
+		return p.Name, p.Models[0].ID, true
+	}
+	return "", "", false
+}
+
 func (c AppConfig) Agent(id string) (AgentProfile, bool) {
 	if id == "" {
 		id = c.ActiveAgentID
@@ -232,13 +251,11 @@ func (c AppConfig) Agent(id string) (AgentProfile, bool) {
 
 func DefaultConfig() AppConfig {
 	return AppConfig{
-		ConfigVersion:   5,
-		Preferences:     Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441"},
-		Providers:       piagent.DefaultProviders(),
-		DefaultProvider: "openai",
-		DefaultModel:    "gpt-5.6-terra",
-		SessionDir:      DefaultSessionDir(),
-		Extensions:      extensions.DefaultConfig(),
+		ConfigVersion: 5,
+		Preferences:   Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441"},
+		Providers:     piagent.DefaultProviders(),
+		SessionDir:    DefaultSessionDir(),
+		Extensions:    extensions.DefaultConfig(),
 	}
 }
 
