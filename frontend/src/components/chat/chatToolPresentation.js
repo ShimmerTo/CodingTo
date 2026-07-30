@@ -367,6 +367,57 @@ export function toolEditDiff(message) {
   }
 }
 
+// 将单个 edit 的纵向 unified 行转换为左右对比（split）结构。
+// 每个 row 为：
+//   - { kind: 'context', text, oldNumber, newNumber }  —— 未改动的上下文，左右一致
+//   - { kind: 'change', left, right }                  —— 改动行，left/right 为 {num,text}|null
+function buildEditSideBySide(edit) {
+  const rows = []
+  const lines = edit.lines
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    if (line.kind === 'context') {
+      rows.push({ kind: 'context', text: line.text, oldNumber: line.oldNumber, newNumber: line.newNumber })
+      i += 1
+      continue
+    }
+    if (line.kind === 'deleted') {
+      const dels = []
+      while (i < lines.length && lines[i].kind === 'deleted') { dels.push(lines[i]); i += 1 }
+      const adds = []
+      while (i < lines.length && lines[i].kind === 'added') { adds.push(lines[i]); i += 1 }
+      const max = Math.max(dels.length, adds.length)
+      for (let k = 0; k < max; k += 1) {
+        const left = dels[k] ? { num: dels[k].oldNumber, text: dels[k].text } : null
+        const right = adds[k] ? { num: adds[k].newNumber, text: adds[k].text } : null
+        rows.push({ kind: 'change', left, right })
+      }
+      continue
+    }
+    if (line.kind === 'added') {
+      while (i < lines.length && lines[i].kind === 'added') {
+        rows.push({ kind: 'change', left: null, right: { num: lines[i].newNumber, text: lines[i].text } })
+        i += 1
+      }
+      continue
+    }
+    i += 1
+  }
+  return rows
+}
+
+// 与 toolEditDiff 结构一致，但每个 edit 额外携带 split 对比所需的 rows，
+// 供对话详情里的左右对比视图使用。
+export function toolEditDiffSideBySide(message) {
+  const diff = toolEditDiff(message)
+  if (!diff) return null
+  return {
+    files: diff.files,
+    edits: diff.edits.map(edit => ({ ...edit, rows: buildEditSideBySide(edit) }))
+  }
+}
+
 export function toolLineChanges(message) {
   const editArgumentsResult = editArguments(message)
   if (!editArgumentsResult) return null
@@ -422,4 +473,76 @@ export function toolIcon(message) {
     if (name && pattern.test(name)) return icon
   }
   return Wrench
+}
+
+// 读取文件类工具（read/view/cat/get/load 等）：让读到的内容直接展示，
+// 并把 limit/offset 等参数显示在文件名右侧。
+const READ_TOOL_NAMES = /^(?:read|read_file|readfile|view|cat|get|get_file|load|load_file|fetch_file|show|display|print)$/i
+const READ_PATH_KEYS = ['filePath', 'path', 'file_path', 'filename', 'file', 'absPath', 'abs_path']
+const READ_PARAM_KEYS = ['limit', 'offset', 'startLine', 'endLine']
+
+function normalizeReadInput(message) {
+  const obj = normalizedInput(message)
+  return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {}
+}
+
+export function isReadTool(message) {
+  if (!message || toolEditDiff(message)) return false
+  const name = toolName(message)
+  if (!name || !READ_TOOL_NAMES.test(name)) return false
+  const input = normalizeReadInput(message)
+  return READ_PATH_KEYS.some(key => typeof input[key] === 'string' && input[key].trim())
+}
+
+export function readToolMeta(message) {
+  if (!isReadTool(message)) return null
+  const input = normalizeReadInput(message)
+  const path = READ_PATH_KEYS.map(key => input[key]).find(value => typeof value === 'string' && value.trim()) || ''
+  const params = []
+  for (const key of READ_PARAM_KEYS) {
+    const value = input[key]
+    if (value != null && String(value).trim() !== '') params.push(`${key} ${value}`)
+  }
+  return { path, params }
+}
+
+// 读取工具的输出常被包成 { content: [{ type, text|data, ... }] } 的 JSON。
+// 这里把内容拆成文本块 / 图片块，避免把 JSON 骨架展示出来，
+// 也不会丢失调 type 为非 text 的内容（如 image）。
+export function readToolBlocks(message) {
+  if (!isReadTool(message)) return null
+  const raw = toolOutput(message)
+  if (raw == null || raw === '') return null
+
+  const parsed = asObject(raw)
+  if (typeof parsed === 'string') return [{ kind: 'text', text: parsed }]
+  if (!parsed || typeof parsed !== 'object') return null
+
+  const content = parsed.content
+  if (Array.isArray(content) && content.length) {
+    const blocks = []
+    for (const item of content) {
+      if (!item || typeof item !== 'object') {
+        if (typeof item === 'string' && item !== '') blocks.push({ kind: 'text', text: item })
+        continue
+      }
+      const type = item.type
+      if (type === 'text') {
+        if (typeof item.text === 'string' && item.text !== '') blocks.push({ kind: 'text', text: item.text })
+      } else if (type === 'image') {
+        if (item.data && item.mimeType) blocks.push({ kind: 'image', data: item.data, mimeType: item.mimeType })
+      } else {
+        // 未知类型：尽量以文本呈现，避免内容被吞掉。
+        if (typeof item.text === 'string' && item.text !== '') blocks.push({ kind: 'text', text: item.text })
+        else blocks.push({ kind: 'text', text: JSON.stringify(item) })
+      }
+    }
+    if (blocks.length) return blocks
+  }
+
+  if (typeof parsed.result === 'string' && parsed.result.trim()) return [{ kind: 'text', text: parsed.result }]
+  if (typeof parsed.output === 'string' && parsed.output.trim()) return [{ kind: 'text', text: parsed.output }]
+
+  // 退化处理：原样 JSON，避免吞掉内容。
+  return [{ kind: 'text', text: typeof raw === 'string' ? raw : JSON.stringify(parsed, null, 2) }]
 }

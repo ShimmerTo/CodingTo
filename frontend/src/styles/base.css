@@ -1,3 +1,5 @@
+.hidden-file-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
 :root {
   font-family: Inter, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #242422;
@@ -7,6 +9,7 @@
   --surface: #ffffff;
   --sidebar: #efefec;
   --surface-2: #f4f4f1;
+  --code-bg: #fcfcfb;
   --text: #242422;
   --muted: #71716d;
   --faint: #9b9b95;
@@ -19,6 +22,16 @@
   --danger: #d14b42;
   --amber: #d9a441;
   --shadow: 0 12px 35px rgba(20, 20, 18, .08);
+  /* 代码改动对比（替换前/后）专用配色，随主题切换。
+     浅色采用 GitHub 式柔和底色：整行淡色底 + 行号槽稍深 + 符号着色，正文保持正常文字色。 */
+  --diff-add-bg: #e7f5ec;
+  --diff-add-fg: #1a7f37;
+  --diff-del-bg: #fdecea;
+  --diff-del-fg: #cf222e;
+  --diff-add-gutter: #cdeedb;
+  --diff-del-gutter: #fadad5;
+  --diff-context-bg: rgba(120, 120, 115, .045);
+  --diff-empty-bg: rgba(120, 120, 115, .06);
   scrollbar-color: var(--amber) transparent;
   scrollbar-width: thin;
 }
@@ -30,6 +43,7 @@
   --surface: #222221;
   --sidebar: #181817;
   --surface-2: #292928;
+  --code-bg: #2a2a28;
   --text: #e9e9e7;
   --muted: #aaa9a3;
   --faint: #777771;
@@ -41,6 +55,15 @@
   --hover: #2d2d2b;
   --danger: #ef6a60;
   --shadow: 0 14px 40px rgba(0, 0, 0, .25);
+  /* 深色主题下的改动对比配色 */
+  --diff-add-bg: rgba(80, 200, 130, .14);
+  --diff-add-fg: #86d6a6;
+  --diff-del-bg: rgba(239, 106, 96, .15);
+  --diff-del-fg: #f08a82;
+  --diff-add-gutter: rgba(80, 200, 130, .22);
+  --diff-del-gutter: rgba(239, 106, 96, .2);
+  --diff-context-bg: rgba(255, 255, 255, .03);
+  --diff-empty-bg: rgba(255, 255, 255, .05);
 }
 
 ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -82,6 +105,8 @@ button { color: inherit; }
 .install-dialog__hint { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .install-dialog__input { width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface-2); font: 13px "SFMono-Regular", Consolas, monospace; }
 .install-dialog__input:focus { outline: none; border-color: var(--accent); }
+.install-dialog__preview { display: grid; gap: 6px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+.install-dialog__preview code { display: block; padding: 10px 12px; overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface-2); font: 12px/1.55 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
 .install-dialog__output { max-height: 240px; margin: 12px 0 0; padding: 12px; overflow: auto; border-radius: 8px; color: var(--muted); background: var(--surface-2); font: 12px/1.6 "SFMono-Regular", Consolas, monospace; white-space: pre-wrap; }
 .install-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 

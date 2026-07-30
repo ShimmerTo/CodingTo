@@ -5,7 +5,7 @@ import { localFileURL } from './localFileUrl.js'
 const fallback = {
   config: {
     configVersion: 5,
-    preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441' },
+    preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified' },
     defaultProvider: 'openai',
     defaultModel: 'gpt-5.6-terra',
     lastEnvironment: '',
@@ -36,10 +36,11 @@ const fallback = {
       figma: { enabled: false, activeAuthorizationId: '', authorizations: [] }
     },
     activeAgentId: 'default',
-    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { plan: true, 'skills-list': true }, recommended: {}, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
+    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: {}, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
     environments: [],
     activeEnvId: '',
-    sshConfigs: []
+    sshConfigs: [],
+    userProfile: { name: '', avatar: '' }
   },
   providerPresets: [],
   os: 'browser',
@@ -59,6 +60,37 @@ function isWails() {
   )
 }
 
+// The fallback backend used outside Wails (plain browser dev) has no real storage
+// like the SQLite-backed Wails runtime, so config changes would be lost on every
+// page refresh. Persist the config to localStorage so dev refreshes keep user
+// changes (avatar, nickname, providers, agents, ...).
+const DEV_CONFIG_KEY = 'codingto.dev.config.v1'
+
+function loadDevConfig() {
+  try {
+    if (typeof localStorage === 'undefined') return
+    const raw = localStorage.getItem(DEV_CONFIG_KEY)
+    if (!raw) return
+    const saved = JSON.parse(raw)
+    if (saved && typeof saved === 'object') {
+      fallback.config = { ...structuredClone(fallback.config), ...saved }
+    }
+  } catch (_) {
+    // ignore corrupt or unavailable storage
+  }
+}
+
+function saveDevConfig() {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(DEV_CONFIG_KEY, JSON.stringify(fallback.config))
+  } catch (_) {
+    // ignore quota or serialization errors
+  }
+}
+
+loadDevConfig()
+
 export async function getBootstrap() {
   return isWails() ? App.GetBootstrap() : structuredClone(fallback)
 }
@@ -68,11 +100,12 @@ export async function installPi() {
   fallback.piInstalled = true
   fallback.piPath = 'pi'
   if (!fallback.config.agents.length) {
-    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { plan: true, 'skills-list': true }, recommended: {}, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
+    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: {}, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
     fallback.config.activeAgentId = 'default'
   }
   if (!fallback.config.environments) fallback.config.environments = []
   if (!fallback.config.sshConfigs) fallback.config.sshConfigs = []
+  saveDevConfig()
   return structuredClone(fallback)
 }
 
@@ -84,11 +117,10 @@ export async function saveConfig(config) {
       agent.dataDir = `agent_${crypto.randomUUID().replaceAll('-', '')}`
     }
   }
-  const submitted = new Map((next.agents || []).map(agent => [agent.id, agent]))
-  for (const existing of fallback.config.agents || []) {
-    if (!submitted.has(existing.id)) next.agents.push(structuredClone(existing))
-  }
+  // 与后端 SaveConfig 语义一致：提交内容即权威，缺失的 agent 不从旧配置补回
+  //（删除只能走 deleteAgent），避免浏览器 dev 模式下被删 agent 被静默复活。
   fallback.config = next
+  saveDevConfig()
   return structuredClone(fallback.config)
 }
 
@@ -157,6 +189,7 @@ export async function deleteAgent(id) {
   if (index < 0) throw new Error(`agent not found: ${id}`)
   fallback.config.agents.splice(index, 1)
   if (fallback.config.activeAgentId === id) fallback.config.activeAgentId = fallback.config.agents[0]?.id || ''
+  saveDevConfig()
   return structuredClone(fallback.config)
 }
 
@@ -386,15 +419,42 @@ export async function deleteSession(id) {
   mockSessionMessages.delete(id)
 }
 
+const mockBuiltinCatalog = [
+  { key: 'browser-profile', name: 'Browser Profile', description: 'Manage reusable authenticated browser profiles for this agent.', required: false, currentVersion: '6.0.0' },
+  { key: 'document', name: 'Document', description: 'Inspect, search, create, and distribute local documents.', required: false, currentVersion: '1.0.0' },
+  { key: 'plan', name: 'Plan Mode', description: 'Present and track an execution plan before making changes.', required: false, currentVersion: '1.0.1' },
+  { key: 'skills-list', name: 'Skills List', description: 'List every skill available to the current isolated agent.', required: true, currentVersion: '1.0.0' },
+  { key: 'subagent', name: 'Subagent', description: 'Delegate bounded tasks to authorized CodingTo agents.', required: false, currentVersion: '1.0.0' },
+]
+
 const mockExtensions = {
   tools: [
     { key: 'rtk', name: 'RTK', installed: false, enabled: false, version: '', installHint: 'winget install --id rtk-ai.rtk --exact' },
     { key: 'agent-browser', name: 'Agent Browser', installed: false, enabled: false, version: '', installHint: 'npm install -g agent-browser' }
   ],
   figma: { installed: false, enabled: false, running: false, pid: 0, hasToken: false, version: '' },
+  globalMcp: [],
+  globalPlugins: [],
+  builtinCatalog: mockBuiltinCatalog,
   builtins: {},
   recommended: {},
-  packages: {}
+  packages: {},
+  mcp: {}
+}
+
+function mockPiPluginsStatus(agentId) {
+  const installed = (mockExtensions.packages[agentId] || [])
+    .find(item => item.key === 'npm:@nklisch/pi-plugins' || item.name === '@nklisch/pi-plugins')
+  return {
+    key: 'pi-plugins',
+    name: 'Pi Plugins',
+    description: 'Adds marketplace discovery and plugin lifecycle management for the current agent.',
+    installHint: 'pi install npm:@nklisch/pi-plugins',
+    installed: !!installed?.installed,
+    enabled: !!installed?.enabled,
+    version: installed?.version || '',
+    sourcePath: installed?.sourcePath || '',
+  }
 }
 
 export async function getSubagentTranscript(sessionId, runId) {
@@ -410,9 +470,15 @@ export async function getExtensions() {
   if (isWails()) return App.GetExtensions()
   const snapshot = structuredClone(mockExtensions)
   for (const agent of fallback.config.agents || []) {
-    snapshot.builtins[agent.id] ||= []
+    snapshot.builtins[agent.id] = mockBuiltinCatalog.map(tool => ({
+      ...tool,
+      installed: !!agent.builtin?.[tool.key],
+      installedVersion: agent.builtin?.[tool.key] ? tool.currentVersion : '',
+    }))
     snapshot.packages[agent.id] ||= []
+    snapshot.mcp[agent.id] ||= []
     snapshot.recommended[agent.id] = [
+      mockPiPluginsStatus(agent.id),
       { key: 'rtk', name: 'RTK', installed: !!agent.recommended?.rtk, enabled: !!agent.recommended?.rtk, version: '' },
       { key: 'browser-native', name: 'Pi Agent Browser Native', installed: false, enabled: false, version: '' },
       { key: 'figma', name: 'Pi Figma', installed: !!agent.recommended?.figma, enabled: !!agent.recommended?.figma, version: 'preview' }
@@ -425,13 +491,19 @@ export async function getAgentExtensions(agentId) {
   if (isWails()) return App.GetAgentExtensions(agentId)
   const agent = (fallback.config.agents || []).find(a => a.id === agentId)
   return {
-    builtins: [],
+    builtins: mockBuiltinCatalog.map(tool => ({
+      ...tool,
+      installed: !!agent?.builtin?.[tool.key],
+      installedVersion: agent?.builtin?.[tool.key] ? tool.currentVersion : '',
+    })),
     recommended: [
+      mockPiPluginsStatus(agentId),
       { key: 'rtk', name: 'RTK', installed: !!agent?.recommended?.rtk, enabled: !!agent?.recommended?.rtk, version: '' },
       { key: 'browser-native', name: 'Pi Agent Browser Native', installed: false, enabled: false, version: '' },
       { key: 'figma', name: 'Pi Figma', installed: !!agent?.recommended?.figma, enabled: !!agent?.recommended?.figma, version: 'preview' }
     ],
-    packages: []
+    packages: structuredClone(mockExtensions.packages[agentId] || []),
+    mcp: structuredClone(mockExtensions.mcp[agentId] || [])
   }
 }
 
@@ -489,6 +561,65 @@ export async function manageExtension(request) {
   if (tool && ['enable', 'start'].includes(request.action)) tool.enabled = true
   if (tool && ['disable', 'stop'].includes(request.action)) tool.enabled = false
   return { message: 'Browser preview only', command: tool?.installHint || '', output: '' }
+}
+
+function mockGlobalPackage(packageName) {
+  const name = String(packageName || '').trim()
+  return {
+    key: name,
+    name,
+    description: name,
+    installed: true,
+    enabled: true,
+    version: 'preview',
+    installHint: `npm install -g ${name}`,
+    sourcePath: `preview:global:${name}`,
+  }
+}
+
+// Install an npm package into one of CodingTo's shared inventories. The backend
+// validates the package name before invoking npm, which keeps the generated
+// command safe to display and execute without accepting arbitrary shell input.
+export async function installGlobalPackage(scope, packageName) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.InstallGlobalPackage', { scope, package: packageName })
+  }
+  const target = scope === 'mcp' ? mockExtensions.globalMcp : mockExtensions.globalPlugins
+  const item = mockGlobalPackage(packageName)
+  const index = target.findIndex(entry => entry.key === item.key)
+  if (index >= 0) target[index] = item
+  else target.push(item)
+  return { message: '浏览器预览模式：已模拟全局安装', command: item.installHint, output: '' }
+}
+
+// Remove an npm package from one of CodingTo's shared inventories. The backend
+// runs npm uninstall -g and drops the registration, so the package is gone from
+// the global scope and the UI list.
+export async function removeGlobalPackage(scope, packageName) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.RemoveGlobalPackage', { scope, package: packageName })
+  }
+  const target = scope === 'mcp' ? mockExtensions.globalMcp : mockExtensions.globalPlugins
+  const index = target.findIndex(entry => entry.key === packageName)
+  if (index >= 0) target.splice(index, 1)
+  return { message: '浏览器预览模式：已模拟移除全局插件', command: `npm uninstall -g ${packageName}`, output: '' }
+}
+
+// Install and register an MCP package for one isolated agent.
+export async function installAgentMcp(agentId, packageName) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.InstallAgentMCP', { agentId, package: packageName })
+  }
+  mockExtensions.mcp[agentId] ||= []
+  const item = mockGlobalPackage(packageName)
+  const index = mockExtensions.mcp[agentId].findIndex(entry => entry.key === item.key)
+  if (index >= 0) mockExtensions.mcp[agentId][index] = item
+  else mockExtensions.mcp[agentId].push(item)
+  return {
+    message: '浏览器预览模式：已模拟 Agent MCP 安装',
+    command: `npm install -g ${packageName}\npi install npm:pi-mcp-adapter`,
+    output: '',
+  }
 }
 
 // Install a Pi extension into the current agent's data directory by running a
@@ -555,6 +686,7 @@ export function onInstallDone(handler) {
 export async function saveFigmaConfig(config) {
   if (isWails()) return App.SaveFigmaConfig(config)
   fallback.config.extensions.figma = structuredClone(config)
+  saveDevConfig()
   const active = config.authorizations?.find(item => item.id === config.activeAuthorizationId)
   mockExtensions.figma = {
     ...(mockExtensions.figma || {}),

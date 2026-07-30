@@ -185,6 +185,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         :agents="agents"
         :loading-history="loadingHistory"
         :t="t"
+        :selected-agent="selectedAgent"
         @update-thinking-open="emit('update-thinking-open', $event)"
         @artifact-error="emit('artifact-error', $event)"
         @open-change-file="openChangedFile"

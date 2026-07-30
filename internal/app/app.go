@@ -291,6 +291,11 @@ func (a *App) InstallPi() (Bootstrap, error) {
 func (a *App) GetExtensions() extensions.Snapshot {
 	snap := a.extensions.Snapshot(a.store.Get().Extensions)
 	cfg := a.store.Get()
+	if catalog, err := piagent.BuiltinToolCatalog(); err == nil {
+		snap.BuiltinCatalog = catalog
+	} else {
+		snap.BuiltinCatalog = []extensions.BuiltinToolStatus{}
+	}
 	builtins := make(map[string][]extensions.BuiltinToolStatus, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
 		statuses, err := piagent.BuiltinToolStatuses(agent.DataDir, agent.Builtin)
@@ -303,6 +308,7 @@ func (a *App) GetExtensions() extensions.Snapshot {
 
 	recommended := make(map[string][]extensions.Status, len(cfg.Agents))
 	packages := make(map[string][]extensions.Status, len(cfg.Agents))
+	mcpServers := make(map[string][]extensions.Status, len(cfg.Agents))
 	a.store.EnsureAgentDataDirs(&cfg)
 	for _, agent := range cfg.Agents {
 		packageStatuses, err := piagent.InstalledPackageStatuses(agent.DataDir)
@@ -310,6 +316,11 @@ func (a *App) GetExtensions() extensions.Snapshot {
 			packageStatuses = []extensions.Status{}
 		}
 		packages[agent.ID] = packageStatuses
+		agentMCP, mcpErr := piagent.MCPServerStatuses(agent.DataDir)
+		if mcpErr != nil {
+			agentMCP = []extensions.Status{}
+		}
+		mcpServers[agent.ID] = agentMCP
 
 		enabled := agent.Recommended["rtk"] && piagent.RTKMaterialized(agent.DataDir)
 		installed := false
@@ -332,6 +343,7 @@ func (a *App) GetExtensions() extensions.Snapshot {
 			figmaStatus.SourcePath = piagent.PiMCPAdapterDir(agent.DataDir)
 		}
 		recommended[agent.ID] = []extensions.Status{
+			extensions.PiPluginsStatusForAgent(packageStatuses),
 			extensions.RTKStatusForAgent(enabled),
 			browserStatus,
 			figmaStatus,
@@ -339,6 +351,7 @@ func (a *App) GetExtensions() extensions.Snapshot {
 	}
 	snap.Recommended = recommended
 	snap.Packages = packages
+	snap.MCP = mcpServers
 	return snap
 }
 
@@ -363,6 +376,10 @@ func (a *App) GetAgentExtensions(agentID string) extensions.AgentExtensionStatus
 	if err != nil {
 		packageStatuses = []extensions.Status{}
 	}
+	mcpStatuses, err := piagent.MCPServerStatuses(agent.DataDir)
+	if err != nil {
+		mcpStatuses = []extensions.Status{}
+	}
 
 	enabled := agent.Recommended["rtk"] && piagent.RTKMaterialized(agent.DataDir)
 	installed := false
@@ -385,6 +402,7 @@ func (a *App) GetAgentExtensions(agentID string) extensions.AgentExtensionStatus
 		figmaStatus.SourcePath = piagent.PiMCPAdapterDir(agent.DataDir)
 	}
 	recommended := []extensions.Status{
+		extensions.PiPluginsStatusForAgent(packageStatuses),
 		extensions.RTKStatusForAgent(enabled),
 		browserStatus,
 		figmaStatus,
@@ -393,6 +411,7 @@ func (a *App) GetAgentExtensions(agentID string) extensions.AgentExtensionStatus
 		Builtins:    builtins,
 		Recommended: recommended,
 		Packages:    packageStatuses,
+		MCP:         mcpStatuses,
 	}
 }
 
@@ -482,7 +501,15 @@ func (a *App) streamAgentCommand(agentID, command string) AgentExtensionResult {
 			"line":    line,
 		})
 	}
-	out, err := piagent.RunAgentCommandWithProgress(profile.DataDir, command, emit)
+	source, parseErr := piagent.ParsePiInstallCommand(command)
+	if parseErr != nil {
+		return AgentExtensionResult{Success: false, Command: command, Message: parseErr.Error()}
+	}
+	if reason := extensions.AgentPackageUnsupportedReason(source, runtime.GOOS); reason != "" {
+		return AgentExtensionResult{Success: false, Command: command, Message: reason}
+	}
+	emit("> " + command)
+	out, err := piagent.InstallAgentPackageWithProgress(profile.DataDir, source, emit)
 	success := err == nil
 	res := AgentExtensionResult{Success: success, Command: command, Output: out, Message: "命令已执行"}
 	if err != nil {
@@ -502,7 +529,7 @@ func (a *App) InstallAgentExtension(req InstallAgentExtensionRequest) (AgentExte
 	a.store.EnsureAgentDataDirs(&cfg)
 	application.Get().Event.Emit("install:start", map[string]any{
 		"agentId": req.AgentID,
-		"title":   "扩展安装",
+		"title":   installTerminalName() + " · Agent 扩展安装",
 	})
 	res := a.streamAgentCommand(req.AgentID, req.Command)
 	application.Get().Event.Emit("install:done", map[string]any{
@@ -528,17 +555,25 @@ func (a *App) UninstallAgentExtension(req AgentExtensionKeyRequest) (AgentExtens
 	}
 	source := ""
 	sourcePath := ""
-	if req.Key == "browser-native" {
+	if req.Key == "browser-native" || req.Key == "pi-plugins" {
+		packageName := "pi-agent-browser-native"
+		fallbackSource := "npm:pi-agent-browser-native"
+		if req.Key == "pi-plugins" {
+			packageName = "@nklisch/pi-plugins"
+			fallbackSource = extensions.PiPluginsPackageSource
+		}
 		for _, status := range statuses {
-			if status.Name == "pi-agent-browser-native" {
+			if status.Name == packageName || status.Key == fallbackSource {
 				source = status.Key
 				sourcePath = status.SourcePath
 				break
 			}
 		}
 		if source == "" {
-			source = "npm:pi-agent-browser-native"
-			sourcePath = piagent.BrowserNativeDir(profile.DataDir)
+			source = fallbackSource
+			if req.Key == "browser-native" {
+				sourcePath = piagent.BrowserNativeDir(profile.DataDir)
+			}
 		}
 	} else {
 		for _, status := range statuses {
@@ -613,6 +648,193 @@ func (a *App) ManageExtension(req extensions.ActionRequest) (extensions.ActionRe
 		"action": req.Action,
 	})
 	return result, err
+}
+
+type GlobalPackageInstallRequest struct {
+	Scope   string `json:"scope"`
+	Package string `json:"package"`
+}
+
+type AgentMCPInstallRequest struct {
+	AgentID string `json:"agentId"`
+	Package string `json:"package"`
+}
+
+func installTerminalName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "CMD"
+	case "darwin":
+		return "Terminal"
+	default:
+		return "Shell"
+	}
+}
+
+func upsertGlobalPackage(items []extensions.GlobalPackage, item extensions.GlobalPackage) []extensions.GlobalPackage {
+	for index := range items {
+		if items[index].Package == item.Package {
+			items[index] = item
+			return items
+		}
+	}
+	return append(items, item)
+}
+
+// InstallGlobalPackage installs and registers a user-supplied npm package in
+// either the global MCP or global plugin inventory.
+func (a *App) InstallGlobalPackage(req GlobalPackageInstallRequest) (extensions.ActionResult, error) {
+	scope := strings.ToLower(strings.TrimSpace(req.Scope))
+	if scope != "mcp" && scope != "plugin" {
+		return extensions.ActionResult{}, fmt.Errorf("unsupported global package scope: %s", req.Scope)
+	}
+	packageName := strings.TrimSpace(req.Package)
+	if err := extensions.ValidateNPMPackageName(packageName); err != nil {
+		return extensions.ActionResult{}, err
+	}
+	installID := "global:" + scope + ":" + packageName
+	app := application.Get()
+	app.Event.Emit("install:start", map[string]any{
+		"installId": installID,
+		"scope":     "global",
+		"title":     installTerminalName() + " · 全局安装 · " + packageName,
+	})
+	app.Event.Emit("install:log", map[string]any{"installId": installID, "line": "> npm install -g " + packageName})
+	registration, result, err := a.extensions.InstallGlobalPackage(packageName, func(line string) {
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": line})
+	})
+	if err == nil && scope == "mcp" && registration.Command == "" {
+		err = fmt.Errorf("npm package %s does not expose an executable MCP command", packageName)
+	}
+	if err == nil {
+		cfg := a.store.Get()
+		if scope == "mcp" {
+			cfg.Extensions.GlobalMCP = upsertGlobalPackage(cfg.Extensions.GlobalMCP, registration)
+		} else {
+			cfg.Extensions.GlobalPlugins = upsertGlobalPackage(cfg.Extensions.GlobalPlugins, registration)
+		}
+		err = a.store.Save(cfg)
+	}
+	if err != nil {
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": "ERROR: " + err.Error()})
+	}
+	app.Event.Emit("install:done", map[string]any{"installId": installID, "success": err == nil})
+	app.Event.Emit("extensions:changed", map[string]any{"key": packageName, "action": "install"})
+	return result, err
+}
+
+// RemoveGlobalPackage uninstalls a user-supplied npm package from the shared
+// Node runtime and drops it from the global MCP or plugin inventory. The global
+// uninstall is best-effort: if the package is already gone from the global scope
+// we still remove the stale registration so the list stays accurate.
+func (a *App) RemoveGlobalPackage(req GlobalPackageInstallRequest) (extensions.ActionResult, error) {
+	scope := strings.ToLower(strings.TrimSpace(req.Scope))
+	if scope != "mcp" && scope != "plugin" {
+		return extensions.ActionResult{}, fmt.Errorf("unsupported global package scope: %s", req.Scope)
+	}
+	packageName := strings.TrimSpace(req.Package)
+	if packageName == "" {
+		return extensions.ActionResult{}, fmt.Errorf("package name is required")
+	}
+	if err := extensions.ValidateNPMPackageName(packageName); err != nil {
+		return extensions.ActionResult{}, err
+	}
+	installID := "global:" + scope + ":remove:" + packageName
+	app := application.Get()
+	app.Event.Emit("install:start", map[string]any{
+		"installId": installID,
+		"scope":     "global",
+		"title":     installTerminalName() + " · 全局卸载 · " + packageName,
+	})
+	app.Event.Emit("install:log", map[string]any{"installId": installID, "line": "> npm uninstall -g " + packageName})
+	_, uninstallErr := a.extensions.UninstallGlobalPackage(packageName, func(line string) {
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": line})
+	})
+	if uninstallErr != nil {
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": "warn: " + uninstallErr.Error()})
+	}
+	cfg := a.store.Get()
+	if scope == "mcp" {
+		cfg.Extensions.GlobalMCP = removeGlobalPackage(cfg.Extensions.GlobalMCP, packageName)
+	} else {
+		cfg.Extensions.GlobalPlugins = removeGlobalPackage(cfg.Extensions.GlobalPlugins, packageName)
+	}
+	if err := a.store.Save(cfg); err != nil {
+		return extensions.ActionResult{}, err
+	}
+	app.Event.Emit("install:done", map[string]any{"installId": installID, "success": true})
+	app.Event.Emit("extensions:changed", map[string]any{"key": packageName, "action": "uninstall"})
+	if uninstallErr != nil {
+		return extensions.ActionResult{Message: "已从列表移除（全局卸载失败：" + uninstallErr.Error() + "）", Command: "npm uninstall -g " + packageName}, nil
+	}
+	return extensions.ActionResult{Message: "已从列表移除并卸载", Command: "npm uninstall -g " + packageName}, nil
+}
+
+func removeGlobalPackage(items []extensions.GlobalPackage, name string) []extensions.GlobalPackage {
+	filtered := make([]extensions.GlobalPackage, 0, len(items))
+	for _, item := range items {
+		if item.Package != name {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// InstallAgentMCP installs the shared MCP runtime, ensures the agent's Pi MCP
+// adapter is present, and registers the server in that agent's mcp.json.
+func (a *App) InstallAgentMCP(req AgentMCPInstallRequest) (extensions.ActionResult, error) {
+	packageName := strings.TrimSpace(req.Package)
+	if err := extensions.ValidateNPMPackageName(packageName); err != nil {
+		return extensions.ActionResult{}, err
+	}
+	cfg := a.store.Get()
+	agent, found := cfg.Agent(req.AgentID)
+	if !found {
+		return extensions.ActionResult{}, fmt.Errorf("agent not found: %s", req.AgentID)
+	}
+	a.store.EnsureAgentDataDirs(&cfg)
+	agent, _ = cfg.Agent(req.AgentID)
+	installID := "agent-mcp:" + req.AgentID + ":" + packageName
+	app := application.Get()
+	app.Event.Emit("install:start", map[string]any{
+		"installId": installID,
+		"agentId":   req.AgentID,
+		"scope":     "agent",
+		"title":     installTerminalName() + " · Agent MCP 安装 · " + packageName,
+	})
+	emit := func(line string) {
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "agentId": req.AgentID, "line": line})
+	}
+	emit("> npm install -g " + packageName)
+	registration, globalResult, err := a.extensions.InstallGlobalPackage(packageName, emit)
+	if err == nil && registration.Command == "" {
+		err = fmt.Errorf("npm package %s does not expose an executable MCP command", packageName)
+	}
+	if err == nil && !piagent.PiMCPAdapterInstalled(agent.DataDir) {
+		emit("> pi install npm:pi-mcp-adapter")
+		_, err = piagent.InstallAgentPackageWithProgress(agent.DataDir, "npm:pi-mcp-adapter", emit)
+	}
+	if err == nil {
+		key := registration.Command
+		if key == "" {
+			key = registration.Name
+		}
+		err = piagent.UpsertMCPServer(agent.DataDir, key, registration.Command, registration.Args)
+	}
+	if err == nil {
+		err = a.store.Save(cfg)
+	}
+	if err != nil {
+		emit("ERROR: " + err.Error())
+	}
+	app.Event.Emit("install:done", map[string]any{"installId": installID, "agentId": req.AgentID, "success": err == nil})
+	app.Event.Emit("extensions:changed", map[string]any{"key": packageName, "action": "install", "agentId": req.AgentID})
+	if err != nil {
+		return globalResult, err
+	}
+	globalResult.Message = "Agent MCP installed"
+	globalResult.Command += "\npi install npm:pi-mcp-adapter"
+	return globalResult, nil
 }
 
 // SaveFigmaConfig persists the shared authorization catalog. Individual Pi

@@ -15,6 +15,9 @@ import {
   saveBrowserProfile,
   readAgentFile, writeAgentFile,
   listSkills, installSkills, previewSkillArchive, previewSkillUrl, editSkill, deleteSkill, updateSkill,
+  installGlobalPackage as beInstallGlobalPackage,
+  removeGlobalPackage as beRemoveGlobalPackage,
+  installAgentMcp as beInstallAgentMcp,
   installAgentExtension as beInstallAgentExtension,
   uninstallAgentExtension as beUninstallAgentExtension
 } from './backend'
@@ -62,7 +65,8 @@ const bootstrap = ref(null)
 // 客户端自身更新：启动后后台检查一次，有新版本时为 true，用于设置菜单红点。
 const appUpdateAvailable = ref(false)
 const config = reactive({
-  preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441' },
+  preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified' },
+  userProfile: { name: '', avatar: '' },
   providers: [],
   defaultProvider: '',
   defaultModel: '',
@@ -304,7 +308,17 @@ const documentPreviewRequest = ref(null)
 const documentArtifactFocus = ref(null)
 const executionElapsedMs = ref(0)
 const executionRunning = ref(false)
-const extensionSnapshot = ref({ tools: [], figma: { installed: false, enabled: false, running: false, pid: 0, hasToken: false, version: '' }, builtins: {}, recommended: {}, packages: {} })
+const extensionSnapshot = ref({
+  tools: [],
+  figma: { installed: false, enabled: false, running: false, pid: 0, hasToken: false, version: '' },
+  globalMcp: [],
+  globalPlugins: [],
+  builtinCatalog: [],
+  builtins: {},
+  recommended: {},
+  packages: {},
+  mcp: {},
+})
 const extensionBusy = ref('')
 const extensionDeleteBusy = ref(false)
 const extensionLoading = ref(false)
@@ -371,7 +385,7 @@ const nav = computed(() => [
   { id: 'agents', label: t.value.agents, icon: Bot },
   { id: 'workspace', label: t.value.workspaceMenu, icon: Folder },
   { id: 'skills', label: t.value.skillsMenu, icon: Sparkles },
-  { id: 'mcp', label: t.value.mcpMenu, icon: Network, dev: true },
+  { id: 'mcp', label: t.value.mcpMenu, icon: Network },
   { id: 'plugins', label: t.value.plugins, icon: Blocks },
   { id: 'models', label: t.value.modelsMenu, icon: Brain }
   // { id: 'docs', label: t.value.docs, icon: BookOpen }
@@ -465,6 +479,8 @@ async function load() {
   config.extensions ||= { figma: { enabled: false, activeAuthorizationId: '', authorizations: [] } }
   config.extensions.figma ||= { enabled: false, activeAuthorizationId: '', authorizations: [] }
   config.extensions.figma.authorizations ||= []
+  config.extensions.globalMcp ||= []
+  config.extensions.globalPlugins ||= []
   config.agents ||= []
   config.agents.forEach(normalizeAgent)
   if (config.agents.length && !config.agents.some(agent => agent.id === config.activeAgentId)) config.activeAgentId = config.agents[0].id
@@ -536,9 +552,13 @@ async function refreshExtensions({ showLoading = false } = {}) {
     const snapshot = await getExtensions()
     snapshot.tools ||= []
     snapshot.figma ||= { installed: false, enabled: false, running: false, pid: 0, hasToken: false, version: '' }
+    snapshot.builtinCatalog ||= []
+    snapshot.globalMcp ||= []
+    snapshot.globalPlugins ||= []
     snapshot.builtins ||= {}
     snapshot.recommended ||= {}
     snapshot.packages ||= {}
+    snapshot.mcp ||= {}
     // Keep the current extension UI mounted during install/enable/remove
     // operations and replace only its backing snapshot when fresh data arrives.
     extensionSnapshot.value = snapshot
@@ -558,6 +578,7 @@ async function refreshAgentExtensions(agentId) {
     current.builtins = { ...(current.builtins || {}), [agentId]: status.builtins || [] }
     current.recommended = { ...(current.recommended || {}), [agentId]: status.recommended || [] }
     current.packages = { ...(current.packages || {}), [agentId]: status.packages || [] }
+    current.mcp = { ...(current.mcp || {}), [agentId]: status.mcp || [] }
     extensionSnapshot.value = { ...current }
   } catch (err) {
     extensionNotice.value = { error: true, text: String(err) }
@@ -572,6 +593,16 @@ function defaultBrowserProfilePolicy() {
   }
 }
 
+function builtinCatalog() {
+  const catalog = extensionSnapshot.value?.builtinCatalog || []
+  if (catalog.length) return catalog
+  return Object.values(extensionSnapshot.value?.builtins || {}).find(items => items?.length) || []
+}
+
+function defaultBuiltinSelection() {
+  return Object.fromEntries(builtinCatalog().map(tool => [tool.key, true]))
+}
+
 function defaultAgent() {
   const id = `agent-${crypto.randomUUID().slice(0, 8)}`
   return {
@@ -579,7 +610,7 @@ function defaultAgent() {
     name: `Agent ${config.agents.length + 1}`,
     description: '',
     dataDir: '',
-    builtin: {},
+    builtin: defaultBuiltinSelection(),
     recommended: {},
     subagents: [],
     piTools: { read: true, bash: true, edit: true, write: true },
@@ -593,7 +624,9 @@ function normalizeAgent(agent) {
   agent.id ||= `agent-${crypto.randomUUID().slice(0, 8)}`
   agent.name ||= 'Agent'
   agent.builtin ||= {}
-  agent.builtin['skills-list'] = true
+  for (const tool of builtinCatalog()) {
+    if (tool.required) agent.builtin[tool.key] = true
+  }
   agent.recommended ||= {}
   agent.subagents ||= []
   agent.piTools = { read: true, bash: true, edit: true, write: true, ...(agent.piTools || {}) }
@@ -711,6 +744,11 @@ async function confirmDeleteExtension() {
   try {
     if (payload.type === 'browser') {
       if (selectedAgent.value) await uninstallAgentExtension(selectedAgent.value.id, 'browser-native')
+    } else if (payload.type === 'recommended-package') {
+      if (selectedAgent.value) {
+        const result = await uninstallAgentExtension(selectedAgent.value.id, payload.packageKey, { name: payload.name })
+        if (result?.success === true) await toggleAgentExtension(payload.group, payload.key, false)
+      }
     } else if (payload.type === 'package') {
       if (selectedAgent.value) await uninstallAgentExtension(selectedAgent.value.id, payload.key)
     } else {
@@ -900,6 +938,7 @@ async function createAgent() {
   }
   previousAgentId.value = currentAgentId.value
   previousDefaultAgentId.value = config.activeAgentId
+  if (!builtinCatalog().length) await refreshExtensions()
   const agent = defaultAgent()
   newAgentDraft.value = agent
   currentAgentId.value = agent.id
@@ -1057,12 +1096,14 @@ async function toggleAgentExtension(group, key, desiredState) {
     }
   }
   agent[group][key] = next
-  const name = key === 'rtk' ? 'RTK' : (key === 'figma' ? t.value.piFigma : key.toUpperCase())
+  const name = key === 'rtk'
+    ? 'RTK'
+    : (key === 'figma' ? t.value.piFigma : (key === 'pi-plugins' ? t.value.piPlugins : key.toUpperCase()))
   if (agent.id !== newAgentId.value) {
     const ok = await persist()
     if (ok) {
-      if (group === 'builtin' || key === 'rtk' || key === 'figma') {
-        // Both extensions are discovered by Pi at process startup. Reload the
+      if (group === 'builtin' || key === 'rtk' || key === 'figma' || key === 'pi-plugins') {
+        // These extensions are discovered by Pi at process startup. Reload the
         // current agent after its isolated extension state changes.
         extensionRestartPending.value = name
         pushToast('info', t.value.extensionRestartingAgent.replace('{name}', name))
@@ -1135,14 +1176,74 @@ async function installAgentExtension(agentId, command, options = {}) {
   }
 }
 
-async function uninstallAgentExtension(agentId, key) {
-  extensionBusy.value = 'browser-install'
+async function installGlobalPackage(scope, packageName) {
+  const name = String(packageName || '').trim()
+  if (!name || extensionBusy.value) return
+  extensionBusy.value = `global-${scope}-install`
+  try {
+    const result = await beInstallGlobalPackage(scope, name)
+    const latest = await getBootstrap()
+    config.extensions = latest?.config?.extensions || config.extensions
+    config.extensions.globalMcp ||= []
+    config.extensions.globalPlugins ||= []
+    await refreshExtensions()
+    pushToast('success', result?.message || t.value.toastInstalled.replace('{name}', name))
+    return result
+  } catch (err) {
+    pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
+    throw err
+  } finally {
+    extensionBusy.value = ''
+  }
+}
+
+async function removeGlobalPackage(scope, packageName) {
+  const name = String(packageName || '').trim()
+  if (!name || extensionBusy.value) return
+  extensionBusy.value = `global-${scope}-remove`
+  try {
+    const result = await beRemoveGlobalPackage(scope, name)
+    const latest = await getBootstrap()
+    config.extensions = latest?.config?.extensions || config.extensions
+    config.extensions.globalMcp ||= []
+    config.extensions.globalPlugins ||= []
+    await refreshExtensions()
+    pushToast('success', result?.message || t.value.toastRemoved.replace('{name}', name))
+    return result
+  } catch (err) {
+    pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
+    throw err
+  } finally {
+    extensionBusy.value = ''
+  }
+}
+
+async function installAgentMcp(agentId, packageName) {
+  const name = String(packageName || '').trim()
+  if (!agentId || !name || extensionBusy.value) return
+  extensionBusy.value = 'agent-mcp-install'
+  try {
+    const result = await beInstallAgentMcp(agentId, name)
+    await refreshExtensions()
+    pushToast('success', result?.message || t.value.toastInstalled.replace('{name}', name))
+    return result
+  } catch (err) {
+    pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
+    throw err
+  } finally {
+    extensionBusy.value = ''
+  }
+}
+
+async function uninstallAgentExtension(agentId, key, options = {}) {
+  extensionBusy.value = options.busyKey || 'browser-install'
+  const displayName = options.name || t.value.browserNative
   try {
     const result = await beUninstallAgentExtension(agentId, key)
     if (result?.success === false) {
       pushToast('error', t.value.toastExtensionError.replace('{error}', result?.message || ''))
     } else {
-      pushToast('success', result?.message || t.value.toastUninstalled.replace('{name}', t.value.browserNative))
+      pushToast('success', result?.message || t.value.toastUninstalled.replace('{name}', displayName))
     }
     await refreshAgentExtensions(agentId)
     return result
@@ -2930,6 +3031,9 @@ provide(appContextKey, {
   extensionAction,
   figmaAction,
   toggleAgentExtension,
+  installGlobalPackage,
+  removeGlobalPackage,
+  installAgentMcp,
   installAgentExtension,
   uninstallAgentExtension,
   openWsEditor,

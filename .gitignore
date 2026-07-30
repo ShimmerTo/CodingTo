@@ -34,4 +34,7 @@ frontend/bindings/
 # information for Eclipse / Flash Builder.
 *test.go
 *test.js
+!/test/*test.go
+!/test/*test.js
 /.workbuddy/
+/.codegraph/.gitignore

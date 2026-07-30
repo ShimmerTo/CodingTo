@@ -9,6 +9,15 @@ const piToolOptions = ['read', 'bash', 'edit', 'write']
 const availableSubagents = computed(() =>
   (agentList.value || []).filter(agent => agent.id !== selectedAgent.value?.id)
 )
+const extensionDeleteTitle = computed(() =>
+  pendingExtensionDelete.value?.category === 'mcp' ? t.value.disconnectMcpTitle : t.value.deleteExtensionTitle
+)
+const extensionDeleteConfirm = computed(() => {
+  const template = pendingExtensionDelete.value?.category === 'mcp'
+    ? t.value.disconnectMcpConfirm
+    : t.value.deleteExtensionConfirm
+  return template.replace('{name}', pendingExtensionDelete.value?.name || '')
+})
 const selectedAgentDefaultModel = computed({
   get: () => {
     const agent = selectedAgent.value
@@ -323,11 +332,11 @@ const selectedAgentDefaultModel = computed({
     <div v-if="pendingExtensionDelete" class="modal-backdrop" @pointerdown.self="extensionDeleteBusy ? null : (pendingExtensionDelete = null)">
       <section class="agent-editor-dialog confirm-dialog" role="dialog" aria-modal="true">
         <header class="agent-editor-dialog__head">
-          <h2>{{ t.deleteExtensionTitle }}</h2>
+          <h2>{{ extensionDeleteTitle }}</h2>
           <button class="icon-button" :aria-label="t.closeDialog" :disabled="extensionDeleteBusy" @click="pendingExtensionDelete = null"><X :size="16" /></button>
         </header>
         <div class="agent-editor-dialog__body">
-          <p class="confirm-dialog__text">{{ t.deleteExtensionConfirm.replace('{name}', pendingExtensionDelete.name) }}</p>
+          <p class="confirm-dialog__text">{{ extensionDeleteConfirm }}</p>
         </div>
         <footer class="agent-editor-dialog__footer">
           <div class="agent-draft-actions">

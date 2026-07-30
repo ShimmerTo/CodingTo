@@ -1,13 +1,13 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { ArrowLeft, Award, Binary, Blocks, Bot, Check, FileText, Package, Pencil, RefreshCw, Settings, Shield, Sparkles, Trash2, X, Zap } from 'lucide-vue-next'
+import { ArrowLeft, Award, Binary, Blocks, Bot, Check, FileText, Network, Package, Pencil, RefreshCw, Settings, Shield, Sparkles, Trash2, X, Zap } from 'lucide-vue-next'
 import SkillCard from '../SkillCard.vue'
-import { useAppContext, agentAvatar } from '../../composables/appContext'
+import { useAppContext, agentAvatar, isImageAvatar } from '../../composables/appContext'
 import { extensionIcon } from '../../extensionIcons'
 import { listBrowserProfiles, deleteBrowserProfile, renameBrowserProfile } from '../../backend'
 import InstallDialog from '../../components/InstallDialog.vue'
 
-const { t, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, skills, refreshSkills, skillsLoading } = useAppContext()
+const { t, bootstrap, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, skills, refreshSkills, skillsLoading } = useAppContext()
 
 const activeTab = ref('basics')
 const availableSubagents = computed(() =>
@@ -28,6 +28,25 @@ function selectAvatar(value) {
   if (!agent) return
   agent.avatar = (value || '').trim().slice(0, 2)
   persistAgentChange(agent)
+}
+const agentAvatarInput = ref(null)
+function uploadAgentAvatar(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || !selectedAgent.value) return
+  if (!file.type.startsWith('image/')) {
+    pushToast('error', t.value.agentAvatarUploadType)
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    const agent = selectedAgent.value
+    if (!agent) return
+    agent.avatar = String(reader.result)
+    persistAgentChange(agent)
+  }
+  reader.onerror = () => pushToast('error', t.value.agentAvatarUploadFailed)
+  reader.readAsDataURL(file)
 }
 const selectedDefaultModel = computed({
   get: () => {
@@ -146,16 +165,11 @@ async function saveBrowserPolicy() {
 }
 
 const builtinBusy = ref('')
-const builtinStatusMap = computed(() => {
-  const map = {}
+const builtinStatuses = computed(() => {
   const agentId = selectedAgent.value?.id || ''
-  const list = extensionSnapshot.value?.builtins?.[agentId] || []
-  for (const s of list) map[s.key] = s
-  return map
+  const statuses = extensionSnapshot.value?.builtins?.[agentId] || []
+  return statuses.length ? statuses : (extensionSnapshot.value?.builtinCatalog || [])
 })
-function builtinStatus(key) {
-  return builtinStatusMap.value[key] || null
-}
 const rtkStatus = computed(() => {
   const agentId = selectedAgent.value?.id || ''
   return (extensionSnapshot.value?.recommended?.[agentId] || []).find(tool => tool.key === 'rtk') || null
@@ -164,6 +178,13 @@ const recommendedExtensions = computed(() => {
   const agentId = selectedAgent.value?.id || ''
   return extensionSnapshot.value?.recommended?.[agentId] || []
 })
+const piPluginsStatus = computed(() => {
+  return recommendedExtensions.value.find(tool => tool.key === 'pi-plugins') || null
+})
+const piPluginsWindowsUnsupported = computed(() => bootstrap.value?.os === 'windows')
+const piPluginsInstallDisabled = computed(() =>
+  !piPluginsStatus.value?.installed && piPluginsWindowsUnsupported.value
+)
 const installedPackages = computed(() => {
   const agentId = selectedAgent.value?.id || ''
   const managedPaths = new Set(
@@ -187,6 +208,10 @@ const playwrightStatus = computed(() => {
 const piFigmaStatus = computed(() => {
   return recommendedExtensions.value.find(tool => tool.key === 'figma') || null
 })
+const agentMcpServers = computed(() => {
+  const agentId = selectedAgent.value?.id || ''
+  return (extensionSnapshot.value?.mcp?.[agentId] || []).filter(server => server.key !== 'figma')
+})
 async function installBrowserNative() {
   if (!selectedAgent.value || extensionBusy.value === 'browser-install') return
   if (!browserRuntimeStatus.value?.installed) {
@@ -209,6 +234,30 @@ function onBrowserToggle(installed) {
   if (installed) requestDeleteExtension({ type: 'browser', name: browserStatus.value?.name || t.value.browserNative })
   else installBrowserNative()
 }
+async function installPiPlugins() {
+  if (!selectedAgent.value || piPluginsInstallDisabled.value || extensionBusy.value === 'pi-plugins-install') return
+  const result = await installAgentExtension(
+    selectedAgent.value.id,
+    'pi install npm:@nklisch/pi-plugins',
+    { busyKey: 'pi-plugins-install', name: t.value.piPlugins },
+  )
+  if (result?.success === true && !selectedAgent.value.recommended?.['pi-plugins']) {
+    await toggleAgentExtension('recommended', 'pi-plugins', true)
+  }
+}
+function onPiPluginsToggle(installed) {
+  if (installed) {
+    requestDeleteExtension({
+      type: 'recommended-package',
+      group: 'recommended',
+      key: 'pi-plugins',
+      packageKey: 'pi-plugins',
+      name: t.value.piPlugins,
+    })
+  } else {
+    installPiPlugins()
+  }
+}
 async function installPiFigma() {
   if (!selectedAgent.value || extensionBusy.value === 'figma-agent-install') return
   if (!figma.value.installed) {
@@ -227,30 +276,49 @@ async function installPiFigma() {
   if (result?.success === true) await toggleAgentExtension('recommended', 'figma', true)
 }
 function onPiFigmaToggle(installed) {
-  if (installed) requestDeleteExtension({ type: 'toggle', group: 'recommended', key: 'figma', name: t.value.piFigma })
+  if (installed) requestDeleteExtension({ type: 'toggle', group: 'recommended', key: 'figma', name: t.value.figma, category: 'mcp' })
   else installPiFigma()
 }
 
-// 安装扩展：弹窗输入完整安装命令，安装到当前 agent 的数据目录
+// 自定义安装统一只接收 npm 包名。界面展示生成后的平台命令，后端再做
+// 一次严格校验后执行，避免把这里变成任意 shell 命令入口。
 const showInstallModal = ref(false)
-const installCommand = ref('')
+const installKind = ref('extension')
+const installPackageName = ref('')
 const installing = ref(false)
-const installOutput = ref('')
+const installTitle = computed(() => installKind.value === 'mcp' ? t.value.installAgentMcp : t.value.installExtension)
+const installHint = computed(() => installKind.value === 'mcp' ? t.value.installAgentMcpHint : t.value.installExtensionHint)
+const installPreviewCommand = computed(() => {
+  const packageName = installPackageName.value.trim() || '<package>'
+  if (installKind.value === 'mcp') {
+    return `npm install -g ${packageName}\npi install npm:pi-mcp-adapter`
+  }
+  return `pi install npm:${packageName}`
+})
 function openInstallModal() {
-  installCommand.value = ''
-  installOutput.value = ''
+  installKind.value = 'extension'
+  installPackageName.value = ''
+  showInstallModal.value = true
+}
+function openMcpInstallModal() {
+  installKind.value = 'mcp'
+  installPackageName.value = ''
   showInstallModal.value = true
 }
 async function runInstallCommand() {
-  if (!selectedAgent.value || !installCommand.value.trim()) return
+  if (!selectedAgent.value || !installPackageName.value.trim()) return
   installing.value = true
-  installOutput.value = ''
   try {
-    const res = await installAgentExtension(selectedAgent.value.id, installCommand.value.trim())
-    installOutput.value = res?.output || res?.message || ''
+    if (installKind.value === 'mcp') {
+      await installAgentMcp(selectedAgent.value.id, installPackageName.value.trim())
+      showInstallModal.value = false
+      return
+    }
+    const command = `pi install npm:${installPackageName.value.trim()}`
+    const res = await installAgentExtension(selectedAgent.value.id, command)
     if (res?.success) showInstallModal.value = false
-  } catch (err) {
-    installOutput.value = String(err)
+  } catch {
+    // The shared action layer already reports the concrete backend error.
   } finally {
     installing.value = false
   }
@@ -422,7 +490,8 @@ watch(
       <div class="page-heading__back">
         <button class="icon-button" :title="t.back" @click="backToAgentList"><ArrowLeft :size="16" /></button>
         <div class="agent-config-avatar">
-          <span v-if="agentAvatar(selectedAgent)" class="agent-config-avatar__emoji">{{ agentAvatar(selectedAgent) }}</span>
+          <img v-if="isImageAvatar(agentAvatar(selectedAgent))" :src="agentAvatar(selectedAgent)" class="agent-config-avatar__img" alt="" />
+          <span v-else-if="agentAvatar(selectedAgent)" class="agent-config-avatar__emoji">{{ agentAvatar(selectedAgent) }}</span>
           <Bot v-else :size="20" />
         </div>
         <div class="agent-config-title">
@@ -455,6 +524,9 @@ watch(
       </button>
       <button :class="{ active: activeTab === 'extensions' }" @click="onTabChange('extensions')">
         <Zap :size="15" />{{ t.agentTabExtensions }}
+      </button>
+      <button :class="{ active: activeTab === 'mcp' }" @click="onTabChange('mcp')">
+        <Network :size="15" />{{ t.agentTabMcp }}
       </button>
       <button :class="{ active: activeTab === 'prompt' }" @click="onTabChange('prompt')">
         <FileText :size="15" />{{ t.agentTabPrompt }}
@@ -512,14 +584,33 @@ watch(
                 @click="selectAvatar('')"
               >{{ selectedAgent.avatar ? '×' : '—' }}</button>
             </div>
-            <input
-              class="agent-avatar-picker__custom"
-              :value="selectedAgent.avatar"
-              maxlength="2"
-              :placeholder="t.agentAvatarClear"
-              @input="selectAvatar($event.target.value)"
-            />
+            <div class="agent-avatar-picker__row">
+              <button
+                type="button"
+                class="agent-avatar-picker__upload"
+                @click="agentAvatarInput?.click()"
+              ><Upload :size="15" />{{ t.agentAvatarUpload }}</button>
+              <input
+                v-if="!isImageAvatar(selectedAgent.avatar)"
+                class="agent-avatar-picker__custom"
+                :value="selectedAgent.avatar"
+                maxlength="2"
+                :placeholder="t.agentAvatarClear"
+                @input="selectAvatar($event.target.value)"
+              />
+            </div>
+            <div v-if="isImageAvatar(selectedAgent.avatar)" class="agent-avatar-picker__image">
+              <img :src="selectedAgent.avatar" alt="" />
+              <button type="button" class="secondary-button compact" @click="selectAvatar('')">{{ t.agentAvatarClear }}</button>
+            </div>
             <small>{{ t.agentAvatarHint }}</small>
+            <input
+              ref="agentAvatarInput"
+              type="file"
+              accept="image/*"
+              class="hidden-file-input"
+              @change="uploadAgentAvatar"
+            />
           </div>
         </div>
         <div class="agent-view__meta-row">
@@ -535,7 +626,8 @@ watch(
             <label v-for="agent in availableSubagents" :key="agent.id" class="agent-subagent-option" :title="subagentTooltip(agent)">
               <input type="checkbox" :checked="subagentEnabled(agent.id)" @change="toggleSubagent(agent.id)" />
               <span class="agent-subagent-option__avatar">
-                <span v-if="agentAvatar(agent)" class="agent-subagent-option__emoji">{{ agentAvatar(agent) }}</span>
+                <img v-if="isImageAvatar(agentAvatar(agent))" :src="agentAvatar(agent)" class="agent-subagent-option__img" alt="" />
+                <span v-else-if="agentAvatar(agent)" class="agent-subagent-option__emoji">{{ agentAvatar(agent) }}</span>
                 <Bot v-else :size="14" />
               </span>
               <span class="agent-subagent-option__name">{{ agent.name }}</span>
@@ -580,6 +672,36 @@ watch(
           </div>
           <div class="agent-ext-grid">
             <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('pi-plugins')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.piPlugins }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.piPluginsDescription }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': piPluginsStatus && !piPluginsStatus.installed }">
+                    {{ !piPluginsStatus || !piPluginsStatus.installed ? t.notInstalled : (piPluginsStatus.version || t.installed) }}
+                  </span>
+                </div>
+              </div>
+              <div
+                class="agent-ext-row__actions"
+                :title="piPluginsInstallDisabled ? t.piPluginsWindowsUnsupported : ''"
+              >
+                <button
+                  class="btn-install"
+                  :class="{ 'is-installed': piPluginsStatus?.installed }"
+                  :disabled="piPluginsInstallDisabled || extensionBusy === 'pi-plugins-install'"
+                  @click="onPiPluginsToggle(piPluginsStatus?.installed)"
+                >
+                  <RefreshCw v-if="extensionBusy === 'pi-plugins-install'" class="spin" :size="13" />
+                  <span class="btn-install__install">{{ t.runInstall }}</span>
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
               <span class="agent-ext-row__icon"><component :is="extensionIcon('rtk')" /></span>
               <div class="agent-ext-row__body">
                 <header class="agent-ext-row__head">
@@ -622,32 +744,6 @@ watch(
               </div>
             </article>
 
-            <article class="agent-ext-row">
-              <span class="agent-ext-row__icon"><component :is="extensionIcon('figma')" /></span>
-              <div class="agent-ext-row__body">
-                <header class="agent-ext-row__head">
-                  <h3>{{ t.piFigma }}</h3>
-                </header>
-                <p class="agent-ext-row__description">{{ t.piFigmaDescription }}</p>
-                <div class="agent-ext-row__meta">
-                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !figma.installed || !figma.hasToken }">
-                    {{ !figma.installed ? t.piFigmaNeedsGlobal : (!figma.hasToken ? t.figmaNotAuthorized : (piFigmaStatus?.installed ? (piFigmaStatus.version || t.installed) : t.notInstalled)) }}
-                  </span>
-                </div>
-              </div>
-              <div class="agent-ext-row__actions">
-                <button
-                  class="btn-install"
-                  :class="{ 'is-installed': piFigmaStatus?.installed }"
-                  :disabled="extensionBusy === 'figma-agent-install'"
-                  @click="onPiFigmaToggle(!!piFigmaStatus?.installed)"
-                >
-                  <RefreshCw v-if="extensionBusy === 'figma-agent-install'" class="spin" :size="13" />
-                  <span class="btn-install__install">{{ t.runInstall }}</span>
-                  <span class="btn-install__delete">{{ t.delete }}</span>
-                </button>
-              </div>
-            </article>
           </div>
         </div>
 
@@ -683,78 +779,29 @@ watch(
         <div class="plugin-section builtins">
           <div class="plugin-section__title"><span>{{ t.builtinTools }}</span><small>{{ t.extensionGroupHint }}</small></div>
           <div class="agent-ext-grid">
-            <article class="agent-ext-row">
-              <span class="agent-ext-row__icon"><component :is="extensionIcon('subagent')" /></span>
-              <div class="agent-ext-row__body">
-                <header class="agent-ext-row__head"><h3>{{ t.subagentTool }}</h3></header>
-                <p class="agent-ext-row__description">{{ t.subagentToolDescription }}</p>
-                <div v-if="builtinStatus('subagent')" class="agent-ext-row__meta">
-                  <span class="agent-ext-row__version agent-ext-row__version--latest">v{{ builtinStatus('subagent').currentVersion }}</span>
-                </div>
-              </div>
-              <div class="agent-ext-row__actions">
-                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.subagent }" @click="onExtensionToggle('builtin', 'subagent', selectedAgent?.builtin?.subagent, t.subagentTool)">
-                  <span class="btn-install__install">{{ t.runInstall }}</span>
-                  <span class="btn-install__delete">{{ t.delete }}</span>
-                </button>
-              </div>
-            </article>
-
-            <article class="agent-ext-row">
-              <span class="agent-ext-row__icon"><component :is="extensionIcon('document')" /></span>
+            <article v-for="status in builtinStatuses" :key="status.key" class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon(status.key)" /></span>
               <div class="agent-ext-row__body">
                 <header class="agent-ext-row__head">
-                  <h3>{{ t.documentTool }}</h3>
+                  <h3>{{ status.name || status.key }}</h3>
                 </header>
-                <p class="agent-ext-row__description">{{ t.documentToolDescription }}</p>
-                <div v-if="builtinStatus('document')" class="agent-ext-row__meta">
-                  <span v-if="builtinStatus('document').installed && builtinStatus('document').installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ builtinStatus('document').installedVersion }}</span>
-                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ builtinStatus('document').currentVersion }}</span>
-                  <button v-if="builtinStatus('document').installed && builtinStatus('document').installedVersion && builtinStatus('document').installedVersion !== builtinStatus('document').currentVersion" class="primary-button compact" :disabled="builtinBusy === 'document'" @click="updateBuiltinTool('document')"><RefreshCw v-if="builtinBusy === 'document'" :size="13" />{{ t.updateBuiltin }}</button>
+                <p class="agent-ext-row__description">{{ status.description || status.key }}</p>
+                <p v-if="status.key === 'browser-profile'" class="browser-policy-summary">{{ browserPolicySummary }}</p>
+                <div class="agent-ext-row__meta">
+                  <span v-if="status.required" class="agent-ext-row__version agent-ext-row__version--latest">{{ t.requiredBuiltin }}</span>
+                  <span v-if="status.installed && status.installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ status.installedVersion }}</span>
+                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ status.currentVersion }}</span>
+                  <button v-if="status.installed && status.installedVersion && status.installedVersion !== status.currentVersion" class="primary-button compact" :disabled="builtinBusy === status.key" @click="updateBuiltinTool(status.key)"><RefreshCw v-if="builtinBusy === status.key" :size="13" />{{ t.updateBuiltin }}</button>
                 </div>
               </div>
               <div class="agent-ext-row__actions">
-                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.document }" @click="onExtensionToggle('builtin', 'document', selectedAgent?.builtin?.document, t.documentTool)"><span class="btn-install__install">{{ t.runInstall }}</span><span class="btn-install__delete">{{ t.delete }}</span></button>
-              </div>
-            </article>
-
-            <article class="agent-ext-row">
-              <span class="agent-ext-row__icon"><component :is="extensionIcon('plan')" /></span>
-              <div class="agent-ext-row__body">
-                <header class="agent-ext-row__head">
-                  <h3>{{ t.planTool }}</h3>
-                </header>
-                <p class="agent-ext-row__description">{{ t.planToolDescription }}</p>
-                <div v-if="builtinStatus('plan')" class="agent-ext-row__meta">
-                  <span v-if="builtinStatus('plan').installed && builtinStatus('plan').installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ builtinStatus('plan').installedVersion }}</span>
-                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ builtinStatus('plan').currentVersion }}</span>
-                  <button v-if="builtinStatus('plan').installed && builtinStatus('plan').installedVersion && builtinStatus('plan').installedVersion !== builtinStatus('plan').currentVersion" class="primary-button compact" :disabled="builtinBusy === 'plan'" @click="updateBuiltinTool('plan')"><RefreshCw v-if="builtinBusy === 'plan'" :size="13" />{{ t.updateBuiltin }}</button>
-                </div>
-              </div>
-              <div class="agent-ext-row__actions">
-                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.plan }" @click="onExtensionToggle('builtin', 'plan', selectedAgent?.builtin?.plan, t.planTool)"><span class="btn-install__install">{{ t.runInstall }}</span><span class="btn-install__delete">{{ t.delete }}</span></button>
-              </div>
-            </article>
-
-            <article class="agent-ext-row">
-              <span class="agent-ext-row__icon"><component :is="extensionIcon('browser-profile')" /></span>
-              <div class="agent-ext-row__body">
-                <header class="agent-ext-row__head">
-                  <h3>{{ t.browserProfile }}</h3>
-                </header>
-                <p class="agent-ext-row__description">{{ t.browserProfileDescription }}</p>
-                <p class="browser-policy-summary">{{ browserPolicySummary }}</p>
-                <div v-if="builtinStatus('browser-profile')" class="agent-ext-row__meta">
-                  <span v-if="builtinStatus('browser-profile').installed && builtinStatus('browser-profile').installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ builtinStatus('browser-profile').installedVersion }}</span>
-                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ builtinStatus('browser-profile').currentVersion }}</span>
-                  <button v-if="builtinStatus('browser-profile').installed && builtinStatus('browser-profile').installedVersion && builtinStatus('browser-profile').installedVersion !== builtinStatus('browser-profile').currentVersion" class="primary-button compact" :disabled="builtinBusy === 'browser-profile'" @click="updateBuiltinTool('browser-profile')"><RefreshCw v-if="builtinBusy === 'browser-profile'" :size="13" />{{ t.updateBuiltin }}</button>
-                </div>
-              </div>
-              <div class="agent-ext-row__actions">
-                <button class="secondary-button compact browser-policy-button" :title="t.browserPolicyTitle" @click="openBrowserPolicyModal">
+                <button v-if="status.key === 'browser-profile'" class="secondary-button compact browser-policy-button" :title="t.browserPolicyTitle" @click="openBrowserPolicyModal">
                   <Settings :size="13" />{{ t.configure }}
                 </button>
-                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.['browser-profile'] }" @click="onExtensionToggle('builtin', 'browser-profile', selectedAgent?.builtin?.['browser-profile'], t.browserProfile)">
+                <button v-if="status.required" class="btn-install is-installed" disabled>
+                  <span class="btn-install__delete">{{ t.requiredBuiltin }}</span>
+                </button>
+                <button v-else class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.[status.key] }" @click="onExtensionToggle('builtin', status.key, selectedAgent?.builtin?.[status.key], status.name || status.key)">
                   <span class="btn-install__install">{{ t.runInstall }}</span>
                   <span class="btn-install__delete">{{ t.delete }}</span>
                 </button>
@@ -765,17 +812,85 @@ watch(
         </template>
       </div>
 
+      <section v-else-if="activeTab === 'mcp'" class="agent-extensions agent-mcp">
+        <div v-if="extensionLoading" class="agent-extensions__loading" role="status" aria-label="检查中…">
+          <RefreshCw class="spin" :size="20" />
+          <span>{{ t.checking }}</span>
+        </div>
+        <div v-else class="plugin-section recommended">
+          <div class="plugin-section__title">
+            <span class="plugin-section__title-left">
+              <span>{{ t.agentMcpServers }}</span>
+              <small>{{ t.agentMcpServersHint }}</small>
+            </span>
+            <button class="secondary-button compact install-ext-trigger" @click="openMcpInstallModal">+ {{ t.installAgentMcp }}</button>
+          </div>
+          <div class="agent-ext-grid">
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('figma')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ t.figma }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.piFigmaDescription }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !figma.installed }">
+                    {{ t.agentMcpGlobalServer }}：{{ figma.installed ? (figma.version || t.installed) : t.notInstalled }}
+                  </span>
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !figma.hasToken }">
+                    {{ t.agentMcpAuthorization }}：{{ figma.hasToken ? t.figmaAuthorized : t.figmaNotAuthorized }}
+                  </span>
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': !piFigmaStatus?.installed }">
+                    {{ t.agentMcpConnection }}：{{ piFigmaStatus?.installed ? (piFigmaStatus.version || t.enabled) : t.notInstalledForAgent }}
+                  </span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button
+                  class="btn-install"
+                  :class="{ 'is-installed': piFigmaStatus?.installed }"
+                  :disabled="extensionBusy === 'figma-agent-install'"
+                  @click="onPiFigmaToggle(!!piFigmaStatus?.installed)"
+                >
+                  <RefreshCw v-if="extensionBusy === 'figma-agent-install'" class="spin" :size="13" />
+                  <span class="btn-install__install">{{ t.enable }}</span>
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+            <article v-for="server in agentMcpServers" :key="server.key" class="agent-ext-row">
+              <span class="agent-ext-row__icon"><Network /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ server.name || server.key }}</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ server.description || server.key }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version">{{ server.installed ? t.installedForAgent : t.notInstalledForAgent }}</span>
+                  <span v-if="server.version" class="agent-ext-row__version">{{ server.version }}</span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="btn-install is-installed" disabled>
+                  <span class="btn-install__delete">{{ t.enabled }}</span>
+                </button>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <InstallDialog
         v-if="showInstallModal"
         mode="command"
-        :title="t.installExtension"
-        :hint="t.installExtensionHint"
-        :command="installCommand"
-        :command-placeholder="t.installCommandPlaceholder"
+        :title="installTitle"
+        :hint="installHint"
+        :command="installPackageName"
+        :preview-command="installPreviewCommand"
+        :command-placeholder="t.npmPackagePlaceholder"
         :running="installing"
         :run-text="t.runInstall"
-        :log="installOutput ? [installOutput] : []"
-        @update:command="installCommand = $event"
+        @update:command="installPackageName = $event"
         @run="runInstallCommand"
         @close="showInstallModal = false"
       />

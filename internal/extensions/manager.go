@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +40,16 @@ const PlaywrightPackage = "playwright"
 const playwrightDownloadMirror = "https://cdn.npmmirror.com/binaries/playwright"
 
 type Config struct {
-	Figma FigmaConfig `json:"figma"`
+	Figma         FigmaConfig     `json:"figma"`
+	GlobalMCP     []GlobalPackage `json:"globalMcp"`
+	GlobalPlugins []GlobalPackage `json:"globalPlugins"`
+}
+
+type GlobalPackage struct {
+	Package string   `json:"package"`
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
 }
 
 // FigmaConfig holds the global Figma runtime and authorization settings.
@@ -75,6 +87,22 @@ type Status struct {
 	Error       string `json:"error"`
 }
 
+const PiPluginsPackageSource = "npm:@nklisch/pi-plugins"
+
+// AgentPackageUnsupportedReason returns a user-facing explanation when a
+// recommended Pi package must not be installed on the target operating system.
+// Keep this guard in the backend as well as the UI so future automatic install
+// paths cannot accidentally install an unsupported package.
+func AgentPackageUnsupportedReason(source, goos string) string {
+	normalizedSource := strings.TrimSpace(source)
+	isPiPlugins := normalizedSource == PiPluginsPackageSource ||
+		strings.HasPrefix(normalizedSource, PiPluginsPackageSource+"@")
+	if isPiPlugins && strings.EqualFold(strings.TrimSpace(goos), "windows") {
+		return "Windows 暂不支持 Pi 插件市场"
+	}
+	return ""
+}
+
 // BuiltinToolStatus reports the bundled (current) versus installed version of a
 // builtin tool for a single agent, so the UI can show a version and offer an
 // update when the installed copy is stale relative to default_tools.
@@ -82,21 +110,28 @@ type BuiltinToolStatus struct {
 	Key              string `json:"key"`
 	Name             string `json:"name"`
 	Description      string `json:"description"`
+	Required         bool   `json:"required"`
 	Installed        bool   `json:"installed"`
 	CurrentVersion   string `json:"currentVersion"`
 	InstalledVersion string `json:"installedVersion"`
 }
 
 type Snapshot struct {
-	Tools    []Status                       `json:"tools"`
-	Figma    FigmaStatus                    `json:"figma"`
-	Builtins map[string][]BuiltinToolStatus `json:"builtins"`
+	Tools          []Status                       `json:"tools"`
+	Figma          FigmaStatus                    `json:"figma"`
+	BuiltinCatalog []BuiltinToolStatus            `json:"builtinCatalog"`
+	Builtins       map[string][]BuiltinToolStatus `json:"builtins"`
 	// Recommended holds per-agent recommended extension status keyed by agent ID
 	// (e.g. RTK). Each agent enables them independently in its own data dir.
 	Recommended map[string][]Status `json:"recommended"`
 	// Packages is the complete per-agent inventory persisted by `pi install`.
 	// Unlike Recommended, it is not limited to extensions known by CodingTo.
 	Packages map[string][]Status `json:"packages"`
+	MCP      map[string][]Status `json:"mcp"`
+	// GlobalMCP and GlobalPlugins are user-installed npm packages registered in
+	// their corresponding global scope.
+	GlobalMCP     []Status `json:"globalMcp"`
+	GlobalPlugins []Status `json:"globalPlugins"`
 }
 
 // AgentExtensionStatuses holds the extension statuses for a single agent,
@@ -105,6 +140,7 @@ type AgentExtensionStatuses struct {
 	Builtins    []BuiltinToolStatus `json:"builtins"`
 	Recommended []Status            `json:"recommended"`
 	Packages    []Status            `json:"packages"`
+	MCP         []Status            `json:"mcp"`
 }
 
 // FigmaStatus reports whether the Figma MCP package is available, authorized and
@@ -158,6 +194,8 @@ const detectionCacheTTL = 60 * time.Second
 // detectionTimeout bounds how long a single detection command may block.
 const detectionTimeout = 8 * time.Second
 
+var npmPackageNamePattern = regexp.MustCompile(`^(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+$`)
+
 func NewManager(configDir string) *Manager {
 	logDir := filepath.Join(configDir, "logs")
 	_ = os.MkdirAll(logDir, 0o700)
@@ -173,10 +211,38 @@ func DefaultConfig() Config {
 			Enabled:        false,
 			Authorizations: []FigmaAuthorization{},
 		},
+		GlobalMCP:     []GlobalPackage{},
+		GlobalPlugins: []GlobalPackage{},
 	}
 }
 
-func (c *Config) Normalize() { c.Figma.Normalize() }
+func (c *Config) Normalize() {
+	c.Figma.Normalize()
+	c.GlobalMCP = normalizeGlobalPackages(c.GlobalMCP)
+	c.GlobalPlugins = normalizeGlobalPackages(c.GlobalPlugins)
+}
+
+func normalizeGlobalPackages(packages []GlobalPackage) []GlobalPackage {
+	seen := map[string]bool{}
+	result := make([]GlobalPackage, 0, len(packages))
+	for _, item := range packages {
+		item.Package = strings.TrimSpace(item.Package)
+		item.Name = strings.TrimSpace(item.Name)
+		item.Command = strings.TrimSpace(item.Command)
+		if item.Package == "" || seen[item.Package] {
+			continue
+		}
+		if item.Name == "" {
+			item.Name = item.Package
+		}
+		if item.Args == nil {
+			item.Args = []string{}
+		}
+		seen[item.Package] = true
+		result = append(result, item)
+	}
+	return result
+}
 
 func (c *FigmaConfig) Normalize() {
 	legacyToken := strings.TrimSpace(c.APIKey)
@@ -249,9 +315,147 @@ func (m *Manager) Snapshot(cfg Config) Snapshot {
 	}
 
 	return Snapshot{
-		Tools: []Status{RTKGlobalStatus(), m.agentBrowserStatus(), m.playwrightStatus()},
-		Figma: figmaStatus,
+		Tools:         []Status{RTKGlobalStatus(), m.agentBrowserStatus(), m.playwrightStatus()},
+		Figma:         figmaStatus,
+		GlobalMCP:     GlobalPackageStatuses(cfg.GlobalMCP),
+		GlobalPlugins: GlobalPackageStatuses(cfg.GlobalPlugins),
 	}
+}
+
+func ValidateNPMPackageName(packageName string) error {
+	packageName = strings.TrimSpace(packageName)
+	if packageName == "" || !npmPackageNamePattern.MatchString(packageName) {
+		return fmt.Errorf("invalid npm package name: %s", packageName)
+	}
+	return nil
+}
+
+// InstallGlobalPackage installs one npm package into the shared Node runtime
+// and returns the registration metadata needed to list it later. MCP packages
+// use the discovered npm bin as their default stdio command.
+func (m *Manager) InstallGlobalPackage(packageName string, onLine func(string)) (GlobalPackage, ActionResult, error) {
+	packageName = strings.TrimSpace(packageName)
+	if err := ValidateNPMPackageName(packageName); err != nil {
+		return GlobalPackage{}, ActionResult{}, err
+	}
+	npm, err := npmExecutable()
+	if err != nil {
+		return GlobalPackage{}, ActionResult{}, errors.New("npm was not found; install Node.js first")
+	}
+	commandText := "npm install -g " + packageName
+	output, err := runUnboundedWithProgress(onLine, npm, "install", "-g", packageName)
+	if err != nil {
+		return GlobalPackage{}, ActionResult{Message: "Global package installation failed", Command: commandText, Output: output}, err
+	}
+	registration, metaErr := globalPackageRegistration(npm, packageName)
+	if metaErr != nil {
+		return GlobalPackage{}, ActionResult{Message: "Package installed but metadata could not be read", Command: commandText, Output: output}, metaErr
+	}
+	return registration, ActionResult{Message: "Global package installed", Command: commandText, Output: output}, nil
+}
+
+// UninstallGlobalPackage removes one npm package from the shared Node runtime.
+// Failures are surfaced to the caller so callers can decide whether to drop the
+// registration anyway (e.g. a package already gone from the global scope).
+func (m *Manager) UninstallGlobalPackage(packageName string, onLine func(string)) (ActionResult, error) {
+	packageName = strings.TrimSpace(packageName)
+	if err := ValidateNPMPackageName(packageName); err != nil {
+		return ActionResult{}, err
+	}
+	npm, err := npmExecutable()
+	if err != nil {
+		return ActionResult{}, errors.New("npm was not found; install Node.js first")
+	}
+	commandText := "npm uninstall -g " + packageName
+	output, err := runUnboundedWithProgress(onLine, npm, "uninstall", "-g", packageName)
+	if err != nil {
+		return ActionResult{Message: "Global package uninstall failed", Command: commandText, Output: output}, err
+	}
+	return ActionResult{Message: "Global package uninstalled", Command: commandText, Output: output}, nil
+}
+
+func globalPackageRegistration(npm, packageName string) (GlobalPackage, error) {
+	root, err := run(npm, "root", "-g")
+	if err != nil {
+		return GlobalPackage{}, fmt.Errorf("locate global npm packages: %w", err)
+	}
+	packageDir := filepath.Join(strings.TrimSpace(root), filepath.FromSlash(packageName))
+	raw, err := os.ReadFile(filepath.Join(packageDir, "package.json"))
+	if err != nil {
+		return GlobalPackage{}, fmt.Errorf("read installed package metadata: %w", err)
+	}
+	var manifest struct {
+		Name string          `json:"name"`
+		Bin  json.RawMessage `json:"bin"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return GlobalPackage{}, fmt.Errorf("parse installed package metadata: %w", err)
+	}
+	command := packageCommand(manifest.Bin, packageName)
+	return GlobalPackage{
+		Package: packageName,
+		Name:    strings.TrimSpace(manifest.Name),
+		Command: command,
+		Args:    []string{},
+	}, nil
+}
+
+func packageCommand(raw json.RawMessage, packageName string) string {
+	base := packageName
+	if slash := strings.LastIndex(base, "/"); slash >= 0 {
+		base = base[slash+1:]
+	}
+	var command string
+	if json.Unmarshal(raw, &command) == nil && strings.TrimSpace(command) != "" {
+		return base
+	}
+	var commands map[string]string
+	if json.Unmarshal(raw, &commands) == nil && len(commands) > 0 {
+		if _, ok := commands[base]; ok {
+			return base
+		}
+		keys := make([]string, 0, len(commands))
+		for key := range commands {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		return keys[0]
+	}
+	return ""
+}
+
+func GlobalPackageStatuses(packages []GlobalPackage) []Status {
+	statuses := make([]Status, 0, len(packages))
+	globalRoot := ""
+	if npm, err := npmExecutable(); err == nil {
+		if root, rootErr := run(npm, "root", "-g"); rootErr == nil {
+			globalRoot = strings.TrimSpace(root)
+		}
+	}
+	for _, item := range packages {
+		status := Status{
+			Key:         item.Package,
+			Name:        item.Name,
+			Description: item.Command,
+			InstallHint: "npm install -g " + item.Package,
+		}
+		if globalRoot != "" {
+			source := filepath.Join(globalRoot, filepath.FromSlash(item.Package))
+			if raw, readErr := os.ReadFile(filepath.Join(source, "package.json")); readErr == nil {
+				var manifest struct {
+					Version string `json:"version"`
+				}
+				if json.Unmarshal(raw, &manifest) == nil {
+					status.Installed = true
+					status.Enabled = true
+					status.Version = manifest.Version
+					status.SourcePath = source
+				}
+			}
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
 }
 
 // RTKGlobalStatus reports the shared RTK binary. Agent-specific state is the
@@ -416,8 +620,32 @@ func BrowserNativeStatusForAgent(installed bool) Status {
 	}
 }
 
+// PiPluginsStatusForAgent promotes the Pi-native plugin marketplace from the
+// generic package inventory into CodingTo's recommended extension list.
+func PiPluginsStatusForAgent(packages []Status) Status {
+	status := Status{
+		Key:         "pi-plugins",
+		Name:        "Pi Plugins",
+		Description: "Adds marketplace discovery and plugin lifecycle management for the current agent.",
+		Homepage:    "https://github.com/nklisch/pi-plugins",
+		InstallHint: "pi install " + PiPluginsPackageSource,
+	}
+	for _, installed := range packages {
+		if installed.Key != PiPluginsPackageSource && installed.Name != "@nklisch/pi-plugins" {
+			continue
+		}
+		status.Installed = installed.Installed
+		status.Enabled = installed.Enabled
+		status.Version = installed.Version
+		status.SourcePath = installed.SourcePath
+		status.Error = installed.Error
+		break
+	}
+	return status
+}
+
 // PiFigmaStatusForAgent describes the per-agent MCP bridge. The shared Figma
-// runtime and authorization remain visible on the global Plugins page.
+// runtime and authorization remain visible on the global MCP page.
 func PiFigmaStatusForAgent(installed bool) Status {
 	return Status{
 		Key:         "figma",

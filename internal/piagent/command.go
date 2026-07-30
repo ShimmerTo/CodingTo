@@ -144,10 +144,23 @@ func InstallAgentPackage(dataDir, source string) (string, error) {
 	if strings.TrimSpace(source) == "" || strings.ContainsAny(source, "\r\n\x00;&|<>`") {
 		return "", fmt.Errorf("invalid pi package source")
 	}
-	if runtime.GOOS == "windows" && strings.ContainsAny(source, `%!"`) {
+	if runtime.GOOS == "windows" && strings.ContainsAny(source, `%!"^()`) {
 		return "", fmt.Errorf("invalid pi package source")
 	}
 	return RunAgentCommand(dataDir, "pi install "+quoteShellArgument(source))
+}
+
+// InstallAgentPackageWithProgress is the streamed counterpart of
+// InstallAgentPackage. It accepts one validated Pi package source instead of
+// arbitrary shell text, while still driving the terminal-style progress UI.
+func InstallAgentPackageWithProgress(dataDir, source string, onLine func(string)) (string, error) {
+	if strings.TrimSpace(source) == "" || strings.ContainsAny(source, "\r\n\x00;&|<>`") {
+		return "", fmt.Errorf("invalid pi package source")
+	}
+	if runtime.GOOS == "windows" && strings.ContainsAny(source, `%!"^()`) {
+		return "", fmt.Errorf("invalid pi package source")
+	}
+	return RunAgentCommandWithProgress(dataDir, "pi install "+quoteShellArgument(source), onLine)
 }
 
 // UpdateAgentPackage updates exactly one package in this agent's isolated Pi
@@ -156,7 +169,7 @@ func UpdateAgentPackage(dataDir, source string) (string, error) {
 	if strings.TrimSpace(source) == "" || strings.ContainsAny(source, "\r\n\x00;&|<>`") {
 		return "", fmt.Errorf("invalid pi package source")
 	}
-	if runtime.GOOS == "windows" && strings.ContainsAny(source, `%!"`) {
+	if runtime.GOOS == "windows" && strings.ContainsAny(source, `%!"^()`) {
 		return "", fmt.Errorf("invalid pi package source")
 	}
 	return RunAgentCommand(dataDir, "pi update "+quoteShellArgument(source))
@@ -167,7 +180,7 @@ func UpdateAgentPackage(dataDir, source string) (string, error) {
 // invocation, so callers never concatenate untrusted package identifiers.
 func UninstallAgentPackage(dataDir, source string) (string, error) {
 	source = strings.TrimSpace(source)
-	if source == "" || strings.ContainsAny(source, "\r\n\x00") {
+	if source == "" || strings.ContainsAny(source, "\r\n\x00;&|<>`") {
 		return "", fmt.Errorf("invalid package source")
 	}
 	if runtime.GOOS == "windows" && strings.ContainsAny(source, `%!"`) {
@@ -178,9 +191,14 @@ func UninstallAgentPackage(dataDir, source string) (string, error) {
 
 func quoteShellArgument(value string) string {
 	if runtime.GOOS == "windows" {
-		// cmd.exe expands %VAR% even inside double quotes. Pi package sources do
-		// not require percent signs, so reject them instead of risking expansion.
-		return `"` + value + `"`
+		// Callers reject cmd.exe metacharacters before reaching this helper.
+		// Passing a validated Pi source without quotes is required for scoped npm
+		// packages: some Windows Pi shims otherwise preserve the quote and parse
+		// npm:@scope/package as a malformed local filesystem path.
+		if strings.ContainsAny(value, " \t") {
+			return `"` + value + `"`
+		}
+		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }

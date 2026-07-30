@@ -11,15 +11,15 @@
 .missing-pi small { opacity: .8; }
 .message-list { width: min(820px, calc(100% - 64px)); margin: 0 auto; padding: 46px 0 30px; }
 .message { display: flex; gap: 13px; margin-bottom: 28px; }
-.message--user { flex-direction: row-reverse; }
+.message--user { flex-direction: row; }
 .avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); font-size: 13px; font-weight: 700; }
 .message--user .avatar { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
-.message-body { max-width: 82%; min-width: 0; }
-.message--user .message-body { text-align: right; }
+.message-body { max-width: 100%; min-width: 0; }
+.message--user .message-body { text-align: left; }
 .message-author { margin: 3px 0 7px; color: var(--muted); font-size: 13px; font-weight: 650; }
 .message pre { margin: 0; font: inherit; line-height: 1.68; white-space: pre-wrap; word-break: break-word; text-align: left; }
-.message--user .message-body > pre { padding: 10px 13px; border-radius: 12px 2px 12px 12px; background: var(--surface-2); }
-.message-images { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 7px; }
+.message--user .message-body > pre { padding: 10px 13px; border-radius: 3px 12px 12px 12px; background: var(--surface-2); }
+.message-images { display: flex; justify-content: flex-start; gap: 6px; margin-bottom: 7px; }
 .message-images img { width: 92px; height: 72px; object-fit: cover; border: 1px solid var(--border); border-radius: 8px; }
 .tool-call { width: min(620px, 75vw); border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface-2); }
 .tool-call summary { display: flex; align-items: center; gap: 7px; padding: 8px 10px; cursor: pointer; color: var(--muted); font-size: 13px; }

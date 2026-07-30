@@ -1,19 +1,21 @@
 <script setup>
-import { computed, getCurrentInstance } from 'vue'
+import { computed, getCurrentInstance, nextTick, ref, watch } from 'vue'
 import {
-  AlertCircle, CheckCircle2, ChevronDown, ChevronRight, File, FileAudio,
-  FileCode2, FilePlus2, FileText, FileVideo, FileX2, GitBranch, Image, LoaderCircle
+  AlertCircle, Bot, CheckCircle2, ChevronDown, ChevronRight, File, FileAudio,
+  FileCode2, FilePlus2, FileText, FileVideo, FileX2, GitBranch, Image, LoaderCircle, User
 } from 'lucide-vue-next'
 import { openExternal, openSessionArtifact } from '../../backend.js'
 import { localFileURL } from '../../localFileUrl.js'
 import { formatDetail, formatDuration, imageSrc, renderMarkdown } from './chatFormatters.js'
 import SubAgentCard from './SubAgentCard.vue'
 import DocumentDownloadList from './DocumentDownloadList.vue'
+import EditDiff from './EditDiff.vue'
 import {
   toolDuration, toolIcon, toolInput, toolOutput, toolStatus,
-  isSubagentRunTool, toolEditDiff, toolLineChanges, toolName, toolSummary, toolUrl, toolUrlTitle
+  isReadTool, readToolMeta, readToolBlocks, isSubagentRunTool, toolEditDiff, toolLineChanges, toolName, toolSummary, toolUrl, toolUrlTitle
 } from './chatToolPresentation.js'
 import { compactionMessageText } from './compactionMessages.js'
+import { isImageAvatar } from '../../composables/appContext.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -22,7 +24,12 @@ const props = defineProps({
   now: { type: Number, required: true },
   t: { type: Object, required: true },
   disableSubagentCard: { type: Boolean, default: false },
-  collapseToolsByDefault: { type: Boolean, default: false }
+  collapseToolsByDefault: { type: Boolean, default: false },
+  agentAvatar: { type: String, default: '' },
+  agentName: { type: String, default: '' },
+  userAvatar: { type: String, default: '' },
+  chatLayout: { type: String, default: 'left' },
+  showIdentity: { type: Boolean, default: true }
 })
 
 const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-subagent-details'])
@@ -87,6 +94,13 @@ const documentDownloadList = computed(() => {
   return Array.isArray(list) && list.length ? list : null
 })
 const isSubagentTool = computed(() => isSubagentRunTool(props.message))
+const isUser = computed(() => props.message.role === 'user')
+const readTool = computed(() => isReadTool(props.message))
+const readMeta = computed(() => readToolMeta(props.message) || { path: '', params: [] })
+const readBlocks = computed(() => readToolBlocks(props.message) || [])
+const agentAvatarValue = computed(() => props.agentAvatar || '')
+const userAvatarValue = computed(() => props.userAvatar || '')
+// 子 Agent 卡片自带头像与名称，外层节点不再重复渲染头像列。
 const changedFiles = computed(() =>
   [...(props.message.changes?.files || [])].sort((a, b) => (
     String(a.path).localeCompare(String(b.path)) ||
@@ -147,6 +161,15 @@ function onThinkingToggle(event) {
   const open = event.currentTarget.open
   if (open !== Boolean(props.message.thinkingOpen)) emit('update-thinking-open', open)
 }
+
+const thinkingPreRef = ref(null)
+
+watch(() => props.message.thinkingContent, async () => {
+  if (!props.message.live || !props.message.thinkingOpen) return
+  await nextTick()
+  const el = thinkingPreRef.value
+  if (el) el.scrollTop = el.scrollHeight
+})
 </script>
 
 <template>
@@ -155,9 +178,24 @@ function onThinkingToggle(event) {
     class="message"
     :class="[
       `message--${message.role}`,
-      { 'message--live': message.live, 'message--subagent': isSubagentTool }
+      { 'message--live': message.live, 'message--subagent': isSubagentTool, 'message--user-right': chatLayout === 'side' && message.role === 'user' }
     ]"
   >
+    <div
+      v-if="!isSubagentTool && showIdentity"
+      class="message__avatar"
+      :class="{ 'message__avatar--user': isUser }"
+      aria-hidden="true"
+    >
+      <!-- 工具调用不显示头像，保留空列与助手消息主体左对齐 -->
+      <template v-if="message.role !== 'tool'">
+        <img v-if="!isUser && isImageAvatar(agentAvatarValue)" :src="agentAvatarValue" class="message__avatar-img" alt="" />
+        <span v-else-if="!isUser && agentAvatarValue" class="message__avatar-emoji">{{ agentAvatarValue }}</span>
+        <img v-else-if="isUser && userAvatarValue" :src="userAvatarValue" class="message__avatar-img" alt="" />
+        <User v-else-if="isUser" :size="19" />
+        <Bot v-else :size="19" />
+      </template>
+    </div>
     <div class="message-body">
       <div v-if="message.role === 'compaction'" class="message-compaction" role="status">
         <LoaderCircle v-if="message.status === 'running'" class="spin" :size="13" />
@@ -198,7 +236,7 @@ function onThinkingToggle(event) {
           <small v-if="thinkingTimeText()">{{ thinkingTimeText() }}</small>
           <ChevronDown class="details-chevron" :size="13" />
         </summary>
-        <pre>{{ message.thinkingContent.replace(/\u200B/g, '') }}</pre>
+        <pre ref="thinkingPreRef">{{ message.thinkingContent.replace(/\u200B/g, '') }}</pre>
       </details>
       <div v-if="message.role !== 'compaction' && message.role !== 'tool' && message.content" class="message-bubble">
         <div class="message-markdown" v-html="renderedContent"></div>
@@ -249,12 +287,14 @@ function onThinkingToggle(event) {
         :message-item-component="messageItemComponent"
         :agents="agents"
         :now="now"
+        :show-identity="showIdentity"
         :t="t"
         @open-details="emit('open-subagent-details', $event)"
         @artifact-error="emit('artifact-error', $event)"
       />
       <template v-else-if="message.role === 'tool'">
       <details
+        v-if="!readTool"
         class="tool-call"
         :open="!collapseToolsByDefault && !!editDiff"
       >
@@ -284,26 +324,7 @@ function onThinkingToggle(event) {
           <small v-if="toolStatus(message) !== 'done'">{{ formatDuration(toolDuration(message, now)) }}</small>
           <ChevronDown class="details-chevron" :size="13" />
         </summary>
-        <div v-if="editDiff" class="tool-edit-diff">
-          <section v-for="edit in editDiff.edits" :key="`${edit.path}-${edit.index}`" class="tool-edit-diff__file">
-            <header class="tool-edit-diff__head">
-              <span>{{ edit.path || toolName(message) }}</span>
-              <small>@@ -1,{{ edit.oldLineCount }} +1,{{ edit.newLineCount }} @@</small>
-            </header>
-            <div class="tool-edit-diff__lines">
-              <div v-for="(line, index) in edit.lines" :key="index" class="tool-edit-diff__line" :class="`is-${line.kind}`">
-                <span class="tool-edit-diff__number">{{ line.oldNumber ?? '' }}</span>
-                <span class="tool-edit-diff__number">{{ line.newNumber ?? '' }}</span>
-                <span class="tool-edit-diff__sign">{{ line.kind === 'added' ? '+' : line.kind === 'deleted' ? '-' : ' ' }}</span>
-                <code>{{ line.text }}</code>
-              </div>
-            </div>
-          </section>
-          <div v-if="toolOutput(message)" class="tool-edit-diff__output">
-            <label>{{ t.toolOutput }}</label>
-            <pre>{{ formatDetail(toolOutput(message)) }}</pre>
-          </div>
-        </div>
+        <EditDiff v-if="editDiff" :message="message" :t="t" />
         <div v-else class="tool-call__details">
           <div v-if="toolInput(message)">
             <label>{{ t.toolInput }}</label>
@@ -313,6 +334,30 @@ function onThinkingToggle(event) {
             <label>{{ t.toolOutput }}</label>
             <pre>{{ formatDetail(toolOutput(message)) }}</pre>
           </div>
+        </div>
+      </details>
+      <details v-else class="tool-call tool-call--read" :open="true">
+        <summary>
+          <span class="tool-call__state">
+            <CheckCircle2 v-if="toolStatus(message) === 'done'" :size="14" />
+            <LoaderCircle v-else class="spin" :size="14" />
+          </span>
+          <span class="tool-call__icon"><component :is="toolIcon(message)" :size="13" /></span>
+          <span class="tool-call__name">{{ toolName(message) }}</span>
+          <span class="tool-call__file" :title="readMeta.path">{{ readMeta.path }}</span>
+          <span v-if="readMeta.params.length" class="tool-call__params">{{ readMeta.params.join(', ') }}</span>
+          <ChevronDown class="details-chevron" :size="13" />
+        </summary>
+        <div class="tool-call__read">
+          <template v-for="(block, bi) in readBlocks" :key="bi">
+            <pre v-if="block.kind === 'text'">{{ block.text }}</pre>
+            <img
+              v-else-if="block.kind === 'image'"
+              class="tool-call__read-img"
+              :src="`data:${block.mimeType};base64,${block.data}`"
+              alt="read image"
+            />
+          </template>
         </div>
       </details>
       <DocumentDownloadList v-if="documentDownloadList" :files="documentDownloadList" :session-id="sessionId" :t="t" />

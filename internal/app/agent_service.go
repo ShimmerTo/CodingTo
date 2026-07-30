@@ -518,6 +518,8 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 		return err
 	}
 	extra := []string{}
+	appendSystemPrompts := []string{}
+	agentDataDir := filepath.Clean(profile.DataDir)
 	if toolsEnabled {
 		if err := piagent.MaterializeBuiltinTools(profile.DataDir, profile.Builtin); err != nil {
 			return err
@@ -533,7 +535,21 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 		extra = append(extra, "--skill", req.SkillPath)
 	}
 	if _, ok := cfg.Extensions.Figma.ActiveAuthorization(); profile.Recommended["figma"] && cfg.Extensions.Figma.Enabled && ok {
-		extra = append(extra, "--append-system-prompt", figmaRoutingPrompt)
+		appendSystemPrompts = append(appendSystemPrompts, figmaRoutingPrompt)
+	}
+	// Surface the agent's own isolated Pi data directory in its system prompt.
+	// CodingTo launches each agent with PI_CODING_AGENT_DIR pointing at this
+	// directory, but the model has no insight into its own environment. Without
+	// this hint it guesses the default global agent path (~/.pi/agent) when it
+	// introspects extensions or configuration, and reports the wrong agent's
+	// data instead of its own.
+	appendSystemPrompts = append(appendSystemPrompts, fmt.Sprintf(
+		"You are a CodingTo agent. Your isolated Pi data directory is %s (also available as the PI_CODING_AGENT_DIR environment variable). "+
+			"Your installed extensions live at %s/extensions. "+
+			"When inspecting your own configuration, settings, models, or extensions, always reference %s (or $PI_CODING_AGENT_DIR) and never the default ~/.pi/agent path.",
+		agentDataDir, agentDataDir, agentDataDir))
+	if len(appendSystemPrompts) > 0 {
+		extra = append(extra, "--append-system-prompt", strings.Join(appendSystemPrompts, "\n\n"))
 	}
 	// RTK is a per-agent recommended extension: materialize it only when this
 	// agent has it enabled, and remove any stale copy otherwise so a disabled

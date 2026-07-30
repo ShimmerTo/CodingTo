@@ -5,7 +5,7 @@ import {
   LoaderCircle, Paperclip, Pencil, Send, Sparkles, Trash2, X
 } from 'lucide-vue-next'
 import { formatFileSize, formatTokenCount, imageSrc } from './chatFormatters.js'
-import { agentAvatar } from '../../composables/appContext'
+import { agentAvatar, isImageAvatar } from '../../composables/appContext'
 import ChatExecutionPlan from './ChatExecutionPlan.vue'
 import ChatPlanPanel from './ChatPlanPanel.vue'
 
@@ -447,7 +447,8 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
 
         <div ref="agentWrapEl" class="composer-agent-wrap">
           <button class="composer-agent" :title="t.chatSwitchAgent" @click="agentSwitcherOpen = !agentSwitcherOpen">
-            <span v-if="agentAvatar(selectedAgent)" class="composer-agent__emoji">{{ agentAvatar(selectedAgent) }}</span>
+            <img v-if="isImageAvatar(agentAvatar(selectedAgent))" :src="agentAvatar(selectedAgent)" class="composer-agent__img" alt="" />
+            <span v-else-if="agentAvatar(selectedAgent)" class="composer-agent__emoji">{{ agentAvatar(selectedAgent) }}</span>
             <Bot v-else class="composer-agent__badge" :size="15" />
             <span>{{ selectedAgent?.name || t.chatAgentSwitcher }}</span>
             <ChevronDown :size="13" />
@@ -462,7 +463,8 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
                 :class="{ 'agent-menu__item--active': agent.id === selectedAgent?.id }"
                 @click="pickAgent(agent)"
               >
-                <span v-if="agentAvatar(agent)" class="agent-menu__emoji">{{ agentAvatar(agent) }}</span>
+                <img v-if="isImageAvatar(agentAvatar(agent))" :src="agentAvatar(agent)" class="agent-menu__img" alt="" />
+                <span v-else-if="agentAvatar(agent)" class="agent-menu__emoji">{{ agentAvatar(agent) }}</span>
                 <Bot v-else :size="15" class="agent-menu__icon" />
                 <span class="agent-menu__item-text">
                   <span class="agent-menu__name">{{ agent.name }}</span>

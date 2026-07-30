@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
@@ -316,11 +318,7 @@ func WriteModels(configDir string, providers []Provider) error {
 	if err := os.Chmod(configDir, 0o700); err != nil {
 		return err
 	}
-	tmp := filepath.Join(configDir, "models.json.tmp")
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(configDir, "models.json"))
+	return atomicWriteFile(filepath.Join(configDir, "models.json"), data)
 }
 
 // SyncModelsToAgents copies the freshly written models.json from updatedDir to
@@ -347,15 +345,80 @@ func SyncModelsToAgents(updatedDir string, otherDirs []string) error {
 		if err := os.Chmod(dir, 0o700); err != nil {
 			return err
 		}
-		tmp := filepath.Join(dir, "models.json.tmp")
-		if err := os.WriteFile(tmp, data, 0o600); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp, filepath.Join(dir, "models.json")); err != nil {
+		if err := atomicWriteFile(filepath.Join(dir, "models.json"), data); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// modelsWriteMu serializes model-config writes so that two goroutines (e.g. a
+// SaveConfig call and an in-session "set model" action) never stage and rename
+// temp files over the same destination concurrently.
+var modelsWriteMu sync.Mutex
+
+// atomicWriteFile writes data to a uniquely named temp file next to target and
+// then atomically replaces target with it. Using a unique temp name avoids two
+// concurrent writers clobbering each other's staging file. The final replace is
+// retried with a short backoff because on Windows the destination file can be
+// briefly locked by another process (a running agent reading its config, a file
+// watcher, or antivirus), which otherwise surfaces as "The process cannot access
+// the file because it is being used by another process."
+func atomicWriteFile(target string, data []byte) error {
+	modelsWriteMu.Lock()
+	defer modelsWriteMu.Unlock()
+	dir := filepath.Dir(target)
+	f, err := os.CreateTemp(dir, ".models-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := f.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := commitRename(tmpName, target); err != nil {
+		return err
+	}
+	keep = true
+	return nil
+}
+
+// commitRename atomically replaces dst with src, retrying briefly to absorb
+// transient locks. The actual replace primitive (tryReplace) is platform
+// specific.
+func commitRename(src, dst string) error {
+	const maxAttempts = 12
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(20*attempt) * time.Millisecond)
+		}
+		if err := tryReplace(src, dst); err != nil {
+			lastErr = err
+			// If our staging file vanished (e.g. removed by a concurrent
+			// writer), there is nothing left to rename.
+			if _, statErr := os.Stat(src); statErr != nil {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
 }
 
 func resolveModelBaseURL(providerBaseURL, modelBaseURL string) string {

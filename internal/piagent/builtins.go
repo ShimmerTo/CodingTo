@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"codingto/internal/extensions"
@@ -21,6 +22,76 @@ var builtinTools embed.FS
 var systemExtensions embed.FS
 
 var retiredBuiltinTools = []string{"api", "db", "git", "browser-workflow"}
+
+// BuiltinToolCatalog discovers every bundled extension directory and reads its
+// display metadata. default_tools is embedded into the application binary, so
+// adding a directory with a valid meta.json automatically makes it available
+// to the backend and frontend without updating a hard-coded registry.
+func BuiltinToolCatalog() ([]extensions.BuiltinToolStatus, error) {
+	entries, err := fs.ReadDir(builtinTools, "default_tools")
+	if err != nil {
+		return nil, fmt.Errorf("list bundled built-in tools: %w", err)
+	}
+	catalog := make([]extensions.BuiltinToolStatus, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		var meta struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Version     string `json:"version"`
+			Required    bool   `json:"required"`
+		}
+		raw, err := builtinTools.ReadFile(path.Join("default_tools", name, "meta.json"))
+		if err != nil {
+			return nil, fmt.Errorf("read built-in tool metadata %s: %w", name, err)
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			return nil, fmt.Errorf("parse built-in tool metadata %s: %w", name, err)
+		}
+		catalog = append(catalog, extensions.BuiltinToolStatus{
+			Key:            name,
+			Name:           meta.Name,
+			Description:    meta.Description,
+			Required:       meta.Required,
+			CurrentVersion: meta.Version,
+		})
+	}
+	return catalog, nil
+}
+
+// DefaultBuiltinTools returns the default selection for a newly created agent.
+// All extensions currently present under default_tools are installed by
+// default; existing agents retain their persisted selections.
+func DefaultBuiltinTools() map[string]bool {
+	catalog, err := BuiltinToolCatalog()
+	if err != nil {
+		return map[string]bool{}
+	}
+	enabled := make(map[string]bool, len(catalog))
+	for _, tool := range catalog {
+		enabled[tool.Key] = true
+	}
+	return enabled
+}
+
+// RequiredBuiltinTools returns the subset that cannot be disabled because it
+// forms part of CodingTo's runtime contract.
+func RequiredBuiltinTools() map[string]bool {
+	catalog, err := BuiltinToolCatalog()
+	if err != nil {
+		return map[string]bool{}
+	}
+	required := make(map[string]bool)
+	for _, tool := range catalog {
+		if tool.Required {
+			required[tool.Key] = true
+		}
+	}
+	return required
+}
 
 // MaterializeSystemExtensions copies CodingTo's mandatory, non-user-configurable
 // Pi extensions into the managed agent directory. These extensions implement
@@ -149,31 +220,15 @@ func RemoveBuiltinTools(piDir string, enabled map[string]bool) error {
 // when the tool has not been materialized yet). This lets the UI surface an
 // update action whenever an installed builtin is stale.
 func BuiltinToolStatuses(piDir string, enabled map[string]bool) ([]extensions.BuiltinToolStatus, error) {
-	entries, err := fs.ReadDir(builtinTools, "default_tools")
+	statuses, err := BuiltinToolCatalog()
 	if err != nil {
-		return nil, fmt.Errorf("list bundled built-in tools: %w", err)
+		return nil, err
 	}
-	statuses := make([]extensions.BuiltinToolStatus, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		var meta struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			Version     string `json:"version"`
-		}
-		status := extensions.BuiltinToolStatus{Key: name}
-		if raw, err := builtinTools.ReadFile(path.Join("default_tools", name, "meta.json")); err == nil {
-			_ = json.Unmarshal(raw, &meta)
-			status.Name = meta.Name
-			status.Description = meta.Description
-			status.CurrentVersion = meta.Version
-		}
-		status.Installed = enabled[name]
+	for index := range statuses {
+		status := &statuses[index]
+		status.Installed = enabled[status.Key]
 		if status.Installed {
-			if raw, err := os.ReadFile(filepath.Join(piDir, "extensions", name, "meta.json")); err == nil {
+			if raw, err := os.ReadFile(filepath.Join(piDir, "extensions", status.Key, "meta.json")); err == nil {
 				var installed struct {
 					Version string `json:"version"`
 				}
@@ -182,7 +237,6 @@ func BuiltinToolStatuses(piDir string, enabled map[string]bool) ([]extensions.Bu
 				}
 			}
 		}
-		statuses = append(statuses, status)
 	}
 	return statuses, nil
 }
@@ -347,6 +401,95 @@ func FigmaMCPConfigured(dataDir string) bool {
 	}
 	_, ok := config.Servers["figma"]
 	return ok
+}
+
+// UpsertMCPServer adds or updates one CodingTo-managed MCP server entry in an
+// agent's mcp.json while preserving every unrelated server and setting.
+func UpsertMCPServer(dataDir, key, command string, args []string) error {
+	key = strings.TrimSpace(key)
+	command = strings.TrimSpace(command)
+	if key == "" || command == "" {
+		return errors.New("MCP server key and command are required")
+	}
+	configPath := filepath.Join(dataDir, "mcp.json")
+	config := map[string]any{}
+	if raw, err := os.ReadFile(configPath); err == nil {
+		if len(strings.TrimSpace(string(raw))) > 0 {
+			if err := json.Unmarshal(raw, &config); err != nil {
+				return fmt.Errorf("parse agent MCP config: %w", err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read agent MCP config: %w", err)
+	}
+	servers, ok := config["mcpServers"].(map[string]any)
+	if !ok && config["mcpServers"] != nil {
+		return errors.New("agent MCP config field mcpServers must be an object")
+	}
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	servers[key] = map[string]any{
+		"command":     command,
+		"args":        args,
+		"lifecycle":   "lazy",
+		"directTools": true,
+	}
+	config["mcpServers"] = servers
+	encoded, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode agent MCP config: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create agent data directory: %w", err)
+	}
+	if err := writeFileIfChanged(configPath, append(encoded, '\n')); err != nil {
+		return fmt.Errorf("write agent MCP config: %w", err)
+	}
+	return nil
+}
+
+// MCPServerStatuses reads every server currently configured for one agent,
+// including entries managed outside CodingTo.
+func MCPServerStatuses(dataDir string) ([]extensions.Status, error) {
+	raw, err := os.ReadFile(filepath.Join(dataDir, "mcp.json"))
+	if os.IsNotExist(err) {
+		return []extensions.Status{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read agent MCP config: %w", err)
+	}
+	var config struct {
+		Servers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+			URL     string   `json:"url"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, fmt.Errorf("parse agent MCP config: %w", err)
+	}
+	keys := make([]string, 0, len(config.Servers))
+	for key := range config.Servers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	statuses := make([]extensions.Status, 0, len(keys))
+	for _, key := range keys {
+		server := config.Servers[key]
+		description := strings.TrimSpace(strings.Join(append([]string{server.Command}, server.Args...), " "))
+		if server.URL != "" {
+			description = server.URL
+		}
+		statuses = append(statuses, extensions.Status{
+			Key:         key,
+			Name:        key,
+			Description: description,
+			Installed:   true,
+			Enabled:     true,
+		})
+	}
+	return statuses, nil
 }
 
 // RemoveRTKExtension removes only CodingTo's managed RTK runtime copy.

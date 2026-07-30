@@ -9,18 +9,22 @@ import {
   Image,
   KeyRound,
   ListChecks,
+  ListTree,
   Package,
+  Store,
 } from 'lucide-vue-next'
 
 // 关键扩展的固定图标，按含义选择且保证唯一。
 const fixedExtensionIcons = {
   rtk: Binary,
+  'pi-plugins': Store,
   'browser-native': Globe2,
   figma: Image,
   document: FileText,
   plan: ListChecks,
   subagent: Blocks,
   'browser-profile': KeyRound,
+  'skills-list': ListTree,
 }
 
 // 其它第三方/自定义扩展的回退图标，按 key 语义映射，仍保证互不相同。

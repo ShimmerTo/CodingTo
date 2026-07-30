@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { Bot, GitBranch, Plus, RefreshCw, Settings, Trash2 } from 'lucide-vue-next'
 import { useAppContext } from '../../composables/appContext'
-import { agentAvatar } from '../../composables/appContext'
+import { agentAvatar, isImageAvatar } from '../../composables/appContext'
 import { collectAgentExtensions } from '../../agentExtensions'
 import { extensionIcon } from '../../extensionIcons'
 
@@ -104,7 +104,8 @@ const extensionsReady = computed(
   <div v-else class="agent-list-table">
     <article v-for="agent in agentList" :key="agent.id" class="agent-row" :class="{ 'agent-row--new': agent.id === newAgentId }">
       <div class="agent-avatar">
-        <span v-if="agentAvatar(agent)" class="agent-avatar__emoji">{{ agentAvatar(agent) }}</span>
+        <img v-if="isImageAvatar(agentAvatar(agent))" :src="agentAvatar(agent)" class="agent-avatar__img" alt="" />
+        <span v-else-if="agentAvatar(agent)" class="agent-avatar__emoji">{{ agentAvatar(agent) }}</span>
         <Bot v-else :size="18" />
       </div>
       <div class="agent-copy">

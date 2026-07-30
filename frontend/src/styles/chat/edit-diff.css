@@ -1,0 +1,33 @@
+/* edit 工具代码对比视图样式（EditDiff.vue 专用，scoped 引入）。
+   配色变量（--diff-*）定义在 base.css，随主题切换。 */
+.tool-edit-diff { max-height: 240px; overflow: auto; border-top: 1px solid var(--border-soft); background: var(--code-bg); text-align: left; font: 11px/1.55 "SFMono-Regular", Consolas, monospace; }
+.tool-edit-diff__file + .tool-edit-diff__file { border-top: 1px solid var(--border); }
+
+/* 左右对比（split diff）：左侧修改前，右侧修改后 */
+.edit-split { display: block; }
+.edit-split__row { display: grid; grid-template-columns: 1fr 1fr; }
+.edit-split__cell { display: flex; align-items: flex-start; min-width: 0; }
+.edit-split__cell--old { border-right: 1px solid var(--border-soft); }
+.edit-split__ln { flex: 0 0 auto; width: 38px; padding: 1px 5px; color: var(--faint); text-align: right; user-select: none; border-right: 1px solid var(--border-soft); }
+.edit-split__cell code { flex: 1; min-width: 0; padding: 1px 10px; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.edit-split__cell.is-empty { background: var(--diff-empty-bg); }
+.edit-split__cell.is-empty code { color: var(--faint); }
+.edit-split__row.is-context { background: var(--diff-context-bg); }
+.edit-split__row.is-change .edit-split__cell--old:not(.is-empty) { background: var(--diff-del-bg); box-shadow: inset 3px 0 0 var(--diff-del-fg); }
+.edit-split__row.is-change .edit-split__cell--old:not(.is-empty) .edit-split__ln { background: var(--diff-del-gutter); color: var(--diff-del-fg); }
+.edit-split__row.is-change .edit-split__cell--new:not(.is-empty) { background: var(--diff-add-bg); box-shadow: inset 3px 0 0 var(--diff-add-fg); }
+.edit-split__row.is-change .edit-split__cell--new:not(.is-empty) .edit-split__ln { background: var(--diff-add-gutter); color: var(--diff-add-fg); }
+
+/* 上下对比（unified diff）：删除行在上，新增行在下 */
+.edit-unified { display: block; }
+.edit-unified__row { display: flex; align-items: flex-start; min-width: 0; }
+.edit-unified__ln { flex: 0 0 auto; width: 38px; padding: 1px 5px; color: var(--faint); text-align: right; user-select: none; border-right: 1px solid var(--border-soft); }
+.edit-unified__sign { flex: 0 0 auto; width: 18px; padding: 1px 0; color: var(--faint); text-align: center; user-select: none; }
+.edit-unified__row code { flex: 1; min-width: 0; padding: 1px 10px 1px 6px; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.edit-unified__row.is-context { background: var(--diff-context-bg); }
+.edit-unified__row.is-deleted { background: var(--diff-del-bg); box-shadow: inset 3px 0 0 var(--diff-del-fg); }
+.edit-unified__row.is-deleted .edit-unified__ln { background: var(--diff-del-gutter); color: var(--diff-del-fg); }
+.edit-unified__row.is-deleted .edit-unified__sign { color: var(--diff-del-fg); }
+.edit-unified__row.is-added { background: var(--diff-add-bg); box-shadow: inset 3px 0 0 var(--diff-add-fg); }
+.edit-unified__row.is-added .edit-unified__ln { background: var(--diff-add-gutter); color: var(--diff-add-fg); }
+.edit-unified__row.is-added .edit-unified__sign { color: var(--diff-add-fg); }

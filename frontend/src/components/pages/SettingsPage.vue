@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
-import { Download, FolderOpen, Globe2, Moon, RefreshCw, Settings, Sun } from 'lucide-vue-next'
+import { Download, FolderOpen, Globe2, Moon, RefreshCw, Settings, Sun, Upload, User } from 'lucide-vue-next'
 import { Call, Events } from '@wailsio/runtime'
 import { useAppContext } from '../../composables/appContext'
 import InstallDialog from '../../components/InstallDialog.vue'
@@ -161,6 +161,66 @@ async function pickDir() {
   await pickSessionDirectory()
   persist()
 }
+
+// 对话展示形式：'side' 左右、'left' 靠左（默认）。
+function setChatLayout(value) {
+  config.preferences.chatLayout = value
+  persist()
+}
+// 代码对比方式：'unified' 上下（默认）、'split' 左右，作用于所有代码对比视图。
+function setDiffMode(value) {
+  config.preferences.diffMode = value
+  persist()
+}
+// 头像昵称展示：默认开启，关闭后对话详情不再显示 agent / 用户头像与昵称。
+function setShowIdentity(value) {
+  config.preferences.showIdentity = value
+  persist()
+}
+
+// 个人信息：头像上传（压缩为 data URL 存入 config）+ 昵称
+const avatarInput = ref(null)
+function onAvatarPicked(event) {
+  const input = event.target
+  const file = input.files && input.files[0]
+  input.value = ''
+  if (!file) return
+  resizeImageFile(file, 128).then((dataUrl) => {
+    config.userProfile.avatar = dataUrl
+    persist()
+  }).catch(() => {})
+}
+function clearAvatar() {
+  config.userProfile.avatar = ''
+  persist()
+}
+function onProfileNameChange() {
+  persist()
+}
+function resizeImageFile(file, maxSize) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('image load failed'))
+      img.onload = () => {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height))
+        const w = Math.max(1, Math.round(img.width * scale))
+        const h = Math.max(1, Math.round(img.height * scale))
+        const canvas = document.createElement('canvas')
+        canvas.width = w
+        canvas.height = h
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(img, 0, 0, w, h)
+        const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
+        resolve(canvas.toDataURL(type, 0.85))
+      }
+      img.src = reader.result
+    }
+    reader.readAsDataURL(file)
+  })
+}
 </script>
 
 <template>
@@ -191,6 +251,65 @@ async function pickDir() {
               <div class="color-field">
                 <input type="color" v-model="config.preferences.accentColor" @change="persist()" />
                 <input class="color-field__hex" v-model="accentInput" @change="applyAccent" @blur="applyAccent" placeholder="#10b981" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h2>{{ t.conversation }}</h2>
+            <div class="setting-row">
+              <div><label>{{ t.chatLayout }}</label></div>
+              <div class="segmented">
+                <button :class="{ active: config.preferences.chatLayout === 'side' }" @click="setChatLayout('side')">{{ t.chatLayoutSide }}</button>
+                <button :class="{ active: config.preferences.chatLayout === 'left' }" @click="setChatLayout('left')">{{ t.chatLayoutLeft }}</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div><label>{{ t.diffMode }}</label></div>
+              <div class="segmented">
+                <button :class="{ active: config.preferences.diffMode !== 'split' }" @click="setDiffMode('unified')">{{ t.diffModeUnified }}</button>
+                <button :class="{ active: config.preferences.diffMode === 'split' }" @click="setDiffMode('split')">{{ t.diffModeSplit }}</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div>
+                <label>{{ t.showIdentity }}</label>
+                <small>{{ t.showIdentityHint }}</small>
+              </div>
+              <div class="segmented">
+                <button :class="{ active: config.preferences.showIdentity !== false }" @click="setShowIdentity(true)">{{ t.on }}</button>
+                <button :class="{ active: config.preferences.showIdentity === false }" @click="setShowIdentity(false)">{{ t.off }}</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h2>{{ t.profile }}</h2>
+            <div class="setting-row setting-row--avatar">
+              <div>
+                <label>{{ t.profile_avatar }}</label>
+                <small>{{ t.profile_avatar_hint }}</small>
+              </div>
+              <div class="avatar-field">
+                <div class="avatar-preview">
+                  <img v-if="config.userProfile.avatar" :src="config.userProfile.avatar" alt="" />
+                  <User v-else :size="22" />
+                </div>
+                <div class="avatar-actions">
+                  <button class="secondary-button" type="button" @click="avatarInput?.click()">
+                    <Upload :size="14" />{{ t.profile_avatar_upload }}
+                  </button>
+                  <button v-if="config.userProfile.avatar" class="secondary-button" type="button" @click="clearAvatar">
+                    {{ t.profile_avatar_clear }}
+                  </button>
+                  <input ref="avatarInput" type="file" accept="image/*" hidden @change="onAvatarPicked" />
+                </div>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div><label>{{ t.profile_name }}</label></div>
+              <div class="name-field">
+                <input v-model.trim="config.userProfile.name" :placeholder="t.profile_name_placeholder" @change="onProfileNameChange" @blur="onProfileNameChange" />
               </div>
             </div>
           </div>

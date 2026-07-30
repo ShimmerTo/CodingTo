@@ -20,9 +20,12 @@ import (
 
 // Preferences holds UI preferences persisted in tbl_setting.
 type Preferences struct {
-	Theme       string `json:"theme"`
-	Language    string `json:"language"`
-	AccentColor string `json:"accentColor"`
+	Theme        string `json:"theme"`
+	Language     string `json:"language"`
+	AccentColor  string `json:"accentColor"`
+	ChatLayout   string `json:"chatLayout"`
+	ShowIdentity bool   `json:"showIdentity"`
+	DiffMode     string `json:"diffMode"`
 }
 
 // AppConfig is the in-memory shape exchanged with the frontend. It is assembled
@@ -42,6 +45,15 @@ type AppConfig struct {
 	Environments    []Environment      `json:"environments"`
 	ActiveEnvID     string             `json:"activeEnvId"`
 	SSHConfigs      []SSHConfig        `json:"sshConfigs"`
+	UserProfile     UserProfile        `json:"userProfile"`
+}
+
+// UserProfile holds the end-user's personal identity shown in the chat UI: a
+// display name and an avatar. Avatar is either a data-URL (uploaded image) or an
+// emoji/short string; an empty value falls back to a default user icon.
+type UserProfile struct {
+	Name   string `json:"name"`
+	Avatar string `json:"avatar"`
 }
 
 // RemoteGitDir is one remote working directory inside an environment: a remote
@@ -127,7 +139,7 @@ func (p *BrowserProfilePolicy) Normalize() {
 func DefaultAgentProfile() AgentProfile {
 	return AgentProfile{
 		ID: "default", Name: "Default Agent", Description: "General-purpose coding agent",
-		Builtin:              map[string]bool{"plan": true, "document": true, "skills-list": true},
+		Builtin:              piagent.DefaultBuiltinTools(),
 		SubAgents:            []string{},
 		PiTools:              defaultPiTools(),
 		BrowserProfilePolicy: DefaultBrowserProfilePolicy(),
@@ -168,13 +180,9 @@ func (a *AgentProfile) Normalize(index int) {
 	if a.Builtin == nil {
 		a.Builtin = map[string]bool{}
 	}
-	if _, configured := a.Builtin["document"]; !configured {
-		a.Builtin["document"] = true
+	for name := range piagent.RequiredBuiltinTools() {
+		a.Builtin[name] = true
 	}
-	// skills_list is part of CodingTo's isolated runtime contract. It is always
-	// materialized for every agent so the model can discover manually-loaded
-	// skills without relying on a process/global Pi profile.
-	a.Builtin["skills-list"] = true
 	for _, retired := range []string{"api", "db", "git"} {
 		delete(a.Builtin, retired)
 	}
@@ -252,7 +260,7 @@ func (c AppConfig) Agent(id string) (AgentProfile, bool) {
 func DefaultConfig() AppConfig {
 	return AppConfig{
 		ConfigVersion: 5,
-		Preferences:   Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441"},
+		Preferences:   Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified"},
 		Providers:     piagent.DefaultProviders(),
 		SessionDir:    DefaultSessionDir(),
 		Extensions:    extensions.DefaultConfig(),
@@ -382,6 +390,13 @@ func (s *ConfigStore) assemble() AppConfig {
 		if setting.AccentColor != "" {
 			cfg.Preferences.AccentColor = setting.AccentColor
 		}
+		if setting.ChatLayout != "" {
+			cfg.Preferences.ChatLayout = setting.ChatLayout
+		}
+		if setting.DiffMode != "" {
+			cfg.Preferences.DiffMode = setting.DiffMode
+		}
+		cfg.Preferences.ShowIdentity = setting.ShowIdentity
 		cfg.DefaultProvider = setting.DefaultProvider
 		cfg.DefaultModel = setting.DefaultModel
 		cfg.LastEnvironment = setting.LastEnvironment
@@ -391,6 +406,16 @@ func (s *ConfigStore) assemble() AppConfig {
 			if json.Unmarshal([]byte(setting.Figma), &fg) == nil {
 				cfg.Extensions.Figma = fg
 			}
+		}
+		if setting.GlobalMCP != "" {
+			_ = json.Unmarshal([]byte(setting.GlobalMCP), &cfg.Extensions.GlobalMCP)
+		}
+		if setting.GlobalPlugins != "" {
+			_ = json.Unmarshal([]byte(setting.GlobalPlugins), &cfg.Extensions.GlobalPlugins)
+		}
+		cfg.UserProfile = UserProfile{
+			Name:   setting.UserName,
+			Avatar: setting.UserAvatar,
 		}
 	}
 
@@ -515,15 +540,24 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 	}
 
 	figma, _ := json.Marshal(cfg.Extensions.Figma)
+	globalMCP, _ := json.Marshal(cfg.Extensions.GlobalMCP)
+	globalPlugins, _ := json.Marshal(cfg.Extensions.GlobalPlugins)
 	if err := s.st.SaveSetting(store.Setting{
 		Theme:           cfg.Preferences.Theme,
 		Language:        cfg.Preferences.Language,
 		AccentColor:     cfg.Preferences.AccentColor,
+		ChatLayout:      cfg.Preferences.ChatLayout,
+		ShowIdentity:    cfg.Preferences.ShowIdentity,
+		DiffMode:        cfg.Preferences.DiffMode,
 		DefaultProvider: cfg.DefaultProvider,
 		DefaultModel:    cfg.DefaultModel,
 		LastEnvironment: cfg.LastEnvironment,
 		SessionDir:      cfg.SessionDir,
 		Figma:           string(figma),
+		GlobalMCP:       string(globalMCP),
+		GlobalPlugins:   string(globalPlugins),
+		UserName:        cfg.UserProfile.Name,
+		UserAvatar:      cfg.UserProfile.Avatar,
 	}); err != nil {
 		return err
 	}

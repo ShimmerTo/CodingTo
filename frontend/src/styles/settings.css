@@ -19,3 +19,14 @@
 .segmented { display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--surface-2); }
 .segmented button { height: 28px; display: flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 13px; }
 .segmented button.active { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+.setting-row--avatar { align-items: flex-start; gap: 24px; padding: 12px 0; }
+.setting-row--avatar > div:first-child { display: flex; flex-direction: column; gap: 5px; }
+.setting-row--avatar small { max-width: 520px; color: var(--faint); font-size: 11px; line-height: 1.45; }
+.avatar-field { display: flex; align-items: center; gap: 14px; }
+.avatar-preview { width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); color: var(--muted); overflow: hidden; }
+.avatar-preview img { width: 100%; height: 100%; object-fit: cover; }
+.avatar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.name-field { width: min(360px, 50%); }
+.name-field input { width: 100%; height: 34px; flex: 1; border: 1px solid var(--border); outline: 0; border-radius: 7px; padding: 0 10px; color: var(--text); background: var(--surface); font-size: 13px; }
+.name-field input:focus { border-color: var(--amber); box-shadow: 0 0 0 2px rgba(113,113,109,.08); }
+.name-field input::placeholder { color: var(--muted); }

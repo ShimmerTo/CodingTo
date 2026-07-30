@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -82,15 +83,22 @@ type Setting struct {
 	LastEnvironment string
 	SessionDir      string
 	Figma           string // JSON of extensions.FigmaConfig
+	GlobalMCP       string // JSON of []extensions.GlobalPackage
+	GlobalPlugins   string // JSON of []extensions.GlobalPackage
+	UserName        string // end-user display name shown in the chat UI
+	UserAvatar      string // end-user avatar (data-URL or emoji), shown in the chat UI
+	ChatLayout      string // 'left' (default) or 'side' conversation layout
+	ShowIdentity    bool   // show agent/user avatar + name in conversation
+	DiffMode        string // 'unified' (default) or 'split' code diff layout
 }
 
 func (s *Store) GetSetting() (Setting, error) {
-	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma", map[string]any{"id": 1}).One()
+	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode", map[string]any{"id": 1}).One()
 	if err != nil {
 		return Setting{}, err
 	}
 	if len(row) == 0 {
-		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}"}, nil
+		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified"}, nil
 	}
 	return Setting{
 		Theme:           asString(row["theme"]),
@@ -101,6 +109,13 @@ func (s *Store) GetSetting() (Setting, error) {
 		LastEnvironment: asString(row["last_environment"]),
 		SessionDir:      asString(row["session_dir"]),
 		Figma:           asString(row["figma"]),
+		GlobalMCP:       asString(row["global_mcp"]),
+		GlobalPlugins:   asString(row["global_plugins"]),
+		UserName:        asString(row["user_name"]),
+		UserAvatar:      asString(row["user_avatar"]),
+		ChatLayout:      asString(row["chat_layout"]),
+		ShowIdentity:    asString(row["show_identity"]) != "0",
+		DiffMode:        asString(row["diff_mode"]),
 	}, nil
 }
 
@@ -119,6 +134,13 @@ func (s *Store) SaveSetting(set Setting) error {
 			"last_environment": set.LastEnvironment,
 			"session_dir":      set.SessionDir,
 			"figma":            set.Figma,
+			"global_mcp":       set.GlobalMCP,
+			"global_plugins":   set.GlobalPlugins,
+			"user_name":        set.UserName,
+			"user_avatar":      set.UserAvatar,
+			"chat_layout":      set.ChatLayout,
+			"show_identity":    boolToInt(set.ShowIdentity),
+			"diff_mode":        set.DiffMode,
 		}).Exec()
 		return err
 	}
@@ -131,6 +153,13 @@ func (s *Store) SaveSetting(set Setting) error {
 		"last_environment": set.LastEnvironment,
 		"session_dir":      set.SessionDir,
 		"figma":            set.Figma,
+		"global_mcp":       set.GlobalMCP,
+		"global_plugins":   set.GlobalPlugins,
+		"user_name":        set.UserName,
+		"user_avatar":      set.UserAvatar,
+		"chat_layout":      set.ChatLayout,
+		"show_identity":    boolToInt(set.ShowIdentity),
+		"diff_mode":        set.DiffMode,
 	}).Exec()
 	return err
 }
@@ -560,9 +589,27 @@ func asString(v any) string {
 		return string(t)
 	case nil:
 		return ""
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case int:
+		return strconv.Itoa(t)
+	case bool:
+		if t {
+			return "1"
+		}
+		return "0"
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
 	default:
 		return ""
 	}
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func asInt(v any) int64 {
@@ -578,11 +625,4 @@ func asInt(v any) int64 {
 	default:
 		return 0
 	}
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }

@@ -45,7 +45,9 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 
 ## 📝 更新日志
 
-
+# 2026-07-30
+- feat 增加支持mcp和扩展安装
+- feat 优化聊天框样式，增加更多配置
 
 #### 2026-07-28
 - feat 增加支持skills，三种安装方式
@@ -146,18 +148,6 @@ wails3 task build
 ```
 
 也可显式指定平台：`wails3 task windows:build`、`wails3 task darwin:build`、`wails3 task linux:build`。注意 macOS 与 Linux 桌面程序目前仅支持在对应系统上原生构建。
-
-### GitHub 三平台发布
-
-仓库内置 `.github/workflows/release.yml`，使用 GitHub 托管的原生 Windows、Linux 和 macOS runner 构建：
-
-- Windows amd64：`.exe` 与 NSIS 安装包
-- Linux amd64：`.tar.gz`
-- macOS：amd64 + arm64 universal `.app.zip`
-
-在 GitHub Actions 页面手动运行工作流只生成临时构建产物；推送形如 `v0.1.0` 的标签会在三个平台全部成功后自动创建或更新同名 GitHub Release。
-
-发布标签必须与 `build/config.yml`、`internal/app/appupdate.go` 和 `frontend/package.json` 中的应用版本一致。当前工作流暂不包含 Windows 证书签名和 Apple Developer ID 签名、公证。
 
 ## 📂 数据目录
 

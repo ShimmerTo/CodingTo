@@ -40,7 +40,6 @@ const serviceToken = String(process.env.CODINGTO_BROWSER_SERVICE_TOKEN || '');
 const ownerAgentID = String(process.env.CODINGTO_BROWSER_AGENT_ID || '');
 const ownerSessionID = String(process.env.CODINGTO_BROWSER_SESSION_ID || '');
 
-const SECURE_DIALOG_TITLE = '__CODINGTO_SECURE_BROWSER_PROFILE__';
 const IDENTITY_DIALOG_TITLE = '选择浏览器身份';
 const NEW_PROFILE_OPTION = '+ 新建 Profile';
 const LOGIN_PATH_RE = /\/(login|signin|sign-in|sign_in|signup|sso|oauth|auth)([/?#]|$)/i;
@@ -249,13 +248,20 @@ async function closeRememberedLease(state: LeaseState | null) {
   await clearLease(activeLeasePath);
 }
 
+function textResult(details: any) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(details) }],
+    details,
+  };
+}
+
 export default function (api: ExtensionAPI) {
   api.registerTool({
     name: 'codingto_browser_prepare',
     description: [
       'Browser Profile 登录态管理器。仅当你已经访问目标 URL 并发现页面需要登录时调用，公开页面不要调用。',
       '必须传入用户最初给出的目标页面 URL，不要传登录重定向 URL。',
-      '本工具让用户选择同域 Profile，然后由 CodingTo 的 Go 服务启动并持有可见 Chrome。',
+      '本工具让用户选择同域 Profile（最多展示 20 个），选择“+ 新建 Profile”会在同一对话框内联输入新 Key 并由 Go 服务创建；然后由 CodingTo 的 Go 服务启动并持有可见 Chrome。',
       'status=ready 时只会返回 leaseId；目标页已经打开，后续必须调用 codingto_browser_execute。',
       'status=login_required 或 not_ready 时，让用户在窗口中登录或完成人机验证，然后结束当前回合。',
       '用户发来下一条消息后再次调用本工具验证；没有固定次数上限，窗口由 Go 服务保持。',
@@ -307,34 +313,31 @@ export default function (api: ExtensionAPI) {
 
         for (;;) {
           const candidates = await listProfilesForOrigin(target.origin);
-          if (!ctx?.ui?.select || !ctx?.ui?.input) {
+          if (!ctx?.ui?.select) {
             return toolResult({ status: 'error', code: 'UI_UNAVAILABLE', message: '当前客户端不能显示 Browser Profile 选择窗口。' });
           }
+          const options = candidates.slice(0, 20).map((profile) => ({
+            label: profile.id,
+            value: profile.id,
+            description: profile.origins.join(', '),
+          }));
+          options.push({
+            label: NEW_PROFILE_OPTION,
+            value: NEW_PROFILE_OPTION,
+            createProfile: true,
+            targetUrl: target.url,
+          });
           const picked = await ctx.ui.select(
             `${IDENTITY_DIALOG_TITLE} · ${target.origin}`,
-            [...candidates.map((profile) => profile.id), NEW_PROFILE_OPTION],
+            options,
           );
           if (!picked) {
             return toolResult({ status: 'error', code: 'AUTH_CANCELLED', message: '用户取消了 Browser Profile 选择。' });
           }
-
-          let profile: ProfileMeta | null;
-          if (picked === NEW_PROFILE_OPTION) {
-            const value = await ctx.ui.input(
-              SECURE_DIALOG_TITLE,
-              JSON.stringify({ targetUrl: target.url }),
-            );
-            const key = String(value || '').trim();
-            if (!key) {
-              return toolResult({ status: 'error', code: 'AUTH_CANCELLED', message: '用户取消了 Browser Profile 创建。' });
-            }
-            if (!isValidProfileKey(key)) {
-              return toolResult({ status: 'error', code: 'INVALID_PROFILE_KEY', message: 'Browser Profile Key 不合法。' });
-            }
-            profile = await readProfileMeta(key);
-          } else {
-            profile = candidates.find((candidate) => candidate.id === picked) || null;
+          if (!isValidProfileKey(picked)) {
+            return toolResult({ status: 'error', code: 'INVALID_PROFILE_KEY', message: 'Browser Profile Key 不合法。' });
           }
+          const profile = await readProfileMeta(picked);
           if (!profile) {
             return toolResult({ status: 'error', code: 'PROFILE_UNAVAILABLE', message: '未能读取所选 Browser Profile。' });
           }

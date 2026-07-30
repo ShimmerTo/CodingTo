@@ -10,6 +10,7 @@ defineProps({
   title: { type: String, default: '' },
   hint: { type: String, default: '' },
   command: { type: String, default: '' },
+  previewCommand: { type: String, default: '' },
   commandPlaceholder: { type: String, default: '' },
   running: { type: Boolean, default: false },
   log: { type: Array, default: () => [] },
@@ -36,6 +37,10 @@ const emit = defineEmits(['update:command', 'run', 'close'])
         @input="emit('update:command', $event.target.value)"
         @keyup.enter="emit('run')"
       />
+      <div v-if="mode === 'command' && previewCommand" class="install-dialog__preview">
+        <span>{{ t.command }}</span>
+        <code>{{ previewCommand }}</code>
+      </div>
 
       <template v-else>
         <p v-if="statusText" class="install-dialog__hint">{{ statusText }}</p>

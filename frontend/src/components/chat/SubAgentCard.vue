@@ -8,13 +8,14 @@ import {
   subagentActivity, subagentTimeline, subagentUIState
 } from './subagentRuntime.js'
 import SubAgentInteraction from './SubAgentInteraction.vue'
-import { agentAvatar } from '../../composables/appContext.js'
+import { agentAvatar, isImageAvatar } from '../../composables/appContext.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
   messageItemComponent: { type: Object, required: true },
   agents: { type: Array, default: () => [] },
   now: { type: Number, default: 0 },
+  showIdentity: { type: Boolean, default: true },
   t: { type: Object, required: true },
 })
 
@@ -279,11 +280,12 @@ function openDetails() {
 <template>
   <section ref="cardEl" class="subagent-card" :class="`is-${status}`">
     <header>
-      <span class="subagent-card__icon">
-        <span v-if="agentAvatarValue" class="subagent-card__emoji">{{ agentAvatarValue }}</span>
+      <span v-if="showIdentity" class="subagent-card__icon">
+        <img v-if="isImageAvatar(agentAvatarValue)" :src="agentAvatarValue" class="subagent-card__img" alt="" />
+        <span v-else-if="agentAvatarValue" class="subagent-card__emoji">{{ agentAvatarValue }}</span>
         <Bot v-else :size="16" />
       </span>
-      <span class="subagent-card__main">
+      <span v-if="showIdentity" class="subagent-card__main">
         <strong>{{ agentName }}</strong>
       </span>
       <span class="subagent-card__state" :title="statusText">
@@ -349,6 +351,7 @@ function openDetails() {
 .subagent-card > header { flex: 0 0 auto; min-height: 49px; display: flex; align-items: center; gap: 9px; padding: 9px 11px; background: var(--surface); }
 .subagent-card__icon { flex: 0 0 auto; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--amber); background: var(--amber-soft); }
 .subagent-card__emoji { font-size: 16px; line-height: 1; }
+.subagent-card__img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
 .subagent-card__main { display: grid; gap: 1px; flex: 1; min-width: 80px; }
 .subagent-card__main strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-card__main small { overflow: hidden; color: var(--faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }

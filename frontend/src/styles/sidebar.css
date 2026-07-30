@@ -53,12 +53,12 @@
 .sidebar-browser__list .session-item:hover { color: var(--text); background: var(--hover); }
 .sidebar-browser__list .session-item.active { color: var(--text); background: var(--surface); }
 .sidebar-browser__list .session-item--running svg:first-child { color: #39a56c; }
-.sidebar-browser__list .archive-pop { position: fixed; z-index: 1000; width: 220px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
-.sidebar-browser__list .archive-pop p { margin: 0 0 8px; color: var(--text); font-size: 12px; line-height: 1.4; }
-.sidebar-browser__list .archive-pop__actions { display: flex; justify-content: flex-end; gap: 6px; }
-.sidebar-browser__list .archive-pop__actions button { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--muted); cursor: pointer; font-size: 12px; }
-.sidebar-browser__list .archive-pop__ok { border-color: transparent; background: var(--accent); color: var(--accent-fg); }
-.sidebar-browser__list .archive-pop__actions button:hover { filter: brightness(.97); }
+.archive-pop { position: fixed; z-index: 1000; width: 220px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.archive-pop p { margin: 0 0 8px; color: var(--text); font-size: 12px; line-height: 1.4; }
+.archive-pop__actions { display: flex; justify-content: flex-end; gap: 6px; }
+.archive-pop__actions button { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--muted); cursor: pointer; font-size: 12px; }
+.archive-pop__ok { border-color: transparent; background: var(--accent); color: var(--accent-fg); }
+.archive-pop__actions button:hover { filter: brightness(.97); }
 .sidebar-browser__list .session-item svg { flex: 0 0 auto; }
 .sidebar-browser__list .session-item__name { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-browser__list .session-archive { flex: 0 0 auto; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--danger); background: transparent; cursor: pointer; }
