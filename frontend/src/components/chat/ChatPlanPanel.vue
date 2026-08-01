@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { CheckCircle2, KeyRound, ListTodo } from 'lucide-vue-next'
 import { extensionDialogTitle } from './extensionDialog.js'
 
@@ -9,8 +9,9 @@ const props = defineProps({
   t: { type: Object, required: true }
 })
 
-const emit = defineEmits(['respond'])
+const emit = defineEmits(['respond', 'ack'])
 const responseValue = ref('')
+const dialogEl = ref(null)
 const browserProfile = ref({
   key: '', targetUrl: ''
 })
@@ -27,11 +28,44 @@ watch(() => props.dialog?.id, () => {
       targetUrl: setup.targetUrl || ''
     }
   }
+  // 弹窗成功渲染入 DOM 后向父组件发出 ack，由 App.vue 回传 extension_ui_ack
+  // 解除后端看门狗。若渲染失败（dialogEl 为空）则不发 ack，后端超时后会自动
+  // 代答取消，避免 agent 被阻断型扩展卡死。plan/browser-profile/ask-user 的
+  // 弹窗都走这里，一视同仁。
+  const dialogId = props.dialog?.id
+  if (dialogId) {
+    nextTick(() => {
+      if (dialogEl.value) emit('ack', { id: dialogId })
+    })
+  }
 }, { immediate: true })
 
 function submitBrowserProfile() {
   if (!browserProfile.value.key.trim()) return
   emit('respond', { browserProfile: { ...browserProfile.value } })
+}
+
+// select 弹窗的 options 既可能是纯字符串（计划扩展、浏览器身份扩展），也可能是
+// {label, value, description} 对象（ask-user 扩展）。以下辅助函数统一归一化，
+// 避免直接对对象调用字符串方法导致渲染崩溃、弹窗无法展示。
+function isOptionObject(option) {
+  return typeof option === 'object' && option !== null
+}
+function optionLabel(option) {
+  return isOptionObject(option) ? String(option.label ?? option.value ?? '') : String(option)
+}
+function optionValue(option, index) {
+  if (isOptionObject(option)) {
+    const value = option.value ?? option.label
+    return value == null ? String(index) : String(value)
+  }
+  return String(option)
+}
+function optionDescription(option) {
+  return isOptionObject(option) ? String(option.description || '') : ''
+}
+function isPrimaryOption(option) {
+  return optionLabel(option).toLowerCase().startsWith('execute')
 }
 </script>
 
@@ -58,7 +92,7 @@ function submitBrowserProfile() {
         </li>
       </ol>
     </div>
-    <div v-if="dialog" class="extension-prompt" :class="{ 'extension-prompt--credential': isSecureBrowserProfile }">
+    <div v-if="dialog" ref="dialogEl" class="extension-prompt" :class="{ 'extension-prompt--credential': isSecureBrowserProfile }">
       <template v-if="isSecureBrowserProfile">
         <strong><KeyRound :size="14" />{{ t.browserProfileCreateTitle }}</strong>
         <p>{{ t.browserProfileSecureHint }}</p>
@@ -76,11 +110,12 @@ function submitBrowserProfile() {
       <p v-if="dialog.message">{{ dialog.message }}</p>
       <div v-if="dialog.method === 'select'" class="extension-prompt__actions">
         <button
-          v-for="option in dialog.options"
-          :key="option"
-          :class="{ primary: option.toLowerCase().startsWith('execute') }"
-          @click="emit('respond', { value: option })"
-        >{{ option }}</button>
+          v-for="(option, index) in dialog.options"
+          :key="optionValue(option, index)"
+          :class="{ primary: isPrimaryOption(option) }"
+          :title="optionDescription(option)"
+          @click="emit('respond', { value: optionValue(option, index) })"
+        >{{ optionLabel(option) }}</button>
         <button @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
       </div>
       <div v-else-if="dialog.method === 'confirm'" class="extension-prompt__actions">

@@ -18,8 +18,11 @@ import {
   installGlobalPackage as beInstallGlobalPackage,
   removeGlobalPackage as beRemoveGlobalPackage,
   installAgentMcp as beInstallAgentMcp,
+  addManualMCP as beAddManualMCP,
+  removeAgentMcpServer as beRemoveAgentMcpServer,
   installAgentExtension as beInstallAgentExtension,
-  uninstallAgentExtension as beUninstallAgentExtension
+  uninstallAgentExtension as beUninstallAgentExtension,
+  deleteAgentExtensionDir as beDeleteAgentExtensionDir
 } from './backend'
 import { buildT } from './i18n'
 import ChatView from './ChatView.vue'
@@ -42,6 +45,13 @@ import { mergeSubagentRuntime } from './components/chat/subagentRuntime'
 import { completeCompactionMessage, createCompactionMessage } from './components/chat/compactionMessages'
 import { appContextKey } from './composables/appContext'
 import { defaultThinkingLevelForModel } from './modelThinking'
+import {
+  loadDraftForEnv, persistDraftForEnv,
+  persistExecPlan as persistExecPlanStorage, restoreExecPlan as restoreExecPlanStorage,
+  persistPlanItems as persistPlanItemsStorage, restorePlanItems as restorePlanItemsStorage,
+  persistExtDialogForTask as persistExtDialogStorage, clearPersistedExtDialog as clearExtDialogStorage,
+  readPersistedExtDialog
+} from './utils/localStorage'
 
 // 主页面固定为对话框；菜单点击后以模态浮层（新页面）打开，而非切换主内容区。
 const activePage = ref('chat')
@@ -80,24 +90,6 @@ const config = reactive({
 const draft = ref('')
 // 未发送内容（输入框草稿）按工作空间分别持久化：每个工作空间各自保存一份，
 // 刷新页面后按当前激活的工作空间恢复，切换工作空间时自动保存/载入对应草稿。
-const DRAFT_PREFIX = 'codingto:draft:'
-function draftKeyForEnv(envId) {
-  return DRAFT_PREFIX + (envId || '_none')
-}
-function loadDraftForEnv(envId) {
-  try {
-    return localStorage.getItem(draftKeyForEnv(envId)) || ''
-  } catch {
-    return ''
-  }
-}
-function persistDraftForEnv(envId, text) {
-  try {
-    const key = draftKeyForEnv(envId)
-    if (text && String(text).length) localStorage.setItem(key, text)
-    else localStorage.removeItem(key)
-  } catch {}
-}
 // 输入框内容变化时，实时保存当前工作空间的草稿。
 // 仅在「新建对话 / 首页」模式下把草稿写入存储；查看历史对话时输入框用于
 // 续写该会话，不应读取或覆盖工作空间的未发送草稿。
@@ -135,73 +127,22 @@ const extensionWidgets = reactive({})
 const planItems = ref([])
 const executionPlan = ref([])
 // 执行计划在本地点持久化，刷新页面后按当前任务恢复（后端暂无对应持久化接口）。
-const EXEC_PLAN_KEY = 'codingto:exec-plan:'
-const PLAN_ITEMS_KEY = 'codingto:plan-items:'
-function persistExecPlan() {
-  try {
-    const id = activeTaskId.value
-    if (!id) return
-    if (executionPlan.value.length) localStorage.setItem(EXEC_PLAN_KEY + id, JSON.stringify(executionPlan.value))
-    else localStorage.removeItem(EXEC_PLAN_KEY + id)
-  } catch {}
-}
-function restoreExecPlan(taskId) {
-  if (!taskId) { executionPlan.value = []; return }
-  try {
-    const raw = localStorage.getItem(EXEC_PLAN_KEY + taskId)
-    executionPlan.value = raw ? JSON.parse(raw) : []
-  } catch {
-    executionPlan.value = []
-  }
-}
+function persistExecPlan() { persistExecPlanStorage(activeTaskId.value, executionPlan.value) }
+function restoreExecPlan(taskId) { executionPlan.value = restoreExecPlanStorage(taskId) }
 // planItems（待确认计划）不会由后端持久化，仅存在于前端内存，刷新后会丢失。
-// 因此在本地也做一份持久化，刷新后能恢复计划面板，而不是一直“执行中转圈”。
-function persistPlanItems() {
-  try {
-    const id = activeTaskId.value
-    if (!id) return
-    if (planItems.value.length) localStorage.setItem(PLAN_ITEMS_KEY + id, JSON.stringify(planItems.value))
-    else localStorage.removeItem(PLAN_ITEMS_KEY + id)
-  } catch {}
-}
-function restorePlanItems(taskId) {
-  if (!taskId) { planItems.value = []; return }
-  try {
-    const raw = localStorage.getItem(PLAN_ITEMS_KEY + taskId)
-    planItems.value = raw ? JSON.parse(raw) : []
-  } catch {
-    planItems.value = []
-  }
-}
+// 因此在本地也做一份持久化，刷新后能恢复计划面板，而不是一直"执行中转圈"。
+function persistPlanItems() { persistPlanItemsStorage(activeTaskId.value, planItems.value) }
+function restorePlanItems(taskId) { planItems.value = restorePlanItemsStorage(taskId) }
 watch(executionPlan, persistExecPlan, { deep: true })
 watch(planItems, persistPlanItems, { deep: true })
 // 扩展交互对话框（如计划确认）在本地点持久化，刷新页面后按当前任务恢复，
-// 避免刷新后 agent 仍在等待确认却没有任何可操作的对话框（一直“转圈”）。
-const EXT_DIALOG_KEY = 'codingto:ext-dialog:'
-function persistExtDialog() {
-  try {
-    const id = activeTaskId.value
-    if (!id) return
-    const d = extensionDialog.value
-    if (d) localStorage.setItem(EXT_DIALOG_KEY + id, JSON.stringify(d))
-    else localStorage.removeItem(EXT_DIALOG_KEY + id)
-  } catch {}
-}
-function persistExtDialogForTask(taskId, dialog) {
-  try {
-    if (!taskId) return
-    if (dialog) localStorage.setItem(EXT_DIALOG_KEY + taskId, JSON.stringify(dialog))
-    else localStorage.removeItem(EXT_DIALOG_KEY + taskId)
-  } catch {}
-}
-function clearPersistedExtDialog(taskId) {
-  try { localStorage.removeItem(EXT_DIALOG_KEY + (taskId || activeTaskId.value || '')) } catch {}
-}
+// 避免刷新后 agent 仍在等待确认却没有任何可操作的对话框（一直"转圈"）。
+function persistExtDialog() { persistExtDialogStorage(activeTaskId.value, extensionDialog.value) }
+function persistExtDialogForTask(taskId, dialog) { persistExtDialogStorage(taskId, dialog) }
+function clearPersistedExtDialog(taskId) { clearExtDialogStorage(taskId || activeTaskId.value || '') }
 function restoreExtDialog(taskId) {
-  try {
-    const raw = taskId ? localStorage.getItem(EXT_DIALOG_KEY + taskId) : null
-    if (raw) extensionDialog.value = JSON.parse(raw)
-  } catch {}
+  const restored = readPersistedExtDialog(taskId)
+  if (restored) extensionDialog.value = restored
 }
 // 仅「待确认的执行计划」与「待选择的浏览器身份」两种对话框需要显示渐变圆点，
 // 其它扩展对话框（通用 confirm/select/prompt）不视为待确认内容。
@@ -214,12 +155,7 @@ function isPendingConfirmDialog(dialog) {
 function readTaskDialog(id) {
   if (!id) return null
   if (String(id) === String(activeTaskId.value)) return extensionDialog.value
-  try {
-    const raw = localStorage.getItem(EXT_DIALOG_KEY + String(id))
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
+  return readPersistedExtDialog(String(id))
 }
 function taskNeedsConfirm(id) {
   return isPendingConfirmDialog(readTaskDialog(id))
@@ -497,7 +433,9 @@ async function load() {
   const envIds = new Set(config.environments.map(ws => ws.id))
   for (const id of [...collapsedWorkspaceIds]) if (!envIds.has(id)) collapsedWorkspaceIds.delete(id)
   workspaceOrder.value = workspaceOrder.value.filter(id => envIds.has(id))
-  tasks.value = (await listSessions()) || []
+  const initialTasks = (await listSessions()) || []
+  mergeTaskRuntimeStatus(initialTasks)
+  tasks.value = initialTasks
   // 仅首次加载时做一次全量扩展扫描；之后返回列表/编辑扩展都只静默刷新单个 agent。
   await refreshExtensions()
   await refreshSkills()
@@ -558,6 +496,7 @@ async function refreshExtensions({ showLoading = false } = {}) {
     snapshot.builtins ||= {}
     snapshot.recommended ||= {}
     snapshot.packages ||= {}
+    snapshot.directory ||= {}
     snapshot.mcp ||= {}
     // Keep the current extension UI mounted during install/enable/remove
     // operations and replace only its backing snapshot when fresh data arrives.
@@ -578,6 +517,7 @@ async function refreshAgentExtensions(agentId) {
     current.builtins = { ...(current.builtins || {}), [agentId]: status.builtins || [] }
     current.recommended = { ...(current.recommended || {}), [agentId]: status.recommended || [] }
     current.packages = { ...(current.packages || {}), [agentId]: status.packages || [] }
+    current.directory = { ...(current.directory || {}), [agentId]: status.directory || [] }
     current.mcp = { ...(current.mcp || {}), [agentId]: status.mcp || [] }
     extensionSnapshot.value = { ...current }
   } catch (err) {
@@ -751,6 +691,8 @@ async function confirmDeleteExtension() {
       }
     } else if (payload.type === 'package') {
       if (selectedAgent.value) await uninstallAgentExtension(selectedAgent.value.id, payload.key)
+    } else if (payload.type === 'directory') {
+      if (selectedAgent.value) await deleteAgentExtensionDir(selectedAgent.value.id, payload.key, { name: payload.name })
     } else {
       await toggleAgentExtension(payload.group, payload.key)
     }
@@ -1235,6 +1177,38 @@ async function installAgentMcp(agentId, packageName) {
   }
 }
 
+async function addManualMCP(payload) {
+  if (extensionBusy.value) return
+  extensionBusy.value = 'manual-mcp-add'
+  try {
+    const result = await beAddManualMCP(payload)
+    await refreshExtensions()
+    pushToast('success', result?.message || t.value.toastInstalled.replace('{name}', payload.key))
+    return result
+  } catch (err) {
+    pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
+    throw err
+  } finally {
+    extensionBusy.value = ''
+  }
+}
+
+async function removeAgentMcpServer(agentId, key) {
+  if (!agentId || !key || extensionBusy.value) return
+  extensionBusy.value = 'agent-mcp-remove'
+  try {
+    const result = await beRemoveAgentMcpServer(agentId, key)
+    await refreshExtensions()
+    pushToast('success', result?.message || t.value.toastRemoved.replace('{name}', key))
+    return result
+  } catch (err) {
+    pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
+    throw err
+  } finally {
+    extensionBusy.value = ''
+  }
+}
+
 async function uninstallAgentExtension(agentId, key, options = {}) {
   extensionBusy.value = options.busyKey || 'browser-install'
   const displayName = options.name || t.value.browserNative
@@ -1251,6 +1225,27 @@ async function uninstallAgentExtension(agentId, key, options = {}) {
     pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
   } finally {
     extensionBusy.value = ''
+  }
+}
+
+// 删除一个未纳管的扩展目录（extensions/ 下不属于 CodingTo 管理的条目，如手动
+// 拷入的 ask-user）。后端会拒绝删除内置/系统/RTK 等受管扩展。
+async function deleteAgentExtensionDir(agentId, key, options = {}) {
+  const displayName = options.name || key
+  extensionDeleteBusy.value = true
+  try {
+    const result = await beDeleteAgentExtensionDir(agentId, key)
+    if (result?.success === false) {
+      pushToast('error', t.value.toastExtensionError.replace('{error}', result?.message || ''))
+    } else {
+      pushToast('success', result?.message || t.value.toastUninstalled.replace('{name}', displayName))
+    }
+    await refreshAgentExtensions(agentId)
+    return result
+  } catch (err) {
+    pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
+  } finally {
+    extensionDeleteBusy.value = false
   }
 }
 
@@ -1475,8 +1470,19 @@ async function ensureConversation(title) {
   return task
 }
 
+// 后端会话列表的 status 恒为 DB 中的 'active'（创建时硬编码），不反映运行状态；
+// 运行状态完全由事件流维护在 runningTaskIds 内存集合中。整体替换 tasks 前
+// 先合并运行状态，否则并行运行的任务会因其它任务结束触发 refreshSessions
+// 而被覆盖掉 status，导致侧边栏转圈动画丢失。
+function mergeTaskRuntimeStatus(list) {
+  for (const task of list) {
+    if (runningTaskIds.has(String(task.id))) task.status = 'running'
+  }
+}
+
 async function refreshSessions() {
   const latest = (await listSessions()) || []
+  mergeTaskRuntimeStatus(latest)
   tasks.value = latest
   const active = latest.find(item => item.id === activeTaskId.value)
   if (active) executionElapsedMs.value = Number(active.execDurationMs) || 0
@@ -1619,12 +1625,15 @@ function applySessionTokenTotals(usage) {
   const cached = firstNumber(usage.cached, usage.cacheRead, usage.cache_read_input_tokens, usage.cached_input_tokens)
   const cacheWrite = firstNumber(usage.cacheWrite, usage.cache_write_input_tokens)
   const output = firstNumber(usage.output, usage.output_tokens, usage.outputTokens)
+  // 显式 total 缺失或为 0（如后端聚合计不出 totalTokens）时回退到分项累加，
+  // 避免 total 显示 0 而 input/output 有值
+  const explicitTotal = firstNumber(usage.total)
   tokenStats.value = {
     input,
     cached,
     cacheWrite,
     output,
-    total: firstNumber(usage.total, input + cached + cacheWrite + output)
+    total: explicitTotal > 0 ? explicitTotal : input + cached + cacheWrite + output
   }
 }
 
@@ -1700,6 +1709,15 @@ async function requestSessionStats() {
   } catch {
     // Stats are supplementary and should never hide the actual response.
   }
+}
+
+// 弹窗成功渲染后由 ChatPlanPanel 经 ChatComposer/ChatView 转发至此，向后端回传
+// extension_ui_ack 解除交互请求看门狗。ack 只是“弹窗已展示”的确认，不是答案；
+// 静默失败，不影响主流程。taskId 用于后台任务弹窗的确认路由。
+function ackExtensionDialog(payload, taskId) {
+  const id = payload?.id
+  if (!id) return
+  sendAgentCommand(taskId || activeTaskId.value, { type: 'extension_ui_ack', id }).catch(() => {})
 }
 
 async function respondExtensionDialog(payload) {
@@ -1866,6 +1884,9 @@ function handleAgentEvent(event) {
     } else if (type === 'extension_ui_request') {
       if (['select', 'confirm', 'input', 'editor'].includes(event.method)) {
         persistExtDialogForTask(sourceTaskId, event)
+        // 后台任务的弹窗已被前端持久化，切换到该任务时会恢复展示，因此同样
+        // 向后端确认，避免看门狗误判为“弹窗未渲染”而自动取消。
+        ackExtensionDialog({ id: event.id }, sourceTaskId)
       } else if (event.method === 'setWidget' && event.widgetKey === 'plan-todos') {
         try {
           localStorage.setItem(PLAN_ITEMS_KEY + sourceTaskId, JSON.stringify(parsePlanLines(event.widgetLines)))
@@ -1880,6 +1901,10 @@ function handleAgentEvent(event) {
       persistExtDialogForTask(sourceTaskId, null)
       refreshSessions().catch(() => {})
       void sendNextPendingPrompt(sourceTaskId)
+    } else if (type === 'extension_ui_timeout') {
+      // 后台任务的弹窗超时被自动取消：清理持久化的残留弹窗，避免切回该任务
+      // 时恢复出一个已失效的对话框。
+      persistExtDialogForTask(sourceTaskId, null)
     }
     return
   }
@@ -2034,6 +2059,14 @@ function handleAgentEvent(event) {
       setTaskRunning(sourceTaskId || activeTaskId.value, true)
       persistExtDialog()
     }
+  } else if (type === 'extension_ui_timeout') {
+    // 后端看门狗超时：弹窗从未被前端确认，已代答取消解除 agent 阻塞。清理
+    // 可能残留的弹窗状态并提示用户；running 状态由后续 agent_settled 收尾。
+    if (extensionDialog.value && String(extensionDialog.value.id) === String(event.id)) {
+      extensionDialog.value = null
+      clearPersistedExtDialog()
+    }
+    pushToast('info', t.value.extensionUiTimeout)
   } else if (type === 'error') {
     const msg = event.code === 'model_first_response_timeout'
       ? t.value.modelFirstResponseTimeout
@@ -2366,7 +2399,14 @@ async function selectTask(task) {
     } else if (task.tokenStats) {
       tokenStats.value = { ...tokenStats.value, ...task.tokenStats }
     }
-    contextUsage.value = { tokens: 0, contextWindow: contextWindow.value, percent: 0, ...(task.contextUsage || {}) }
+    // contextUsage 与 tokenStats 同源：后端聚合的 tokens 为权威值，任务快照仅兜底；
+    // contextWindow/percent 后端聚合为 0，沿用快照或当前配置
+    const snapshotUsage = task.contextUsage || {}
+    contextUsage.value = {
+      tokens: firstNumber(history?.contextUsage?.tokens) || firstNumber(snapshotUsage.tokens),
+      contextWindow: firstNumber(snapshotUsage.contextWindow) || contextWindow.value,
+      percent: firstNumber(snapshotUsage.percent)
+    }
     activeSessionPath.value = task.sessionPath || ''
     planItems.value = safeClone(task.planItems || [])
     restorePlanItems(task.id)
@@ -2580,8 +2620,11 @@ function updateCompatJson(target, event) {
 
 function protocolEndpoint(api) {
   if (api === 'openai-responses') return 'responses'
+  if (api === 'openai-codex-responses') return 'responses'
+  if (api === 'azure-openai-responses') return 'responses'
   if (api === 'anthropic-messages') return 'messages'
   if (api === 'google-generative-ai') return 'models/{model}:streamGenerateContent'
+  if (api === 'google-vertex') return 'models/{model}:streamGenerateContent'
   return 'chat/completions'
 }
 
@@ -3034,6 +3077,8 @@ provide(appContextKey, {
   installGlobalPackage,
   removeGlobalPackage,
   installAgentMcp,
+  addManualMCP,
+  removeAgentMcpServer,
   installAgentExtension,
   uninstallAgentExtension,
   openWsEditor,
@@ -3326,6 +3371,7 @@ onBeforeUnmount(() => {
             @update-thinking-open="updateThinkingOpen"
             @compact="compactContext"
             @respond-extension="respondExtensionDialog"
+            @ack-extension="ackExtensionDialog"
             @refresh-session-changes="refreshSessionChanges"
             @artifact-error="pushToast('error', localizeError(String($event)))"
           />

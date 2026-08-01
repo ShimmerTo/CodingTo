@@ -1,5 +1,5 @@
 .skills-page { position: relative; }
-.skills-actions { display: flex; align-items: center; gap: 8px; margin: -18px 0 18px; }
+.skills-actions { display: flex; align-items: center; gap: 8px; margin: 0 0 18px; }
 .skills-actions .icon-button { margin-left: auto; }
 .skills-list { display: flex; flex-direction: column; gap: 10px; }
 .skill-card { display: flex; align-items: flex-start; gap: 14px; padding: 16px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-2); }
@@ -9,6 +9,8 @@
 .skill-card__actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .skills-empty { margin-top: 22px; }
 .skills-dialog { width: min(580px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 40px)); overflow: auto; }
+.confirm-dialog__agents { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; margin: 14px auto 0; max-width: 340px; color: var(--muted); font-size: 12px; }
+.confirm-dialog__agents b { padding: 3px 9px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-2); font-weight: 500; }
 .skill-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .skill-field input { width: 100%; height: 35px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface); font: 12px "SFMono-Regular", Consolas, monospace; }
 .skill-field input:focus { border-color: var(--amber); }

@@ -53,7 +53,7 @@ const emit = defineEmits([
   'update:model', 'add-images', 'update:thinking',
   'update:skill',
   'remove-image', 'add-attachments', 'remove-attachment',
-  'compact', 'respond-extension', 'clear-error',
+  'compact', 'respond-extension', 'ack-extension', 'clear-error',
   'update-thinking-open', 'refresh-session-changes', 'edit-pending', 'delete-pending',
   'artifact-error'
 ])
@@ -235,6 +235,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @preview-image="previewImage = $event"
         @compact="emit('compact')"
         @respond-extension="emit('respond-extension', $event)"
+        @ack-extension="emit('ack-extension', $event)"
       />
     </main>
 

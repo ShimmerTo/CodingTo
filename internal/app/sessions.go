@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"codingto/internal/store"
+	"codingto/internal/subagentbridge"
 )
 
 const sessionEventFile = "codingto_events.jsonl"
@@ -158,8 +159,15 @@ func (a *App) GetSubagentTranscript(sessionID int64, runID string) (SessionHisto
 	if info, err := os.Stat(runDir); err != nil || !info.IsDir() {
 		return SessionHistory{}, errors.New("subagent run not found")
 	}
-	messages := readSessionMessages(runDir)
-	tokenStats, contextUsage := readSessionTokenStats(runDir)
+	// History is rebuilt from Pi's own session file. A legacy codingto_events.jsonl
+	// used to accumulate every streaming event (each message_update carried a
+	// cumulative content snapshot), ballooning to gigabytes and stalling this
+	// endpoint, so an oversized leftover is dropped before reading.
+	if info, err := os.Stat(filepath.Join(runDir, sessionEventFile)); err == nil && info.Size() > 100<<20 {
+		_ = os.Remove(filepath.Join(runDir, sessionEventFile))
+	}
+	messages := ParseSubagentPiSession(runDir)
+	tokenStats, contextUsage := readSubagentTokenStats(runDir)
 	return SessionHistory{
 		Messages: messages, TokenStats: tokenStats, ContextUsage: contextUsage,
 		SubagentUI: readSubagentUIState(runDir),
@@ -195,6 +203,73 @@ func (a *App) RespondSubagentUI(sessionID int64, runID string, response Subagent
 	}
 	if err := os.Rename(tempPath, finalPath); err != nil {
 		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
+}
+
+// AckSubagentUI records that the frontend rendered an interactive dialog for a
+// running subagent. It mirrors the parent agent's extension_ui_ack: the bridge's
+// UI timeout only bounds the ack window, so after this call the user may take
+// as long as they need to answer without the dialog being force-cancelled. The
+// ack is dropped into the run's ack mailbox and never reaches the subagent; it
+// is not an answer.
+func (a *App) AckSubagentUI(sessionID int64, runID, requestID string) error {
+	runDir, err := a.subagentRunDir(sessionID, runID)
+	if err != nil {
+		return err
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" || len(requestID) > 512 {
+		return errors.New("invalid subagent UI request id")
+	}
+	state := readSubagentUIState(runDir)
+	dialog := mapValue(state["dialog"])
+	if stringValue(dialog["id"]) != requestID {
+		return errors.New("subagent UI request is no longer pending")
+	}
+	ackDir := filepath.Join(runDir, ".ui-acks")
+	if err := ensurePrivateDir(ackDir); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(map[string]string{"id": requestID})
+	if err != nil {
+		return err
+	}
+	finalPath := filepath.Join(ackDir, subagentUIResponseFileName(requestID))
+	tempPath := finalPath + ".tmp"
+	if err := os.WriteFile(tempPath, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
+}
+
+// AbortSubagent stops a running subagent by dropping an abort marker into its
+// run directory. The bridge's run loop polls the marker and terminates the
+// subagent Pi process directly, so cancellation does not depend on the parent
+// agent's tool-execution abort chain (which can be wedged if the parent Pi is
+// blocked).
+func (a *App) AbortSubagent(sessionID int64, runID string) error {
+	runDir, err := a.subagentRunDir(sessionID, runID)
+	if err != nil {
+		return err
+	}
+	// Only stop runs that are actually in progress; a finished run must not be
+	// left with a marker that could confuse later reads. A failed read (run.json
+	// still being written, or a transient rename gap) also writes the marker:
+	// the marker is idempotent, run IDs are unique, and the bridge only polls it
+	// and removes it when the run ends, so a rejected abort is worse than a
+	// harmless stale marker.
+	record, err := subagentbridge.ReadRunRecord(filepath.Join(runDir, "run.json"))
+	if err == nil && record.Status != "running" {
+		return nil
+	}
+	marker := filepath.Join(runDir, ".abort")
+	if err := os.WriteFile(marker, []byte("1"), 0o600); err != nil {
 		return err
 	}
 	return nil
@@ -717,6 +792,178 @@ func readSessionMessages(sessionDir string) []map[string]any {
 	return messages
 }
 
+// subagentPiSessionFile locates Pi's own session file for a subagent run
+// (e.g. 2026-07-31T12-17-20-992Z_codingto-subagent-run-<runID>.jsonl). Pi
+// appends one record per completed message, so the file stays compact while
+// carrying the full user/assistant/toolResult history — the source of truth
+// for the subagent details view.
+func subagentPiSessionFile(runDir string) string {
+	matches, err := filepath.Glob(filepath.Join(runDir, "*codingto-subagent-*.jsonl"))
+	if err != nil {
+		return ""
+	}
+	for _, match := range matches {
+		if strings.HasSuffix(match, sessionEventFile) {
+			continue
+		}
+		return match
+	}
+	return ""
+}
+
+// ParseSubagentPiSession rebuilds the message list shown in the subagent details
+// dialog from Pi's session file. Pending tool calls from assistant messages are
+// matched FIFO against the following toolResult records, mirroring the shape
+// produced by readSessionMessages so the frontend renders it identically.
+// It is exported (not a Wails binding — only App methods are bound) so the
+// version-controlled tests under ./test can exercise it black-box.
+func ParseSubagentPiSession(runDir string) []map[string]any {
+	path := subagentPiSessionFile(runDir)
+	if path == "" {
+		return []map[string]any{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer file.Close()
+
+	messages := []map[string]any{}
+	pendingTools := []map[string]any{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 160*1024*1024)
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		if stringValue(event["type"]) != "message" {
+			continue
+		}
+		msg := mapValue(event["message"])
+		createdAt := parsePiEventTime(stringValue(event["timestamp"]))
+		switch stringValue(msg["role"]) {
+		case "user":
+			text, _ := piMessageContent(msg)
+			messages = append(messages, map[string]any{
+				"id": fmt.Sprintf("subagent-user-%d", len(messages)), "role": "user",
+				"content": text, "createdAt": createdAt,
+			})
+		case "assistant":
+			text, thinking := piMessageContent(msg)
+			for _, block := range piContentBlocks(msg) {
+				if stringValue(block["type"]) != "toolCall" {
+					continue
+				}
+				arguments := firstPresent(block["arguments"], block["partialArgs"])
+				pendingTools = append(pendingTools, map[string]any{
+					"id": stringValue(block["id"]), "name": stringValue(block["name"]),
+					"arguments": arguments,
+				})
+			}
+			if text != "" || thinking != "" {
+				messages = append(messages, map[string]any{
+					"id": fmt.Sprintf("subagent-assistant-%d", len(messages)), "role": "assistant",
+					"content": text, "thinkingContent": thinking, "createdAt": createdAt,
+				})
+			}
+		case "toolResult":
+			call := map[string]any{}
+			if len(pendingTools) > 0 {
+				call = pendingTools[0]
+				pendingTools = pendingTools[1:]
+			}
+			output, _ := piMessageContent(msg)
+			name := firstNonEmptyString(stringValue(msg["toolName"]), stringValue(call["name"]))
+			status := "done"
+			if boolValue(msg["isError"]) {
+				status = "error"
+			}
+			detail := map[string]any{
+				"toolCallId": firstNonEmptyString(stringValue(msg["toolCallId"]), stringValue(call["id"])),
+				"name":       name,
+				"args":       call["arguments"],
+				"input":      call["arguments"],
+				"output":     output,
+				"status":     status,
+				"startedAt":  createdAt,
+				"endedAt":    createdAt,
+			}
+			messages = append(messages, map[string]any{
+				"id": fmt.Sprintf("subagent-tool-%d", len(messages)), "role": "tool",
+				"content": name, "detail": detail, "createdAt": createdAt,
+			})
+		}
+	}
+	return messages
+}
+
+// readSubagentTokenStats aggregates usage from Pi's session file, matching the
+// shape of readSessionTokenStats.
+func readSubagentTokenStats(runDir string) (SessionTokenStats, SessionContextUsage) {
+	path := subagentPiSessionFile(runDir)
+	stats := SessionTokenStats{}
+	lastContextTokens := int64(0)
+	if path == "" {
+		return stats, SessionContextUsage{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return stats, SessionContextUsage{}
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		if stringValue(event["type"]) != "message" {
+			continue
+		}
+		msg := mapValue(event["message"])
+		if stringValue(msg["role"]) != "assistant" {
+			continue
+		}
+		usage := mapValue(msg["usage"])
+		if len(usage) == 0 {
+			continue
+		}
+		stats.Input += intValue(usage["input"])
+		stats.Cached += intValue(usage["cacheRead"])
+		stats.CacheWrite += intValue(usage["cacheWrite"])
+		stats.Output += intValue(usage["output"])
+		stats.Total += intValue(usage["totalTokens"])
+		if t := intValue(usage["totalTokens"]); t > 0 {
+			lastContextTokens = t
+		}
+	}
+	return stats, SessionContextUsage{Tokens: lastContextTokens}
+}
+
+func piContentBlocks(message map[string]any) []map[string]any {
+	content, _ := message["content"].([]any)
+	blocks := make([]map[string]any, 0, len(content))
+	for _, raw := range content {
+		if block := mapValue(raw); block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func parsePiEventTime(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return 0
+	}
+	return parsed.UnixMilli()
+}
+
 func firstNonEmptyString(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -823,6 +1070,11 @@ func mapValue(value any) map[string]any {
 		return result
 	}
 	return map[string]any{}
+}
+
+func boolValue(value any) bool {
+	result, ok := value.(bool)
+	return ok && result
 }
 
 func stringValue(value any) string {

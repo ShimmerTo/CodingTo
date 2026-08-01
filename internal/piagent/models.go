@@ -13,17 +13,23 @@ import (
 )
 
 const (
-	APIAnthropicMessages  = "anthropic-messages"
-	APIOpenAICompletions  = "openai-completions"
-	APIOpenAIResponses    = "openai-responses"
-	APIGoogleGenerativeAI = "google-generative-ai"
+	APIAnthropicMessages    = "anthropic-messages"
+	APIOpenAICompletions    = "openai-completions"
+	APIOpenAIResponses      = "openai-responses"
+	APIOpenAICodexResponses = "openai-codex-responses"
+	APIAzureOpenAIResponses = "azure-openai-responses"
+	APIGoogleGenerativeAI   = "google-generative-ai"
+	APIGoogleVertex         = "google-vertex"
 )
 
 var SupportedAPIs = []string{
 	APIOpenAICompletions,
 	APIOpenAIResponses,
+	APIOpenAICodexResponses,
+	APIAzureOpenAIResponses,
 	APIAnthropicMessages,
 	APIGoogleGenerativeAI,
+	APIGoogleVertex,
 }
 
 type CostTier struct {

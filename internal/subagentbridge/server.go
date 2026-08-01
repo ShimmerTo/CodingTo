@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +24,22 @@ const (
 	maxProtocolMessage = 8 * 1024 * 1024
 	runTimeout         = 10 * time.Minute
 )
+
+// uiResponseTimeout bounds how long a subagent's interactive extension UI
+// request (select/confirm/input/editor) may wait for the frontend to confirm it
+// rendered the dialog (see AckSubagentUI, mirroring the parent agent's
+// extension_ui_ack). If the frontend never renders the dialog (event lost,
+// dialog render failed, frontend gone) the request is auto-cancelled so the
+// subagent continues instead of wedging for the entire runTimeout. Once the
+// frontend acknowledges rendering or answers directly, the user may take as
+// long as they need; only the run context (abort / runTimeout) still applies.
+// Kept as a package variable so tests can shorten it.
+var uiResponseTimeout = 60 * time.Second
+
+// errUIResponseTimeout reports that an interactive UI request was not
+// acknowledged by the frontend within uiResponseTimeout. The caller answers the
+// request with a cancellation so the subagent can proceed.
+var errUIResponseTimeout = errors.New("subagent UI response timed out")
 
 var (
 	runIDPattern  = regexp.MustCompile(`^run-[A-Za-z0-9_-]{8,96}$`)
@@ -233,9 +250,6 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 	if err := beginChildNode(runDir, nodeID, s.snapshot.WorkDir, params.Task, startedAt); err != nil {
 		return RunResult{}, err
 	}
-	_ = appendEvent(runDir, map[string]any{
-		"type": "user_text", "message": params.Task, "changeNodeId": nodeID, "_recordedAt": startedAt,
-	})
 
 	runCtx, runCancel := context.WithTimeout(parent, runTimeout)
 	s.activeMu.Lock()
@@ -295,6 +309,12 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 	status := "completed"
 	errorText := ""
 	completed := false
+	// Reliable abort path independent of the parent agent: CodingTo writes a
+	// .abort marker into the run directory (AbortSubagent / parent AbortPrompt)
+	// and this loop polls it, so a wedged parent Pi process can never prevent a
+	// subagent from being stopped.
+	abortTicker := time.NewTicker(500 * time.Millisecond)
+	defer abortTicker.Stop()
 	for !completed {
 		select {
 		case <-runCtx.Done():
@@ -304,6 +324,11 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 				status, errorText = "aborted", "subagent run aborted"
 			}
 			completed = true
+		case <-abortTicker.C:
+			if abortRequested(runDir) {
+				status, errorText = "aborted", "subagent run aborted"
+				completed = true
+			}
 		case event, open := <-adapter.Events():
 			if !open {
 				status = "failed"
@@ -323,7 +348,9 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 				payload["changeNodeId"] = nodeID
 				payload["runId"] = params.RunID
 				payload["agentKey"] = agent.Key
-				_ = appendEvent(runDir, payload)
+				if persistRunEventForUI(payload) {
+					_ = appendEvent(runDir, payload)
+				}
 				collectText(&text, payload)
 				eventType, _ := payload["type"].(string)
 				if eventType == "extension_ui_request" && isInteractiveUIRequest(payload) {
@@ -334,7 +361,43 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 					notified = true
 					response, waitErr := awaitUIResponse(runCtx, runDir, stringValue(payload["id"]))
 					if waitErr != nil {
-						if !errors.Is(waitErr, context.Canceled) && !errors.Is(waitErr, context.DeadlineExceeded) {
+						requestID := stringValue(payload["id"])
+						if errors.Is(waitErr, errUIResponseTimeout) {
+							// The frontend never confirmed it rendered the dialog (event
+							// lost, render failed, or frontend gone). Answer it with a
+							// cancellation so the subagent unblocks and can continue
+							// instead of being wedged until runTimeout. The frontend
+							// clears the stale dialog via the subagent_ui_response
+							// notification below.
+							responseEvent := map[string]any{
+								"type": "subagent_ui_response", "id": requestID, "cancelled": true,
+								"_recordedAt": time.Now().UnixMilli(), "changeNodeId": nodeID,
+								"runId": params.RunID, "agentKey": agent.Key,
+							}
+							_ = appendEvent(runDir, responseEvent)
+							responseRaw, _ := json.Marshal(responseEvent)
+							s.writeNotification(Notification{
+								Version: ProtocolVersion, Type: "event", RunID: params.RunID,
+								AgentKey: agent.Key, Event: responseRaw,
+							})
+							command := map[string]any{"type": "extension_ui_response", "id": requestID, "cancelled": true}
+							commandRaw, _ := json.Marshal(command)
+							if err := adapter.SendCommand(commandRaw); err != nil {
+								status, errorText = "failed", err.Error()
+								completed = true
+								break
+							}
+							log.Printf("[subagent %s] interactive UI request %s timed out; auto-cancelled", params.RunID, requestID)
+							continue
+						}
+						// The run was aborted or timed out while the frontend had the
+						// dialog open. Always record the final status so run.json never
+						// stays "running" after the run has stopped.
+						if errors.Is(waitErr, context.Canceled) {
+							status, errorText = "aborted", "subagent run aborted"
+						} else if errors.Is(waitErr, context.DeadlineExceeded) {
+							status, errorText = "timeout", "subagent run timed out"
+						} else {
 							status, errorText = "failed", waitErr.Error()
 						}
 						completed = true
@@ -371,8 +434,6 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 						completed = true
 					}
 				}
-			} else {
-				_ = appendRawEvent(runDir, event.Raw)
 			}
 			if !notified {
 				s.writeNotification(Notification{
@@ -385,6 +446,9 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 
 	endedAt := time.Now().UnixMilli()
 	_ = finishChildNode(runDir, nodeID, status, endedAt)
+	// Clear the abort marker so a completed run's transcript directory never
+	// carries a stale marker that could abort a future run.
+	_ = os.Remove(filepath.Join(runDir, ".abort"))
 	files := collectRunFiles(runDir, s.snapshot.WorkDir)
 	record.Status, record.Text, record.Error = status, strings.TrimSpace(text.String()), errorText
 	record.EndedAt, record.Files = endedAt, files
@@ -406,6 +470,29 @@ func isInteractiveUIRequest(event map[string]any) bool {
 	}
 }
 
+// abortRequested reports whether CodingTo has dropped a .abort marker into the
+// run directory to request a reliable, parent-independent cancellation.
+func abortRequested(runDir string) bool {
+	_, err := os.Stat(filepath.Join(runDir, ".abort"))
+	return err == nil
+}
+
+// persistRunEventForUI reports whether an event should be appended to the
+// run's codingto_events.jsonl. Run history is rebuilt from Pi's own session
+// file ({ts}_codingto-subagent-{runId}.jsonl), so the events log only keeps
+// interactive UI requests/responses that restore pending dialog state in the
+// details view. Streaming events (message_update deltas, tool execution
+// updates, ...) carry cumulative snapshots and would otherwise balloon the
+// file to gigabytes.
+func persistRunEventForUI(event map[string]any) bool {
+	switch stringValue(event["type"]) {
+	case "extension_ui_request", "subagent_ui_response":
+		return true
+	default:
+		return false
+	}
+}
+
 func stringValue(value any) string {
 	switch item := value.(type) {
 	case string:
@@ -422,9 +509,20 @@ func awaitUIResponse(ctx context.Context, runDir, requestID string) (map[string]
 		return nil, errors.New("subagent emitted an invalid UI request id")
 	}
 	sum := sha256.Sum256([]byte(requestID))
+	ackPath := filepath.Join(runDir, ".ui-acks", fmt.Sprintf("%x.json", sum))
 	responsePath := filepath.Join(runDir, ".ui-responses", fmt.Sprintf("%x.json", sum))
+	// The frontend answers interactive UI requests by dropping a response file
+	// into the run's response mailbox, and confirms it rendered the dialog by
+	// dropping an ack file into the ack mailbox. The UI timeout below only
+	// bounds the ack window, mirroring the parent agent's watchdog that
+	// extension_ui_ack disarms: a dialog the frontend never renders must not
+	// wedge the subagent for the whole run, but once the dialog is confirmed the
+	// user may answer at their own pace, bounded only by the run context.
+	ackTimeout := time.NewTimer(uiResponseTimeout)
+	defer ackTimeout.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	acknowledged := false
 	for {
 		raw, err := os.ReadFile(responsePath)
 		if err == nil {
@@ -438,9 +536,39 @@ func awaitUIResponse(ctx context.Context, runDir, requestID string) (map[string]
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
+		if !acknowledged {
+			// Phase 1: wait for the frontend to acknowledge rendering (or answer
+			// directly). Once acknowledged, uiResponseTimeout no longer applies.
+			if _, statErr := os.Stat(ackPath); statErr == nil {
+				acknowledged = true
+				continue
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return nil, statErr
+			}
+		}
+		// The run loop is blocked in this function while the dialog is open, so
+		// its own abort ticker cannot run. Poll the abort marker here instead:
+		// the user clicking stop must stop the subagent immediately, not after
+		// runTimeout (10 minutes). The run loop records context.Canceled as
+		// "aborted".
+		if abortRequested(runDir) {
+			return nil, context.Canceled
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-ackTimeout.C:
+			// If the timer fired just as the ack arrived, the ack check above
+			// takes precedence; only cancel when the dialog was never confirmed.
+			if !acknowledged {
+				// Double-check: the ack may have landed in the tiny gap between
+				// the stat above and the timer firing.
+				if _, statErr := os.Stat(ackPath); statErr == nil {
+					acknowledged = true
+					continue
+				}
+				return nil, errUIResponseTimeout
+			}
 		case <-ticker.C:
 		}
 	}

@@ -39,7 +39,8 @@ tasks:
     deps:
       - task: build
     cmds:
-      - tar -czf "{{.BIN_DIR}}/{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}.tar.gz" -C "{{.BIN_DIR}}" "{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}"
+      - cp "{{.ROOT_DIR}}/update.md" "{{.BIN_DIR}}"
+      - tar -czf "{{.BIN_DIR}}/{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}.tar.gz" -C "{{.BIN_DIR}}" "{{.APP_NAME}}-linux-{{.ARCH | default ARCH}}" "update.md"
     platforms: [linux]
 
   run:

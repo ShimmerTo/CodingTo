@@ -116,6 +116,7 @@ tasks:
         fi
       - cp "{{.BIN_DIR}}/{{.APP_NAME}}" "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS"
       - cp build/darwin/Info.plist "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents"
+      - cp "{{.ROOT_DIR}}/update.md" "{{.BIN_DIR}}/{{.APP_NAME}}.app/Contents/MacOS"
       - task: codesign:adhoc
 
   codesign:adhoc:

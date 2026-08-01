@@ -24,7 +24,7 @@
 .message-node { margin-bottom: 22px; }
 .message-node:last-child { margin-bottom: 0; }
 .message-node__header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.message-node__avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: 15px; line-height: 1; user-select: none; }
+.message-node__avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: 15px; line-height: 1; user-select: none; position: relative; overflow: hidden; }
 .message-node__emoji { font-size: 16px; }
-.message-node__img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.message-node__img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
 .message-node__name { color: var(--text); font-size: 14px; font-weight: 650; }

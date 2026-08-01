@@ -1,11 +1,11 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Bot, CheckCircle2, FileCode2, LoaderCircle, XCircle } from 'lucide-vue-next'
-import { getSubagentTranscript } from '../../backend.js'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { Bot, CheckCircle2, FileCode2, LoaderCircle, Square, XCircle } from 'lucide-vue-next'
+import { abortSubagent, getSubagentTranscript } from '../../backend.js'
 import { formatDuration } from './chatFormatters.js'
 import { toolInput, toolOutput, toolStatus } from './chatToolPresentation.js'
 import {
-  subagentActivity, subagentTimeline, subagentUIState
+  backfillSubagentTimeline, subagentActivity, subagentTimelineMessages, subagentUIState
 } from './subagentRuntime.js'
 import SubAgentInteraction from './SubAgentInteraction.vue'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext.js'
@@ -20,16 +20,10 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['open-details', 'artifact-error'])
-const cardEl = ref(null)
 const conversationEl = ref(null)
 const thinkingOpenByID = ref({})
-const transcript = ref([])
-const transcriptLoaded = ref(false)
-const transcriptVisible = ref(false)
-let transcriptCache = new Map()
-let transcriptObserver = null
-let transcriptTimer = 0
-let transcriptPending = false
+const aborting = ref(false)
+let backfillPending = false
 
 function parsed(value) {
   if (typeof value !== 'string') return value
@@ -77,63 +71,19 @@ const activity = computed(() => subagentActivity(runtime.value, {
   thinking: props.t.subagentThinking,
   responding: props.t.subagentResponding
 }))
-const timelineItems = computed(() => {
-  const items = subagentTimeline(props.message.detail)
-  if (items.length) return items
-  const text = String(result.value.text || '')
-  return text ? [{ id: 'result-content', kind: 'content', text, complete: true }] : []
-})
-const timelineMessages = computed(() => timelineItems.value.map(item => {
-  if (item.kind === 'tool') {
-    return {
-      id: `subagent-${item.id}`,
-      role: 'tool',
-      content: item.name,
-      live: !item.complete,
-      detail: {
-        type: item.complete ? 'tool_execution_end' : 'tool_execution_start',
-        status: item.complete ? 'done' : 'running',
-        toolCallId: item.toolCallId,
-        name: item.name,
-        toolName: item.name,
-        args: item.input,
-        startedAt: item.startedAt
-      }
-    }
-  }
-  if (item.kind === 'thinking') {
-    return {
-      id: `subagent-${item.id}`,
-      role: 'assistant',
-      content: '',
-      thinkingContent: item.text,
-      thinkingOpen: Boolean(thinkingOpenByID.value[`subagent-${item.id}`]),
-      live: false
-    }
-  }
-  return {
-    id: `subagent-${item.id}`,
-    role: 'assistant',
-    content: item.text,
-    thinkingContent: '',
-    live: !item.complete
-  }
-}))
+// 纯事件驱动：消息流直接来自 mergeSubagentRuntime 增量维护的 subagentTimeline
+// （text/thinking/tool 流式更新实时到达），历史场景由 backfill 一次性补齐，不轮询。
 const displayMessages = computed(() => {
-  const messages = transcriptLoaded.value ? transcript.value : timelineMessages.value
-  return messages
-    .filter(message => {
-      if (message.role === 'user') return false
-      if (message.role !== 'tool') return true
-      const detail = message.detail || {}
-      const name = detail.toolCall?.name || detail.name || detail.toolName || message.content
-      return !['codingto_plan_present', 'codingto_plan_update'].includes(name)
-    })
-    .map(message => (
-      message.role === 'assistant'
-        ? { ...message, thinkingOpen: Boolean(thinkingOpenByID.value[message.id]) }
+  const messages = subagentTimelineMessages(props.message.detail)
+  if (messages.length) {
+    return messages.map(message => (
+      message.role === 'assistant' && message.thinkingContent
+        ? { ...message, thinkingOpen: thinkingOpenByID.value[message.id] ?? !message.thinkingComplete }
         : message
     ))
+  }
+  const text = String(result.value.text || '')
+  return text ? [{ id: 'subagent-result', role: 'assistant', content: text, live: false }] : []
 })
 const displayVersion = computed(() => displayMessages.value.map(message => (
   `${message.id}:${message.content?.length || 0}:${message.thinkingContent?.length || 0}:${message.detail?.status || ''}:${message.detail?.output?.length || 0}`
@@ -156,111 +106,88 @@ const statusLabel = computed(() => {
   if (status.value === 'aborted') return props.t.subagentAborted
   return props.t.subagentFailed
 })
-const statusText = computed(() => (
-  status.value === 'running' && activity.value ? activity.value : statusLabel.value
-))
+// 距最后一次实时事件已过去的秒数。子 agent 的模型如果一次性返回（无流式
+// token），事件会长时间中断，此时用 idle 提示替代“正在运行”的空转感。
+const lastEventAt = computed(() => {
+  const events = props.message.detail?.subagentEvents || []
+  const last = events[events.length - 1]
+  return last?.receivedAt || 0
+})
+const idleSeconds = computed(() => {
+  if (!lastEventAt.value) return 0
+  return Math.max(0, Math.floor(((props.now || Date.now()) - lastEventAt.value) / 1000))
+})
+const statusText = computed(() => {
+  if (status.value !== 'running') return statusLabel.value
+  if (activity.value) return activity.value
+  if (idleSeconds.value >= 5) return `${props.t.subagentThinking} (${idleSeconds.value}s)`
+  return statusLabel.value
+})
 
-function messageFingerprint(message) {
-  const json = JSON.stringify(message)
-  let hash = 2166136261
-  for (let index = 0; index < json.length; index += 1) {
-    hash ^= json.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  return `${json.length}:${hash >>> 0}`
-}
-
-function updateTranscript(messages) {
-  const nextCache = new Map()
-  let changed = transcript.value.length !== messages.length
-  const next = messages.map((message, index) => {
-    const key = `${message.id ?? 'message'}:${index}`
-    const fingerprint = messageFingerprint(message)
-    const cached = transcriptCache.get(key)
-    const value = cached?.fingerprint === fingerprint ? cached.message : message
-    if (value !== transcript.value[index]) changed = true
-    nextCache.set(key, { fingerprint, message: value })
-    return value
-  })
-  transcriptCache = nextCache
-  if (changed) transcript.value = next
-  transcriptLoaded.value = true
-}
-
-async function refreshTranscript() {
+// 一次性拉取 transcript 回填进共享 detail（幂等，仅执行一次；有意改写共享的
+// message.detail，依赖父级 reactive 数组的引用共享，卡片与弹窗同步刷新）。
+// 运行中重新打开页面时实时事件可能已先到，由 backfillSubagentTimeline 负责
+// 历史前置合并，这里不再按 timeline 非空拦截。
+async function ensureBackfill() {
+  const detail = props.message.detail || {}
   if (
-    transcriptPending
-    || !transcriptVisible.value
+    backfillPending
+    || detail.subagentBackfilled
     || !sessionId.value
     || !runId.value
   ) return
   const requestedRunKey = `${sessionId.value}:${runId.value}`
-  transcriptPending = true
+  backfillPending = true
   try {
     const history = await getSubagentTranscript(sessionId.value, runId.value)
     if (requestedRunKey !== `${sessionId.value}:${runId.value}`) return
-    updateTranscript(history?.messages || [])
+    props.message.detail = backfillSubagentTimeline(props.message.detail, history?.messages || [])
   } catch {
-    // Live semantic events remain available as a fallback.
+    // 实时事件流仍可正常渲染，回填失败仅影响历史补齐。
   } finally {
-    transcriptPending = false
+    backfillPending = false
   }
 }
 
-function stopTranscriptRefresh() {
-  if (!transcriptTimer) return
-  window.clearInterval(transcriptTimer)
-  transcriptTimer = 0
+// 仅在用户贴近底部时跟随新内容滚动，上翻阅读历史时不被打断。
+const pinnedToBottom = ref(true)
+function onConversationScroll() {
+  const element = conversationEl.value
+  if (!element) return
+  pinnedToBottom.value = element.scrollHeight - element.scrollTop - element.clientHeight < 40
 }
-
-watch(
-  [transcriptVisible, sessionId, runId, status],
-  ([visible, currentSessionID, currentRunID, currentStatus], previous = []) => {
-    const previousRunKey = `${previous[1] || ''}:${previous[2] || ''}`
-    const runKey = `${currentSessionID || ''}:${currentRunID || ''}`
-    if (runKey !== previousRunKey) {
-      transcript.value = []
-      transcriptLoaded.value = false
-      transcriptCache = new Map()
-    }
-    stopTranscriptRefresh()
-    if (!visible || !currentSessionID || !currentRunID) return
-    void refreshTranscript()
-    if (currentStatus === 'running') {
-      transcriptTimer = window.setInterval(() => void refreshTranscript(), 2000)
-    }
-  }
-)
 
 async function scrollConversationToBottom() {
   await nextTick()
   const element = conversationEl.value
-  if (element) element.scrollTop = element.scrollHeight
+  if (element && pinnedToBottom.value) element.scrollTop = element.scrollHeight
 }
 
-watch(
-  [displayVersion, () => result.value.error],
-  scrollConversationToBottom,
-  { flush: 'post' }
-)
-onMounted(() => {
-  void scrollConversationToBottom()
-  if (window.IntersectionObserver) {
-    transcriptObserver = new IntersectionObserver(entries => {
-      transcriptVisible.value = entries.some(entry => entry.isIntersecting)
-    }, { rootMargin: '280px 0px' })
-    if (cardEl.value) transcriptObserver.observe(cardEl.value)
-  } else {
-    transcriptVisible.value = true
-  }
-})
-onBeforeUnmount(() => {
-  stopTranscriptRefresh()
-  transcriptObserver?.disconnect()
-})
+watch(displayVersion, scrollConversationToBottom, { flush: 'post' })
+watch([sessionId, runId], () => { void ensureBackfill() }, { immediate: true })
+onMounted(() => { void scrollConversationToBottom() })
 
 function setThinkingOpen(messageID, open) {
   thinkingOpenByID.value = { ...thinkingOpenByID.value, [messageID]: open }
+}
+
+async function abortRun() {
+  if (aborting.value || !sessionId.value || !runId.value) return
+  aborting.value = true
+  try {
+    await abortSubagent(sessionId.value, runId.value)
+    // Optimistic update: flip the card to aborted right away; the backend's
+    // tool_execution_end for this run will confirm the final state.
+    const detail = props.message.detail || {}
+    props.message.detail = {
+      ...detail,
+      subagent: { ...(detail.subagent || {}), status: 'aborted' },
+    }
+  } catch (err) {
+    emit('artifact-error', String(err?.message || err))
+  } finally {
+    aborting.value = false
+  }
 }
 
 function openDetails() {
@@ -278,27 +205,38 @@ function openDetails() {
 </script>
 
 <template>
-  <section ref="cardEl" class="subagent-card" :class="`is-${status}`">
+  <section class="subagent-card" :class="`is-${status}`">
+    <div class="subagent-card__body">
     <header>
-      <span v-if="showIdentity" class="subagent-card__icon">
-        <img v-if="isImageAvatar(agentAvatarValue)" :src="agentAvatarValue" class="subagent-card__img" alt="" />
-        <span v-else-if="agentAvatarValue" class="subagent-card__emoji">{{ agentAvatarValue }}</span>
-        <Bot v-else :size="16" />
+      <span v-if="showIdentity" class="subagent-card__avatar" aria-hidden="true">
+        <img v-if="isImageAvatar(agentAvatarValue)" :src="agentAvatarValue" class="subagent-card__avatar-img" alt="" />
+        <span v-else-if="agentAvatarValue" class="subagent-card__avatar-emoji">{{ agentAvatarValue }}</span>
+        <Bot v-else :size="15" />
       </span>
-      <span v-if="showIdentity" class="subagent-card__main">
-        <strong>{{ agentName }}</strong>
-      </span>
+      <strong class="subagent-card__name">{{ agentName }}</strong>
       <span class="subagent-card__state" :title="statusText">
-        <LoaderCircle v-if="status === 'running'" class="spin" :size="14" />
-        <CheckCircle2 v-else-if="status === 'completed'" :size="14" />
-        <XCircle v-else :size="14" />
-        <span>{{ statusText }}</span>
-        <small v-if="duration">{{ formatDuration(duration) }}</small>
+        <LoaderCircle v-if="status === 'running'" class="spin" :size="13" />
+        <CheckCircle2 v-else-if="status === 'completed'" :size="13" />
+        <XCircle v-else :size="13" />
       </span>
+      <span class="subagent-card__status">{{ statusText }}<small v-if="duration"> · {{ formatDuration(duration) }}</small></span>
+      <span class="subagent-card__spacer"></span>
       <button type="button" :disabled="!runId" @click="openDetails">{{ t.subagentDetails }}</button>
+      <button
+        v-if="status === 'running'"
+        type="button"
+        class="subagent-card__abort"
+        :disabled="aborting"
+        :title="aborting ? t.subagentAborting : t.subagentStop"
+        :aria-label="aborting ? t.subagentAborting : t.subagentStop"
+        @click="abortRun"
+      >
+        <LoaderCircle v-if="aborting" class="spin" :size="13" />
+        <Square v-else :size="12" />
+      </button>
     </header>
 
-    <div ref="conversationEl" class="subagent-card__conversation" aria-live="polite">
+    <div ref="conversationEl" class="subagent-card__conversation" aria-live="polite" @scroll.passive="onConversationScroll">
       <component
         v-for="messageItem in displayMessages"
         :is="messageItemComponent"
@@ -307,6 +245,7 @@ function openDetails() {
         :agents="agents"
         :now="messageItem.live ? now : 0"
         :t="t"
+        :show-identity="false"
         disable-subagent-card
         collapse-tools-by-default
         @update-thinking-open="setThinkingOpen(messageItem.id, $event)"
@@ -319,6 +258,7 @@ function openDetails() {
         :agents="agents"
         :now="0"
         :t="t"
+        :show-identity="false"
         disable-subagent-card
         collapse-tools-by-default
         @artifact-error="emit('artifact-error', $event)"
@@ -341,44 +281,50 @@ function openDetails() {
         <FileCode2 :size="12" />{{ String(file.path).split(/[\\/]/).pop() }}
       </span>
     </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
-.subagent-card { width: 100%; height: 42.857vh; height: 42.857dvh; min-height: 0; display: flex; flex-direction: column; contain: layout paint; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-2); overflow: hidden; text-align: left; }
-.subagent-card.is-completed { border-color: color-mix(in srgb, var(--success) 38%, var(--border)); }
-.subagent-card.is-failed,.subagent-card.is-timeout,.subagent-card.is-aborted { border-color: color-mix(in srgb, var(--danger) 38%, var(--border)); }
-.subagent-card > header { flex: 0 0 auto; min-height: 49px; display: flex; align-items: center; gap: 9px; padding: 9px 11px; background: var(--surface); }
-.subagent-card__icon { flex: 0 0 auto; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--amber); background: var(--amber-soft); }
-.subagent-card__emoji { font-size: 16px; line-height: 1; }
-.subagent-card__img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block; }
-.subagent-card__main { display: grid; gap: 1px; flex: 1; min-width: 80px; }
-.subagent-card__main strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-card__main small { overflow: hidden; color: var(--faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-card__state { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 5px; color: var(--faint); font-size: 11px; white-space: nowrap; }
-.subagent-card__state > span { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
-.subagent-card__state > small { color: inherit; font-variant-numeric: tabular-nums; }
+/* 引用块形态：无边框卡片，仅左侧高亮色条，随内容自动扩展高度（最多对话区 3/5）。
+   头像与名字并列在引用块顶部 header 左侧。 */
+.subagent-card { width: 80%; max-height: 60vh; min-height: 0; display: flex; flex-direction: row; align-items: flex-start; text-align: left; }
+.subagent-card__avatar { flex: 0 0 22px; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: #546fa5; font-size: 12px; line-height: 1; user-select: none; position: relative; overflow: hidden; }
+.subagent-card__avatar-emoji { font-size: 15px; }
+.subagent-card__avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.subagent-card__body { flex: 1 1 auto; min-width: 0; max-height: 60vh; display: flex; flex-direction: column; border-left: 3px solid var(--amber); border-radius: 0 10px 10px 0; background: color-mix(in srgb, var(--surface-2) 45%, transparent); overflow: hidden; }
+.subagent-card.is-completed .subagent-card__body { border-left-color: var(--success); }
+.subagent-card.is-failed .subagent-card__body,.subagent-card.is-timeout .subagent-card__body,.subagent-card.is-aborted .subagent-card__body { border-left-color: var(--danger); }
+.subagent-card__body > header { flex: 0 0 auto; min-height: 34px; display: flex; align-items: center; gap: 7px; padding: 5px 10px; }
+.subagent-card__state { flex: 0 0 auto; display: inline-flex; color: var(--amber); }
 .subagent-card.is-completed .subagent-card__state { color: var(--success); }
 .subagent-card.is-failed .subagent-card__state,.subagent-card.is-timeout .subagent-card__state,.subagent-card.is-aborted .subagent-card__state { color: var(--danger); }
-.subagent-card > header button { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: transparent; cursor: pointer; }
-.subagent-card > header button:hover:not(:disabled) { background: var(--surface-2); }
-.subagent-card > header button:disabled { opacity: .45; cursor: default; }
-.subagent-card__conversation { min-height: 0; flex: 1 1 auto; display: block; padding: 9px 10px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--border) transparent; border-top: 1px solid var(--border-soft); }
+.subagent-card__name { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__status { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__status small { color: inherit; font-variant-numeric: tabular-nums; }
+.subagent-card__spacer { flex: 1 1 auto; }
+.subagent-card__body > header button { flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: transparent; font-size: 11px; cursor: pointer; }
+.subagent-card__body > header button:hover:not(:disabled) { background: var(--surface-2); }
+.subagent-card__body > header button:disabled { opacity: .45; cursor: default; }
+.subagent-card__body > header button.subagent-card__abort { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; color: var(--danger); }
+.subagent-card__body > header button.subagent-card__abort:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, var(--surface-2)); }
+.subagent-card__conversation { min-height: 0; flex: 1 1 auto; display: block; padding: 4px 10px 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 .subagent-card__conversation :deep(.message) { width: 100%; margin-bottom: 4px; }
 .subagent-card__conversation :deep(.message-body) { width: 100%; max-width: 100%; }
-.subagent-card__conversation :deep(.message-bubble) { max-height: min(24vh, 190px); padding: 8px 10px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; font-size: 12px; }
+.subagent-card__conversation :deep(.message-bubble) { padding: 8px 10px; font-size: 12px; }
 .subagent-card__conversation :deep(.message-markdown) { font-size: 12px; line-height: 1.55; }
-.subagent-card__conversation :deep(.tool-call) { width: 100%; }
+.subagent-card__conversation :deep(.tool-call) { width: 100%; max-width: 100%; }
 .subagent-card__conversation :deep(.tool-call summary) { min-height: 30px; padding: 4px 7px; font-size: 11px; }
 .subagent-card__conversation :deep(.tool-call__name),.subagent-card__conversation :deep(.tool-call__summary) { font-size: 11px; }
 .subagent-card__conversation :deep(.tool-call__details pre) { max-height: min(22vh, 160px); font-size: 11px; }
-.subagent-card__conversation :deep(.thinking-block pre) { max-height: min(22vh, 160px); font-size: 11px !important; }
+.subagent-card__conversation :deep(.thinking-block) { max-width: 100%; }
+.subagent-card__conversation :deep(.thinking-block pre) { max-height: min(36vh, 320px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; font-size: 11px !important; }
 .subagent-card__conversation :deep(.message-error) { font-size: 12px; }
-.subagent-card > :deep(.subagent-interaction),.subagent-card__files { flex: 0 0 auto; }
-.subagent-card__files { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
-.subagent-card__files span { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; padding: 4px 7px; overflow: hidden; border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__body > :deep(.subagent-interaction),.subagent-card__files { flex: 0 0 auto; }
+.subagent-card__files { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 8px; }
+.subagent-card__files span { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; padding: 3px 7px; overflow: hidden; border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) {
-  .subagent-card__state > span { max-width: 90px; }
-  .subagent-card__state > small { display: none; }
+  .subagent-card { width: 100%; }
+  .subagent-card__status { display: none; }
 }
 </style>

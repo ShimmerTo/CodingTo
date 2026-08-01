@@ -49,6 +49,7 @@
 .agent-ext-row__head { display: flex; align-items: baseline; gap: 8px; }
 .agent-ext-row__head h3 { margin: 0; font-size: 14px; }
 .agent-ext-row__head small { min-width: 0; overflow: hidden; color: var(--faint); font: 11px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.agent-ext-row__dir { flex: none; padding: 1px 7px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-2); color: var(--muted); font: 11px "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
 .agent-ext-row__description { margin: 0; color: var(--muted); font: 12px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; overflow-wrap: anywhere; }
 .agent-ext-row__meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .agent-ext-row__version { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border: 1px solid var(--border-soft); border-radius: 999px; color: var(--text); background: var(--surface-2); font: 11px "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
@@ -129,9 +130,33 @@
 .agent-skills-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .agent-skill-item { display: flex; align-items: flex-start; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
 .agent-skill-item__icon { flex: 0 0 32px; height: 32px; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: var(--surface-2); border: 1px solid var(--border); }
-.agent-skill-item__meta { flex: 0 0 auto; }
+.agent-skill-item__meta { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
 .agent-skill-badge { font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-soft); color: var(--muted); white-space: nowrap; }
 .agent-skill-badge.badge--startup { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+/* 已安装扩展卡片内包含的单个 skill 列表 */
+.agent-ext-skills {
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.agent-ext-skill {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; background: var(--surface-2);
+}
+.agent-ext-skill__meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.agent-ext-skill__name { font-size: 13px; font-weight: 600; color: var(--text); }
+.agent-ext-skill__desc { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-ext-skill__mode { flex: 0 0 auto; font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-soft); color: var(--muted); white-space: nowrap; }
+.agent-ext-skill__del {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: transparent; color: var(--muted); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.agent-ext-skill__del:hover { color: #e5484d; border-color: #e5484d; background: rgba(229, 72, 77, .08); }
+.agent-ext-skill__del:disabled { opacity: .5; cursor: not-allowed; }
 
 /* Agents list (table rows, mirroring plugin-row) */
 .agent-list-table { display: flex; flex-direction: column; }
@@ -252,6 +277,12 @@
 .agent-config-tabs button:hover { color: var(--text); background: var(--surface); }
 .agent-config-tabs button.active { color: var(--text); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
 .agent-config-tabs button svg { color: var(--accent, #4f7cff); }
+/* 二级提示词 tab：无整体背景，仅选中项带背景 */
+.agent-prompt__tabs { display: flex; gap: 6px; padding: 0; overflow-x: auto; border: 0; border-radius: 0; background: transparent; }
+.agent-prompt__tabs button { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 14px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.agent-prompt__tabs button:hover { color: var(--text); background: var(--surface); }
+.agent-prompt__tabs button.active { color: var(--text); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--border); }
+.agent-prompt__tabs button svg { color: var(--accent, #4f7cff); }
 .agent-config-panel { min-width: 0; }
 .agent-config-panel > .agent-view__meta-block,
 .agent-config-panel > .agent-extensions { padding: 0; border: 0; background: transparent; }
@@ -274,8 +305,17 @@
 .agent-prompt__editor { min-height: 320px; resize: vertical; padding: 14px 16px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 1.7; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .agent-prompt__editor:focus { outline: none; border-color: var(--accent, #4f7cff); box-shadow: 0 0 0 3px rgba(79,124,255,.16); }
 .agent-prompt__actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
-.agent-prompt__saved { display: inline-flex; align-items: center; gap: 5px; color: #337b55; font-size: 13px; }
-:root[data-theme="dark"] .agent-prompt__saved { color: #80c99f; }
+
+.agent-prompt__forced { display: flex; flex-direction: column; gap: 14px; }
+.agent-prompt__models { padding: 16px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
+.agent-prompt__models h3 { margin: 0 0 4px; font-size: 14px; }
+.agent-prompt__models-intro { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.agent-prompt__model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.agent-prompt__model-option { display: flex; align-items: center; gap: 9px; padding: 9px 11px; border: 1px solid var(--border-soft); border-radius: 9px; cursor: pointer; font-size: 13px; }
+.agent-prompt__model-option:hover { border-color: var(--border); background: var(--surface-2); }
+.agent-prompt__model-option input { flex: 0 0 auto; }
+.agent-prompt__model-label { color: var(--text); }
+.agent-prompt__models-empty { margin: 0; color: var(--faint); font-size: 13px; }
 
 .stats-dialog { max-width: 640px; }
 .stats-dialog .agent-editor-dialog__body { max-height: 60vh; overflow: auto; }

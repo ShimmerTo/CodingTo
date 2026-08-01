@@ -6,8 +6,9 @@ import { useAppContext, agentAvatar, isImageAvatar } from '../../composables/app
 import { extensionIcon } from '../../extensionIcons'
 import { listBrowserProfiles, deleteBrowserProfile, renameBrowserProfile } from '../../backend'
 import InstallDialog from '../../components/InstallDialog.vue'
+import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 
-const { t, bootstrap, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, skills, refreshSkills, skillsLoading } = useAppContext()
+const { t, bootstrap, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, removeAgentMcpServer, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, deleteSkill, skills, refreshSkills, skillsLoading } = useAppContext()
 
 const activeTab = ref('basics')
 const availableSubagents = computed(() =>
@@ -195,6 +196,13 @@ const installedPackages = computed(() => {
   return (extensionSnapshot.value?.packages?.[agentId] || [])
     .filter(status => !status.sourcePath || !managedPaths.has(status.sourcePath))
 })
+// 未纳管扩展：物理存在于 agent extensions/ 目录、但不属于内置工具/系统扩展/
+// 推荐扩展的条目（如手动拷入的 ask-user）。Pi 会自动加载它们，这里展示出来
+// 供用户审查并删除。
+const unmanagedExtensions = computed(() => {
+  const agentId = selectedAgent.value?.id || ''
+  return extensionSnapshot.value?.directory?.[agentId] || []
+})
 const browserStatus = computed(() => {
   return recommendedExtensions.value.find(tool => tool.key === 'browser-native') || null
 })
@@ -233,6 +241,40 @@ function onExtensionToggle(group, key, installed, name) {
 function onBrowserToggle(installed) {
   if (installed) requestDeleteExtension({ type: 'browser', name: browserStatus.value?.name || t.value.browserNative })
   else installBrowserNative()
+}
+
+// 返回某个已安装 npm 包内包含的 skills（按包名/key 匹配）
+function packageSkills(extension) {
+  return (skills.value || []).filter(s => s.source === extension.key)
+}
+
+// 单独删除某个 skill（仅移除该 skill 自身，不影响同包其它 skill），删除前二次确认。
+const skillDeleteTarget = ref(null)
+const skillDeleting = ref(false)
+function requestRemoveSkill(skill) {
+  if (skillsLoading.value || skillDeleting.value) return
+  skillDeleteTarget.value = skill
+}
+async function confirmRemoveSkill() {
+  const skill = skillDeleteTarget.value
+  if (!skill || skillDeleting.value) return
+  const agentId = selectedAgent.value?.id
+  if (!agentId) {
+    // 没有当前 agent 时绝不能调用（后端 agentID 为空会退化为“从所有 agent 删除”）。
+    console.error('refuse to delete skill without current agent id')
+    skillDeleteTarget.value = null
+    return
+  }
+  skillDeleting.value = true
+  try {
+    await deleteSkill(skill.id, agentId)
+    await refreshSkills()
+  } catch (e) {
+    console.error('failed to delete skill', e)
+  } finally {
+    skillDeleting.value = false
+    skillDeleteTarget.value = null
+  }
 }
 async function installPiPlugins() {
   if (!selectedAgent.value || piPluginsInstallDisabled.value || extensionBusy.value === 'pi-plugins-install') return
@@ -345,30 +387,58 @@ async function reloadExtensions() {
 }
 
 
-// --- Prompt (AGENTS.md) ---
-const promptContent = ref('')
+// --- Prompt tabs ---
+// 会话启动提示词 -> AGENTS.md（Pi 启动时加载）
+// 强制提示词   -> PROMPT_FORCE.md（追加到每次用户问题末尾，按模型启用）
+// 压缩提示词   -> PROMPT_COMPRESS.md
+const PROMPT_FILES = { startup: 'AGENTS.md', forced: 'PROMPT_FORCE.md', compress: 'PROMPT_COMPRESS.md' }
+const promptStartup = ref('')
+const promptForce = ref('')
+const promptCompress = ref('')
 const promptBusy = ref(false)
 const promptLoading = ref(false)
-const promptSaved = ref(false)
-const PROMPT_FILE = 'AGENTS.md'
+const activePromptTab = ref('startup') // 'startup' | 'forced' | 'compress'
 let promptLoadRequest = 0
+
+const activePromptFile = computed(() => PROMPT_FILES[activePromptTab.value])
+const activePromptContent = computed({
+  get: () => {
+    const tab = activePromptTab.value
+    if (tab === 'forced') return promptForce.value
+    if (tab === 'compress') return promptCompress.value
+    return promptStartup.value
+  },
+  set: (v) => {
+    const tab = activePromptTab.value
+    if (tab === 'forced') promptForce.value = v
+    else if (tab === 'compress') promptCompress.value = v
+    else promptStartup.value = v
+  }
+})
 
 async function loadPrompt(agentId = selectedAgent.value?.id) {
   if (!agentId) {
-    promptContent.value = ''
+    promptStartup.value = ''
+    promptForce.value = ''
+    promptCompress.value = ''
     return
   }
+  const tab = activePromptTab.value
+  const file = PROMPT_FILES[tab]
   const request = ++promptLoadRequest
   promptLoading.value = true
-  promptSaved.value = false
   try {
-    const content = await readAgentFile(agentId, PROMPT_FILE)
+    const content = await readAgentFile(agentId, file)
     if (request === promptLoadRequest && selectedAgent.value?.id === agentId) {
-      promptContent.value = content
+      if (tab === 'forced') promptForce.value = content
+      else if (tab === 'compress') promptCompress.value = content
+      else promptStartup.value = content
     }
   } catch (err) {
     if (request === promptLoadRequest && selectedAgent.value?.id === agentId) {
-      promptContent.value = ''
+      if (tab === 'forced') promptForce.value = ''
+      else if (tab === 'compress') promptCompress.value = ''
+      else promptStartup.value = ''
     }
   } finally {
     if (request === promptLoadRequest) promptLoading.value = false
@@ -378,19 +448,31 @@ function onTabChange(tab) {
   activeTab.value = tab
   if (tab === 'prompt') loadPrompt()
 }
+function onPromptTabChange(tab) {
+  activePromptTab.value = tab
+  loadPrompt()
+}
 async function savePrompt() {
   if (!selectedAgent.value || promptBusy.value) return
+  const tab = activePromptTab.value
+  const content = tab === 'forced' ? promptForce.value : tab === 'compress' ? promptCompress.value : promptStartup.value
   promptBusy.value = true
-  promptSaved.value = false
   try {
-    await writeAgentFile(selectedAgent.value.id, PROMPT_FILE, promptContent.value)
-    promptSaved.value = true
-    setTimeout(() => { promptSaved.value = false }, 2600)
+    await writeAgentFile(selectedAgent.value.id, PROMPT_FILES[tab], content)
+    pushToast('success', t.value.agentPromptSaved)
   } catch (err) {
-    pushToast('error', t.agentPromptSaveFailed.replace('{error}', String(err)))
+    pushToast('error', t.value.agentPromptSaveFailed.replace('{error}', String(err)))
   } finally {
     promptBusy.value = false
   }
+}
+// 强制提示词：选择对哪些模型启用（key 与 modelOptions 的 value 保持一致：provider/model）
+function toggleForcedModel(key) {
+  const agent = selectedAgent.value
+  if (!agent) return
+  if (!agent.forcedPromptModels) agent.forcedPromptModels = {}
+  agent.forcedPromptModels[key] = !agent.forcedPromptModels[key]
+  persistAgentChange(agent)
 }
 
 // 管理已有 Browser Profile 连接：列出当前 Agent 的持久浏览器连接，可重命名/删除。
@@ -762,12 +844,57 @@ watch(
                     {{ extension.installed ? (extension.version || t.installed) : t.notInstalled }}
                   </span>
                 </div>
+                <div v-if="packageSkills(extension).length" class="agent-ext-skills">
+                  <div v-for="sk in packageSkills(extension)" :key="sk.id" class="agent-ext-skill">
+                    <div class="agent-ext-skill__meta">
+                      <span class="agent-ext-skill__name">{{ sk.name }}</span>
+                      <span class="agent-ext-skill__desc">{{ sk.description }}</span>
+                    </div>
+                    <span class="agent-ext-skill__mode">{{ sk.loadMode === 'skills_list' ? (t.agentSkillListMode || '按需加载') : (t.agentSkillStartup || '随启动加载') }}</span>
+                    <button class="agent-ext-skill__del" :title="t.delete" :disabled="skillsLoading" @click.stop="requestRemoveSkill(sk)">
+                      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>
+                    </button>
+                  </div>
+                </div>
               </div>
               <div class="agent-ext-row__actions">
                 <button
                   class="btn-install is-installed"
                   :disabled="extensionDeleteBusy"
                   @click="requestDeleteExtension({ type: 'package', key: extension.key, name: extension.name || extension.key })"
+                >
+                  <span class="btn-install__delete">{{ t.delete }}</span>
+                </button>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div v-if="unmanagedExtensions.length" class="plugin-section installed">
+          <div class="plugin-section__title">
+            <span class="plugin-section__title-left">
+              <span>{{ t.unmanagedExtensions }}</span>
+              <small>{{ t.unmanagedExtensionsHint }}</small>
+            </span>
+          </div>
+          <div class="agent-ext-grid">
+            <article v-for="extension in unmanagedExtensions" :key="extension.key" class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon(extension.key)" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>{{ extension.name || extension.key }}</h3>
+                  <code v-if="extension.name && extension.name !== extension.key" class="agent-ext-row__dir" :title="t.unmanagedExtensionsDirTitle">{{ extension.key }}</code>
+                </header>
+                <p class="agent-ext-row__description">{{ extension.description || extension.key }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version">{{ extension.version || t.installed }}</span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button
+                  class="btn-install is-installed"
+                  :disabled="extensionDeleteBusy"
+                  @click="requestDeleteExtension({ type: 'directory', key: extension.key, name: extension.name || extension.key })"
                 >
                   <span class="btn-install__delete">{{ t.delete }}</span>
                 </button>
@@ -871,8 +998,13 @@ watch(
                 </div>
               </div>
               <div class="agent-ext-row__actions">
-                <button class="btn-install is-installed" disabled>
-                  <span class="btn-install__delete">{{ t.enabled }}</span>
+                <button
+                  class="btn-install is-installed"
+                  :disabled="extensionBusy === 'agent-mcp-remove'"
+                  @click="removeAgentMcpServer(selectedAgent.id, server.key)"
+                >
+                  <RefreshCw v-if="extensionBusy === 'agent-mcp-remove'" class="spin" :size="13" />
+                  <span class="btn-install__delete">{{ t.removeMcp }}</span>
                 </button>
               </div>
             </article>
@@ -896,26 +1028,77 @@ watch(
       />
 
       <section v-else-if="activeTab === 'prompt'" class="agent-prompt">
-        <div class="agent-prompt__head">
-          <div>
-            <h2>{{ t.agentPromptTitle }}</h2>
-            <p>{{ t.agentPromptIntro }}</p>
-          </div>
-          <code class="agent-prompt__file">{{ t.agentPromptFile }}</code>
-        </div>
-        <div v-if="promptLoading" class="agent-prompt__loading">{{ t.agentPromptLoading }}</div>
-        <textarea
-          v-else
-          v-model="promptContent"
-          class="agent-prompt__editor"
-          :placeholder="t.agentPromptPlaceholder"
-          spellcheck="false"
-        ></textarea>
-        <div class="agent-prompt__actions">
-          <span v-if="promptSaved" class="agent-prompt__saved"><Check :size="14" />{{ t.agentPromptSaved }}</span>
-          <button class="primary-button" :disabled="promptBusy || promptLoading" @click="savePrompt">
-            <RefreshCw v-if="promptBusy" class="spin" :size="14" />{{ t.agentPromptSave }}
+        <nav class="agent-prompt__tabs" aria-label="prompt types">
+          <button :class="{ active: activePromptTab === 'startup' }" @click="onPromptTabChange('startup')">
+            <FileText :size="15" />{{ t.agentPromptTabStartup }}
           </button>
+          <button :class="{ active: activePromptTab === 'forced' }" @click="onPromptTabChange('forced')">
+            <Shield :size="15" />{{ t.agentPromptTabForced }}
+          </button>
+          <button :class="{ active: activePromptTab === 'compress' }" @click="onPromptTabChange('compress')">
+            <Binary :size="15" />{{ t.agentPromptTabCompress }}
+          </button>
+        </nav>
+
+        <template v-if="activePromptTab !== 'forced'">
+          <div class="agent-prompt__head">
+            <div>
+              <h2>{{ activePromptTab === 'compress' ? t.agentPromptTitleCompress : t.agentPromptTitleStartup }}</h2>
+              <p>{{ activePromptTab === 'compress' ? t.agentPromptIntroCompress : t.agentPromptIntroStartup }}</p>
+            </div>
+            <code class="agent-prompt__file">{{ activePromptFile }}</code>
+          </div>
+          <div v-if="promptLoading" class="agent-prompt__loading">{{ t.agentPromptLoading }}</div>
+          <textarea
+            v-else
+            v-model="activePromptContent"
+            class="agent-prompt__editor"
+            :placeholder="t.agentPromptPlaceholder"
+            spellcheck="false"
+          ></textarea>
+          <div class="agent-prompt__actions">
+            <button class="primary-button" :disabled="promptBusy || promptLoading" @click="savePrompt">
+              <RefreshCw v-if="promptBusy" class="spin" :size="14" />{{ t.agentPromptSave }}
+            </button>
+          </div>
+        </template>
+
+        <div v-else class="agent-prompt__forced">
+          <div class="agent-prompt__head">
+            <div>
+              <h2>{{ t.agentPromptTitleForce }}</h2>
+              <p>{{ t.agentPromptIntroForce }}</p>
+            </div>
+            <code class="agent-prompt__file">{{ activePromptFile }}</code>
+          </div>
+          <div v-if="promptLoading" class="agent-prompt__loading">{{ t.agentPromptLoading }}</div>
+          <textarea
+            v-else
+            v-model="activePromptContent"
+            class="agent-prompt__editor"
+            :placeholder="t.agentPromptPlaceholder"
+            spellcheck="false"
+          ></textarea>
+          <div class="agent-prompt__actions">
+            <button class="primary-button" :disabled="promptBusy || promptLoading" @click="savePrompt">
+              <RefreshCw v-if="promptBusy" class="spin" :size="14" />{{ t.agentPromptSave }}
+            </button>
+          </div>
+          <div class="agent-prompt__models">
+            <h3>{{ t.agentPromptForcedModelsTitle }}</h3>
+            <p class="agent-prompt__models-intro">{{ t.agentPromptForcedModelsIntro }}</p>
+            <div class="agent-prompt__model-list">
+              <label v-for="m in modelOptions" :key="m.value" class="agent-prompt__model-option">
+                <input
+                  type="checkbox"
+                  :checked="!!(selectedAgent && selectedAgent.forcedPromptModels && selectedAgent.forcedPromptModels[m.value])"
+                  @change="toggleForcedModel(m.value)"
+                />
+                <span class="agent-prompt__model-label">{{ m.label }}</span>
+              </label>
+            </div>
+            <p v-if="!modelOptions.length" class="agent-prompt__models-empty">{{ t.agentPromptForcedNoModels }}</p>
+          </div>
         </div>
       </section>
 
@@ -948,6 +1131,7 @@ watch(
             <SkillCard :skill="skill" />
             <div class="agent-skill-item__meta">
               <span class="agent-skill-badge" :class="skill.loadMode === 'skills_list' ? 'badge--list' : 'badge--startup'">{{ skill.loadMode === 'skills_list' ? (t.agentSkillListMode || '按需加载') : (t.agentSkillStartup || '随启动加载') }}</span>
+              <button class="danger-button" :disabled="skillsLoading" @click.stop="requestRemoveSkill(skill)"><Trash2 :size="14" />{{ t.delete }}</button>
             </div>
           </li>
         </ul>
@@ -1028,23 +1212,27 @@ watch(
         </div>
       </div>
 
-      <div v-if="profileDeleteTarget" class="modal-backdrop" @click.self="profileDeleteTarget = null">
-        <div class="agent-editor-dialog browser-profile-delete-dialog">
-          <header class="agent-editor-dialog__head">
-            <h2>{{ t.browserProfileManageTitle }}</h2>
-            <button class="icon-button" :title="t.closeDialog" @click="profileDeleteTarget = null"><X :size="16" /></button>
-          </header>
-          <div class="agent-editor-dialog__body">
-            <p class="browser-profile-delete-confirm">{{ t.browserProfileDeleteConfirm.replace('{name}', profileDeleteTarget.name || profileDeleteTarget.id) }}</p>
-          </div>
-          <footer class="agent-editor-dialog__footer">
-            <button class="secondary-button" :disabled="profileDeleting" @click="profileDeleteTarget = null">{{ t.cancel }}</button>
-            <button class="primary-button danger" :disabled="profileDeleting" @click="confirmDeleteBrowserProfile">
-              <Trash2 v-if="!profileDeleting" :size="13" /><RefreshCw v-else class="spin" :size="13" />{{ profileDeleting ? t.browserProfileDeleteBusy : t.delete }}
-            </button>
-          </footer>
-        </div>
-      </div>
+      <ConfirmDeleteDialog
+        :model-value="!!profileDeleteTarget"
+        :title="t.browserProfileManageTitle"
+        :description="t.browserProfileDeleteConfirm.replace('{name}', (profileDeleteTarget?.name || profileDeleteTarget?.id || ''))"
+        :busy="profileDeleting"
+        :confirm-label="t.delete"
+        :confirm-busy-label="t.browserProfileDeleteBusy"
+        @cancel="profileDeleteTarget = null"
+        @confirm="confirmDeleteBrowserProfile"
+      />
+
+      <ConfirmDeleteDialog
+        :model-value="!!skillDeleteTarget"
+        :title="t.skillsRemoveFromAgentTitle"
+        :description="t.skillsRemoveFromAgentConfirm.replace('{name}', skillDeleteTarget?.name || '').replace('{agent}', selectedAgent?.name || '')"
+        :busy="skillDeleting"
+        :confirm-label="t.delete"
+        :confirm-busy-label="t.deletingSkill"
+        @cancel="skillDeleteTarget = null"
+        @confirm="confirmRemoveSkill"
+      />
 
       <div v-if="profileRenameTarget" class="modal-backdrop" @click.self="closeRenameDialog">
         <div class="agent-editor-dialog browser-profile-rename-dialog">

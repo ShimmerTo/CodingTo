@@ -104,6 +104,9 @@ type AgentProfile struct {
 	DefaultProvider      string               `json:"defaultProvider"`
 	DefaultModel         string               `json:"defaultModel"`
 	BrowserProfilePolicy BrowserProfilePolicy `json:"browserProfilePolicy"`
+	// ForcedPromptModels lists the "provider/model" keys for which the agent's
+	// PROMPT_FORCE.md is appended to every user message.
+	ForcedPromptModels map[string]bool `json:"forcedPromptModels"`
 }
 
 // BrowserProfilePolicy controls the browser visibility used at each distinct
@@ -136,6 +139,18 @@ func (p *BrowserProfilePolicy) Normalize() {
 	}
 }
 
+// parseForcedPromptModels decodes the stored JSON map of "provider/model" keys.
+func parseForcedPromptModels(raw string) map[string]bool {
+	if raw == "" {
+		return map[string]bool{}
+	}
+	m := map[string]bool{}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return map[string]bool{}
+	}
+	return m
+}
+
 func DefaultAgentProfile() AgentProfile {
 	return AgentProfile{
 		ID: "default", Name: "Default Agent", Description: "General-purpose coding agent",
@@ -143,6 +158,7 @@ func DefaultAgentProfile() AgentProfile {
 		SubAgents:            []string{},
 		PiTools:              defaultPiTools(),
 		BrowserProfilePolicy: DefaultBrowserProfilePolicy(),
+		ForcedPromptModels:   map[string]bool{},
 	}
 }
 
@@ -453,6 +469,7 @@ func (s *ConfigStore) assemble() AppConfig {
 				DefaultProvider:      agent.DefaultProvider,
 				DefaultModel:         agent.DefaultModel,
 				BrowserProfilePolicy: browserProfilePolicy,
+				ForcedPromptModels:   parseForcedPromptModels(agent.ForcedPromptModels),
 			})
 			if agent.Active {
 				activeID = agent.ID
@@ -569,6 +586,7 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 		subagents, _ := json.Marshal(agent.SubAgents)
 		piTools, _ := json.Marshal(agent.PiTools)
 		browserProfilePolicy, _ := json.Marshal(agent.BrowserProfilePolicy)
+		forcedPromptModels, _ := json.Marshal(agent.ForcedPromptModels)
 		agents = append(agents, store.Agent{
 			ID:                   agent.ID,
 			Name:                 agent.Name,
@@ -582,6 +600,7 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 			DefaultProvider:      agent.DefaultProvider,
 			DefaultModel:         agent.DefaultModel,
 			BrowserProfilePolicy: string(browserProfilePolicy),
+			ForcedPromptModels:   string(forcedPromptModels),
 			Active:               agent.ID == cfg.ActiveAgentID,
 		})
 	}

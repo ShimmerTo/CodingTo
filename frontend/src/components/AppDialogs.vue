@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { Bot, Brain, Check, Eye, EyeOff, Folder, Image, KeyRound, Plus, RefreshCw, Trash2, Wrench, X, Zap } from 'lucide-vue-next'
 import { useAppContext } from '../composables/appContext'
+import ConfirmDeleteDialog from './ConfirmDeleteDialog.vue'
 
 const { t, pendingDeleteAgent, agentDeleteBusy, confirmDeleteAgent, pendingDeleteProvider, saving, confirmDeleteProvider, agentEditorOpen, closeAgentEditor, editingNewAgent, selectedAgent, agentList, modelOptions, newAgentId, defaultAgentId, setDefaultAgent, persistAgentChange, pickAgentDataDir, cancelNewAgent, saveNewAgent, providerEditorOpen, closeProviderEditor, providerDraft, editingNewProvider, showProviderApiKey, apiKeyVisibilityLabel, piCompatBooleanFields, formatCompat, updateCompatJson, addModel, modelRequestRoute, toggleImageInput, confirmAddProvider, confirmSaveProvider, pendingDeleteSsh, sshBusy, confirmDeleteSsh, pendingExtensionDelete, extensionDeleteBusy, confirmDeleteExtension, pendingDeleteWs, wsBusy, confirmDeleteWs, sshEditorOpen, closeSshEditor, editingNewSsh, sshDraft, persistSshChange, saveNewSsh, wsEditorOpen, closeWsEditor, editingNewWs, wsDraft, persistWsChange, saveNewWs, pickWorkspacePath, config, handleWorkspaceSshChange, handleWsPathChange, toasts, extensionBusy, showFigmaConfig, figmaAuthorizationsDraft, figmaActiveAuthorizationIdDraft, addFigmaAuthorization, removeFigmaAuthorization, persistFigma } = useAppContext()
 
@@ -35,33 +36,26 @@ const selectedAgentDefaultModel = computed({
 
 <template>
   <div class="app-dialogs">
-<div v-if="pendingDeleteAgent" class="modal-backdrop" @pointerdown.self="pendingDeleteAgent = null">
-      <section class="confirm-dialog" role="dialog" aria-modal="true" :aria-labelledby="'delete-agent-title'">
-        <div class="confirm-dialog__icon"><Trash2 :size="20" /></div>
-        <h2 id="delete-agent-title">{{ t.deleteAgentTitle }}</h2>
-        <p>{{ t.deleteAgentConfirm.replace('{name}', pendingDeleteAgent.name) }}</p>
-        <div class="confirm-dialog__actions">
-          <button class="secondary-button" :disabled="agentDeleteBusy" @click="pendingDeleteAgent = null">{{ t.cancel }}</button>
-          <button class="danger-button danger-button--solid" :disabled="agentDeleteBusy" @click="confirmDeleteAgent">
-            <RefreshCw v-if="agentDeleteBusy" class="spin" :size="14" />
-            <Trash2 v-else :size="14" />
-            {{ agentDeleteBusy ? t.deletingAgent : t.confirmDelete }}
-          </button>
-        </div>
-      </section>
-    </div>
+    <ConfirmDeleteDialog
+      :model-value="!!pendingDeleteAgent"
+      :title="t.deleteAgentTitle"
+      :description="t.deleteAgentConfirm.replace('{name}', pendingDeleteAgent?.name || '')"
+      :busy="agentDeleteBusy"
+      :confirm-label="t.confirmDelete"
+      :confirm-busy-label="t.deletingAgent"
+      @cancel="pendingDeleteAgent = null"
+      @confirm="confirmDeleteAgent"
+    />
 
-    <div v-if="pendingDeleteProvider" class="modal-backdrop" @pointerdown.self="pendingDeleteProvider = null">
-      <section class="confirm-dialog" role="dialog" aria-modal="true">
-        <div class="confirm-dialog__icon"><Trash2 :size="20" /></div>
-        <h2>{{ t.delete }} {{ pendingDeleteProvider.label || pendingDeleteProvider.name }}?</h2>
-        <p>{{ t.confirmDeleteItem }}</p>
-        <div class="confirm-dialog__actions">
-          <button class="secondary-button" :disabled="saving" @click="pendingDeleteProvider = null">{{ t.cancel }}</button>
-          <button class="danger-button danger-button--solid" :disabled="saving" @click="confirmDeleteProvider"><Trash2 :size="14" />{{ t.delete }}</button>
-        </div>
-      </section>
-    </div>
+    <ConfirmDeleteDialog
+      :model-value="!!pendingDeleteProvider"
+      :title="`${t.delete} ${pendingDeleteProvider?.label || pendingDeleteProvider?.name || ''}?`"
+      :description="t.confirmDeleteItem"
+      :busy="saving"
+      :confirm-label="t.delete"
+      @cancel="pendingDeleteProvider = null"
+      @confirm="confirmDeleteProvider"
+    />
 
     <div v-if="agentEditorOpen" class="modal-backdrop" @pointerdown.self="closeAgentEditor">
       <section class="agent-editor-dialog" role="dialog" aria-modal="true" :aria-labelledby="'agent-editor-title'">
@@ -192,29 +186,25 @@ const selectedAgentDefaultModel = computed({
       </section>
     </div>
 
-    <div v-if="pendingDeleteSsh" class="modal-backdrop" @pointerdown.self="pendingDeleteSsh = null">
-      <section class="confirm-dialog" role="dialog" aria-modal="true">
-        <div class="confirm-dialog__icon"><Trash2 :size="20" /></div>
-        <h2>{{ t.deleteItem }}</h2>
-        <p>{{ t.confirmDeleteItem }}</p>
-        <div class="confirm-dialog__actions">
-          <button class="secondary-button" :disabled="sshBusy" @click="pendingDeleteSsh = null">{{ t.cancel }}</button>
-          <button class="danger-button danger-button--solid" :disabled="sshBusy" @click="confirmDeleteSsh"><Trash2 v-if="!sshBusy" :size="14" /><Trash2 v-else :size="14" />{{ t.deleteItem }}</button>
-        </div>
-      </section>
-    </div>
+    <ConfirmDeleteDialog
+      :model-value="!!pendingDeleteSsh"
+      :title="t.deleteItem"
+      :description="t.confirmDeleteItem"
+      :busy="sshBusy"
+      :confirm-label="t.deleteItem"
+      @cancel="pendingDeleteSsh = null"
+      @confirm="confirmDeleteSsh"
+    />
 
-    <div v-if="pendingDeleteWs" class="modal-backdrop" @pointerdown.self="pendingDeleteWs = null">
-      <section class="confirm-dialog" role="dialog" aria-modal="true">
-        <div class="confirm-dialog__icon"><Trash2 :size="20" /></div>
-        <h2>{{ t.deleteItem }}</h2>
-        <p>{{ t.confirmDeleteItem }}</p>
-        <div class="confirm-dialog__actions">
-          <button class="secondary-button" :disabled="wsBusy" @click="pendingDeleteWs = null">{{ t.cancel }}</button>
-          <button class="danger-button danger-button--solid" :disabled="wsBusy" @click="confirmDeleteWs"><Trash2 v-if="!wsBusy" :size="14" /><Trash2 v-else :size="14" />{{ t.deleteItem }}</button>
-        </div>
-      </section>
-    </div>
+    <ConfirmDeleteDialog
+      :model-value="!!pendingDeleteWs"
+      :title="t.deleteItem"
+      :description="t.confirmDeleteItem"
+      :busy="wsBusy"
+      :confirm-label="t.deleteItem"
+      @cancel="pendingDeleteWs = null"
+      @confirm="confirmDeleteWs"
+    />
 
     <div v-if="sshEditorOpen" class="modal-backdrop" @pointerdown.self="closeSshEditor">
       <section class="agent-editor-dialog" role="dialog" aria-modal="true">
@@ -329,25 +319,16 @@ const selectedAgentDefaultModel = computed({
       </section>
     </div>
 
-    <div v-if="pendingExtensionDelete" class="modal-backdrop" @pointerdown.self="extensionDeleteBusy ? null : (pendingExtensionDelete = null)">
-      <section class="agent-editor-dialog confirm-dialog" role="dialog" aria-modal="true">
-        <header class="agent-editor-dialog__head">
-          <h2>{{ extensionDeleteTitle }}</h2>
-          <button class="icon-button" :aria-label="t.closeDialog" :disabled="extensionDeleteBusy" @click="pendingExtensionDelete = null"><X :size="16" /></button>
-        </header>
-        <div class="agent-editor-dialog__body">
-          <p class="confirm-dialog__text">{{ extensionDeleteConfirm }}</p>
-        </div>
-        <footer class="agent-editor-dialog__footer">
-          <div class="agent-draft-actions">
-            <button class="secondary-button" :disabled="extensionDeleteBusy" @click="pendingExtensionDelete = null">{{ t.cancel }}</button>
-            <button class="danger-button danger-button--solid" :disabled="extensionDeleteBusy" @click="confirmDeleteExtension">
-              <RefreshCw v-if="extensionDeleteBusy" class="spin" :size="14" /><Trash2 v-else :size="14" />{{ extensionDeleteBusy ? t.deletingExtension : t.delete }}
-            </button>
-          </div>
-        </footer>
-      </section>
-    </div>
+    <ConfirmDeleteDialog
+      :model-value="!!pendingExtensionDelete"
+      :title="extensionDeleteTitle"
+      :description="extensionDeleteConfirm"
+      :busy="extensionDeleteBusy"
+      :confirm-label="t.delete"
+      :confirm-busy-label="t.deletingExtension"
+      @cancel="pendingExtensionDelete = null"
+      @confirm="confirmDeleteExtension"
+    />
 
   </div>
 </template>

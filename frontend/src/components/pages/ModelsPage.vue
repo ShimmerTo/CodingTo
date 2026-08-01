@@ -39,7 +39,7 @@ function toggleApiKeyVisible() {
   showProviderApiKey.value = !showProviderApiKey.value
 }
 
-const apiOptions = ['openai-completions', 'openai-responses', 'anthropic-messages', 'gemini-generic', 'qwen-openai']
+const apiOptions = ['openai-completions', 'openai-responses', 'openai-codex-responses', 'azure-openai-responses', 'anthropic-messages', 'google-generative-ai', 'google-vertex']
 
 const modelEditorOpen = ref(false)
 const editingNewModel = ref(false)
@@ -280,7 +280,7 @@ function formatTokenCount(value) {
               </select>
             </div>
             <div class="field field--wide">
-              <label>Base URL</label>
+              <label>前缀</label>
               <input v-model="modelDraft.baseUrl" placeholder="留空则使用服务商 Base URL" />
               <span class="hint">实际请求地址：{{ modelRequestRoute(selectedProvider, modelDraft) }}</span>
             </div>
@@ -295,7 +295,7 @@ function formatTokenCount(value) {
             <div class="field">
               <label>默认思考级别</label>
               <select v-model="modelDraft.defaultThinkingLevel">
-                <option v-for="level in piThinkingLevels" :key="level" :value="level">{{ level }}</option>
+                <option v-for="level in piThinkingLevels" :key="level" :value="level">{{ t['thinking_' + level] || level }}</option>
               </select>
             </div>
             <div class="field field--wide">

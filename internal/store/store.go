@@ -179,11 +179,12 @@ type Agent struct {
 	DefaultProvider      string
 	DefaultModel         string
 	BrowserProfilePolicy string // JSON browser-profile runtime policy
+	ForcedPromptModels   string // JSON map[string]bool of "provider/model" keys
 	Active               bool
 }
 
 func (s *Store) ListAgents() ([]Agent, error) {
-	rows, err := s.db.QueryBySql("SELECT agent_id, name, data_dir, description, avatar, builtin, recommended, subagents, pi_tools, default_provider, default_model, browser_profile_policy, active FROM tbl_agent ORDER BY id ASC").All()
+	rows, err := s.db.QueryBySql("SELECT agent_id, name, data_dir, description, avatar, builtin, recommended, subagents, pi_tools, default_provider, default_model, browser_profile_policy, forced_prompt_models, active FROM tbl_agent ORDER BY id ASC").All()
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +203,7 @@ func (s *Store) ListAgents() ([]Agent, error) {
 			DefaultProvider:      asString(r["default_provider"]),
 			DefaultModel:         asString(r["default_model"]),
 			BrowserProfilePolicy: asString(r["browser_profile_policy"]),
+			ForcedPromptModels:   asString(r["forced_prompt_models"]),
 			Active:               asInt(r["active"]) != 0,
 		})
 	}
@@ -210,7 +212,7 @@ func (s *Store) ListAgents() ([]Agent, error) {
 
 // AgentByDataDir returns the agent whose data_dir matches, or false.
 func (s *Store) AgentByDataDir(dataDir string) (Agent, bool, error) {
-	row, err := s.db.QuickQuery("tbl_agent", "agent_id, name, data_dir, description, avatar, builtin, recommended, subagents, pi_tools, default_provider, default_model, browser_profile_policy, active", map[string]any{"data_dir": dataDir}).One()
+	row, err := s.db.QuickQuery("tbl_agent", "agent_id, name, data_dir, description, avatar, builtin, recommended, subagents, pi_tools, default_provider, default_model, browser_profile_policy, forced_prompt_models, active", map[string]any{"data_dir": dataDir}).One()
 	if err != nil {
 		return Agent{}, false, err
 	}
@@ -230,6 +232,7 @@ func (s *Store) AgentByDataDir(dataDir string) (Agent, bool, error) {
 		DefaultProvider:      asString(row["default_provider"]),
 		DefaultModel:         asString(row["default_model"]),
 		BrowserProfilePolicy: asString(row["browser_profile_policy"]),
+		ForcedPromptModels:   asString(row["forced_prompt_models"]),
 		Active:               asInt(row["active"]) != 0,
 	}, true, nil
 }
@@ -257,6 +260,7 @@ func (s *Store) SaveAgents(agents []Agent) error {
 				"default_provider":       agent.DefaultProvider,
 				"default_model":          agent.DefaultModel,
 				"browser_profile_policy": agent.BrowserProfilePolicy,
+				"forced_prompt_models":   agent.ForcedPromptModels,
 				"active":                 boolToInt(agent.Active),
 				"update_time":            now,
 			}).Exec()
@@ -278,6 +282,7 @@ func (s *Store) SaveAgents(agents []Agent) error {
 			"default_provider":       agent.DefaultProvider,
 			"default_model":          agent.DefaultModel,
 			"browser_profile_policy": agent.BrowserProfilePolicy,
+			"forced_prompt_models":   agent.ForcedPromptModels,
 			"active":                 boolToInt(agent.Active),
 			"create_time":            now,
 			"update_time":            now,

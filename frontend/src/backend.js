@@ -439,6 +439,7 @@ const mockExtensions = {
   builtins: {},
   recommended: {},
   packages: {},
+  directory: {},
   mcp: {}
 }
 
@@ -466,6 +467,14 @@ export async function respondSubagentUI(sessionId, runId, response) {
   if (isWails()) return App.RespondSubagentUI(sessionId, runId, response)
 }
 
+export async function ackSubagentUI(sessionId, runId, requestId) {
+  if (isWails()) return App.AckSubagentUI(sessionId, runId, requestId)
+}
+
+export async function abortSubagent(sessionId, runId) {
+  if (isWails()) return App.AbortSubagent(sessionId, runId)
+}
+
 export async function getExtensions() {
   if (isWails()) return App.GetExtensions()
   const snapshot = structuredClone(mockExtensions)
@@ -476,6 +485,7 @@ export async function getExtensions() {
       installedVersion: agent.builtin?.[tool.key] ? tool.currentVersion : '',
     }))
     snapshot.packages[agent.id] ||= []
+    snapshot.directory[agent.id] ||= []
     snapshot.mcp[agent.id] ||= []
     snapshot.recommended[agent.id] = [
       mockPiPluginsStatus(agent.id),
@@ -503,6 +513,7 @@ export async function getAgentExtensions(agentId) {
       { key: 'figma', name: 'Pi Figma', installed: !!agent?.recommended?.figma, enabled: !!agent?.recommended?.figma, version: 'preview' }
     ],
     packages: structuredClone(mockExtensions.packages[agentId] || []),
+    directory: structuredClone(mockExtensions.directory[agentId] || []),
     mcp: structuredClone(mockExtensions.mcp[agentId] || [])
   }
 }
@@ -535,8 +546,8 @@ export async function editSkill(request) {
   return []
 }
 
-export async function deleteSkill(skillId) {
-  if (isWails()) return App.DeleteSkill(skillId)
+export async function deleteSkill(skillId, agentId) {
+  if (isWails()) return App.DeleteSkill(skillId, agentId || '')
   return []
 }
 
@@ -622,6 +633,34 @@ export async function installAgentMcp(agentId, packageName) {
   }
 }
 
+// Add a manually configured MCP server to one or more agents.
+export async function addManualMCP(payload) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.AddManualMCP', payload)
+  }
+  const { key, command, args, url, agentIds } = payload || {}
+  const description = url || [command, ...(args || [])].filter(Boolean).join(' ')
+  for (const agentId of (agentIds || [])) {
+    mockExtensions.mcp[agentId] ||= []
+    const item = { key, name: key, description, installed: true, enabled: true, version: 'manual' }
+    const index = mockExtensions.mcp[agentId].findIndex(entry => entry.key === key)
+    if (index >= 0) mockExtensions.mcp[agentId][index] = item
+    else mockExtensions.mcp[agentId].push(item)
+  }
+  return { message: `浏览器预览模式：已模拟手动添加 MCP "${key}"`, command: '', output: '' }
+}
+
+// Remove one MCP server entry from a single agent's mcp.json.
+export async function removeAgentMcpServer(agentId, key) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.RemoveAgentMCPServer', { agentId, key })
+  }
+  const list = mockExtensions.mcp[agentId] || []
+  const index = list.findIndex(entry => entry.key === key)
+  if (index >= 0) list.splice(index, 1)
+  return { message: `浏览器预览模式：已模拟移除 MCP "${key}"`, command: '', output: '' }
+}
+
 // Install a Pi extension into the current agent's data directory by running a
 // full install command (for example `pi install npm:pi-agent-browser-native`).
 export async function installAgentExtension(agentId, command) {
@@ -658,6 +697,19 @@ export async function uninstallAgentExtension(agentId, key) {
     return { success: true, message: '浏览器预览模式：已模拟卸载', command: key, output: '' }
   }
   return App.UninstallAgentExtension({ agentId, key })
+}
+
+// Remove an unmanaged extension directory (one that lives under the agent's
+// extensions/ folder but is not owned by CodingTo, e.g. a manually copied
+// ask-user). Managed extensions are rejected by the backend.
+export async function deleteAgentExtensionDir(agentId, key) {
+  if (!isWails()) {
+    const directory = mockExtensions.directory[agentId] || []
+    const index = directory.findIndex(item => item.key === key)
+    if (index >= 0) directory.splice(index, 1)
+    return { success: true, message: '浏览器预览模式：已模拟删除', command: key, output: '' }
+  }
+  return App.DeleteAgentExtensionDir({ agentId, key })
 }
 
 // Subscribe to the start of a streamed install. The handler receives a payload

@@ -1,8 +1,8 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  Bot, Brain, Check, ChevronDown, CircleStop, File, FileAudio, FileText, FileVideo, Image,
-  LoaderCircle, Paperclip, Pencil, Send, Sparkles, Trash2, X
+  Bot, Brain, Check, ChevronDown, CircleStop, File, FileAudio, FileText, FileVideo, Gauge, Image,
+  LoaderCircle, Paperclip, Pencil, Send, Sparkles, Trash2, X, BrainCog
 } from 'lucide-vue-next'
 import { formatFileSize, formatTokenCount, imageSrc } from './chatFormatters.js'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext'
@@ -42,7 +42,7 @@ const emit = defineEmits([
   'update:draft', 'send', 'stop', 'select-agent', 'open-agent-config',
   'update:model', 'add-images', 'update:thinking',
   'update:skill',
-  'remove-image', 'preview-image', 'compact', 'respond-extension',
+  'remove-image', 'preview-image', 'compact', 'respond-extension', 'ack-extension',
   'edit-pending', 'delete-pending',
   'add-attachments', 'remove-attachment'
 ])
@@ -79,6 +79,9 @@ function skillTypeLabel(skill) {
     ? (props.t.skillTypeStartup || '随启动')
     : (props.t.skillTypeOndemand || '按需')
 }
+function thinkingLevelLabel(level) {
+  return props.t[`thinking_${level}`] || level
+}
 function chooseSkill(id) {
   emit('update:skill', selectedSkillOptions.value.find(skill => skill.id === id) || null)
   skillMenuOpen.value = false
@@ -92,17 +95,32 @@ function subagentNames(agent) {
   return (agent.subagents || []).map(id => agentNameById.value[id]).filter(Boolean)
 }
 const contextPercent = computed(() => {
-  if (Number.isFinite(Number(props.contextUsage?.percent)) && Number(props.contextUsage.percent) > 0) {
-    return Math.min(100, Math.round(Number(props.contextUsage.percent)))
+  // 有真实用量时至少显示 1%，避免 0.37% 这类小值被 round 成 0 误导
+  const explicit = Number(props.contextUsage?.percent)
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return Math.min(100, Math.max(1, Math.round(explicit)))
   }
+  const tokens = Number(props.contextUsage?.tokens) || 0
   const windowSize = Number(props.contextUsage?.contextWindow) || props.contextWindow
-  if (!windowSize) return 0
-  return Math.min(100, Math.round(((Number(props.contextUsage?.tokens) || 0) / windowSize) * 100))
+  if (!windowSize || tokens <= 0) return 0
+  return Math.min(100, Math.max(1, Math.round((tokens / windowSize) * 100)))
 })
 const contextTokens = computed(() => Number(props.contextUsage?.tokens) || 0)
 const contextLimit = computed(() => Number(props.contextUsage?.contextWindow) || props.contextWindow || 0)
 const contextUsageTitle = computed(() => {
   return `${props.t.contextUsage}: ${contextTokens.value.toLocaleString()} / ${contextLimit.value.toLocaleString()} (${contextPercent.value}%)`
+})
+const tokenStatsInput = computed(() => Number(props.tokenStats?.input) || 0)
+const tokenStatsCached = computed(() => Number(props.tokenStats?.cached) || 0)
+const tokenStatsOutput = computed(() => Number(props.tokenStats?.output) || 0)
+const tokenTotal = computed(() => Number(props.tokenStats?.total) || (tokenStatsInput.value + tokenStatsCached.value + tokenStatsOutput.value))
+const tokenStatsTitle = computed(() => {
+  return [
+    `${props.t.token_total}: ${tokenTotal.value.toLocaleString()}`,
+    `${props.t.token_input}: ${tokenStatsInput.value.toLocaleString()}`,
+    `${props.t.token_cached}: ${tokenStatsCached.value.toLocaleString()}`,
+    `${props.t.token_output}: ${tokenStatsOutput.value.toLocaleString()}`
+  ].join('\n')
 })
 
 function onDocumentPointerDown(event) {
@@ -271,6 +289,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
         :dialog="extensionDialog"
         :t="t"
         @respond="emit('respond-extension', $event)"
+        @ack="emit('ack-extension', $event)"
       />
     </div>
     <ChatExecutionPlan v-else-if="executionPlan.length" :items="executionPlan" :t="t" />
@@ -390,6 +409,13 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
           </button>
           <input ref="fileInput" type="file" multiple hidden @change="onFilePicked" />
 
+          <span v-if="thinkingLevels.length" class="thinking-select-wrap">
+            <BrainCog :size="14" class="thinking-select-icon" />
+            <select class="thinking-select" :value="thinkingLevel" :title="t.thinkingMode" @change="emit('update:thinking', $event.target.value)">
+              <option v-for="level in thinkingLevels" :key="level" :value="level">{{ thinkingLevelLabel(level) }}</option>
+            </select>
+          </span>
+
           <div v-if="selectedSkillOptions.length" ref="skillWrapEl" class="skill-select-wrap">
             <button class="skill-select-btn" :title="t.skillsSelect || 'Skill'" @click="skillMenuOpen = !skillMenuOpen">
               <Sparkles :size="14" class="skill-select-btn__icon" />
@@ -431,9 +457,25 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
             </svg>
           </div>
           <div class="token-stats">
-            <span><b>{{ formatTokenCount(tokenStats.input) }}</b> {{ t.tokenInput }}</span>
-            <span><b>{{ formatTokenCount(tokenStats.cached) }}</b> {{ t.tokenCached }}</span>
-            <span><b>{{ formatTokenCount(tokenStats.output) }}</b> {{ t.tokenOutput }}</span>
+            <span class="token-stats__compact" :title="tokenStatsTitle">{{ formatTokenCount(tokenTotal) }}</span>
+            <div class="token-stats__tip" role="tooltip">
+              <div class="token-stats__tip-head">{{ t.token_total }}: {{ formatTokenCount(tokenTotal) }}</div>
+              <div class="token-stats__tip-row">
+                <span class="token-stats__tip-label">{{ t.token_input }}</span>
+                <span class="token-stats__tip-desc">{{ t.token_input_help }}</span>
+                <span class="token-stats__tip-val">{{ formatTokenCount(tokenStatsInput) }}</span>
+              </div>
+              <div class="token-stats__tip-row">
+                <span class="token-stats__tip-label">{{ t.token_cached }}</span>
+                <span class="token-stats__tip-desc">{{ t.token_cached_help }}</span>
+                <span class="token-stats__tip-val">{{ formatTokenCount(tokenStatsCached) }}</span>
+              </div>
+              <div class="token-stats__tip-row">
+                <span class="token-stats__tip-label">{{ t.token_output }}</span>
+                <span class="token-stats__tip-desc">{{ t.token_output_help }}</span>
+                <span class="token-stats__tip-val">{{ formatTokenCount(tokenStatsOutput) }}</span>
+              </div>
+            </div>
           </div>
           <!-- 注释压缩（压缩上下文）按钮：按需求暂时注释
           <button

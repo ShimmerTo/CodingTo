@@ -98,9 +98,13 @@ const isUser = computed(() => props.message.role === 'user')
 const readTool = computed(() => isReadTool(props.message))
 const readMeta = computed(() => readToolMeta(props.message) || { path: '', params: [] })
 const readBlocks = computed(() => readToolBlocks(props.message) || [])
+const toolNameSlug = computed(() => {
+  const raw = toolName(props.message).toLowerCase().replace(/[^a-z0-9]+/g, '-')
+  return raw.replace(/^-+|-+$/g, '') || 'tool'
+})
 const agentAvatarValue = computed(() => props.agentAvatar || '')
 const userAvatarValue = computed(() => props.userAvatar || '')
-// 子 Agent 卡片自带头像与名称，外层节点不再重复渲染头像列。
+// 子 Agent 执行块（引用块形态）自带名称行且块内不显示任何头像，外层节点不再渲染头像列。
 const changedFiles = computed(() =>
   [...(props.message.changes?.files || [])].sort((a, b) => (
     String(a.path).localeCompare(String(b.path)) ||
@@ -182,7 +186,7 @@ watch(() => props.message.thinkingContent, async () => {
     ]"
   >
     <div
-      v-if="!isSubagentTool && showIdentity"
+      v-if="showIdentity"
       class="message__avatar"
       :class="{ 'message__avatar--user': isUser }"
       aria-hidden="true"
@@ -295,7 +299,8 @@ watch(() => props.message.thinkingContent, async () => {
       <template v-else-if="message.role === 'tool'">
       <details
         v-if="!readTool"
-        class="tool-call"
+        class="tool-call tool-call--generic"
+        :class="`tool-call--${toolNameSlug}`"
         :open="!collapseToolsByDefault && !!editDiff"
       >
         <summary>
@@ -336,7 +341,7 @@ watch(() => props.message.thinkingContent, async () => {
           </div>
         </div>
       </details>
-      <details v-else class="tool-call tool-call--read" :open="true">
+      <details v-else class="tool-call tool-call--read" :open="!collapseToolsByDefault">
         <summary>
           <span class="tool-call__state">
             <CheckCircle2 v-if="toolStatus(message) === 'done'" :size="14" />

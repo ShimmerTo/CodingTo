@@ -45,6 +45,12 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 
 ## 📝 更新日志
 
+# 2026-08-01
+- perf 优化skills和mcp
+- feat 优化对话执行卡顿崩溃问题
+- feat 增加强制提示词和压缩提示词
+- style 优化子智能体执行效果
+
 # 2026-07-30
 - feat 增加支持mcp和扩展安装
 - feat 优化聊天框样式，增加更多配置

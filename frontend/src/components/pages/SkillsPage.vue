@@ -2,9 +2,21 @@
 import { computed, ref } from 'vue'
 import { Archive, Check, ExternalLink, Pencil, RefreshCw, Sparkles, Trash2, Upload, X } from 'lucide-vue-next'
 import SkillCard from '../SkillCard.vue'
-import { useAppContext } from '../../composables/appContext'
+import { useAppContext, agentAvatar, isImageAvatar } from '../../composables/appContext'
+import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 
 const { t, skills, skillsLoading, agentList, refreshSkills, installSkills, previewSkillArchive, previewSkillUrl, editSkill, deleteSkill, updateSkill, pushToast } = useAppContext()
+
+// --- Agent filter ---
+const filterAgentId = ref('')
+const filteredSkills = computed(() => {
+  const id = filterAgentId.value
+  if (!id) return skills.value
+  return (skills.value || []).filter(skill => (skill.agents || []).some(agent => agent.id === id))
+})
+function agentSkillCount(agentId) {
+  return (skills.value || []).filter(skill => (skill.agents || []).some(a => a.id === agentId)).length
+}
 
 const installOpen = ref(false)
 const installMethod = ref('pi')
@@ -36,7 +48,7 @@ function openInstall(method) {
   url.value = ''
   archive.value = null
   preview.value = null
-  selectedAgents.value = []
+  selectedAgents.value = filterAgentId.value ? [filterAgentId.value] : []
   loadMode.value = method === 'pi' ? 'startup' : 'skills_list'
   notice.value = ''
   installOpen.value = true
@@ -143,11 +155,17 @@ async function update() {
     pushToast('success', t.skillsUpdated || 'Skill 已更新')
   } catch (err) { notice.value = String(err) } finally { busy.value = false }
 }
-async function remove(skill) {
-  if (busy.value) return
-  if (!window.confirm((t.skillsDeleteConfirm || '确定删除 Skill “{name}”？').replace('{name}', skill.name))) return
-  busy.value = true
-  try { await deleteSkill(skill.id); await refreshSkills() } catch (err) { pushToast('error', String(err)) } finally { busy.value = false }
+const skillDeleteTarget = ref(null)
+const deleting = ref(false)
+function remove(skill) {
+  if (busy.value || deleting.value) return
+  skillDeleteTarget.value = skill
+}
+async function confirmRemove() {
+  const skill = skillDeleteTarget.value
+  if (!skill || deleting.value) return
+  deleting.value = true
+  try { await deleteSkill(skill.id); await refreshSkills() } catch (err) { pushToast('error', String(err)) } finally { deleting.value = false; skillDeleteTarget.value = null }
 }
 </script>
 
@@ -158,6 +176,14 @@ async function remove(skill) {
       <Sparkles :size="28" />
     </div>
 
+    <div class="agent-filter-bar">
+      <button class="agent-filter-chip" :class="{ active: !filterAgentId }" @click="filterAgentId = ''">{{ t.filterAllAgents || '全部 Agent' }}<span class="agent-filter-chip__count">{{ (skills || []).length }}</span></button>
+      <button v-for="agent in agentList" :key="agent.id" class="agent-filter-chip" :class="{ active: filterAgentId === agent.id }" @click="filterAgentId = filterAgentId === agent.id ? '' : agent.id">
+        <span class="agent-filter-chip__avatar"><img v-if="isImageAvatar(agentAvatar(agent))" :src="agentAvatar(agent)" alt="" />{{ isImageAvatar(agentAvatar(agent)) ? '' : (agentAvatar(agent) || agent.name?.charAt(0) || '?') }}</span>
+        {{ agent.name }}<span class="agent-filter-chip__count">{{ agentSkillCount(agent.id) }}</span>
+      </button>
+    </div>
+
     <div class="skills-actions">
       <button class="primary-button" @click="openInstall('pi')"><Sparkles :size="14" />{{ t.skillsInstallPi || '通过 pi 安装' }}</button>
       <button class="secondary-button" @click="openInstall('archive')"><Upload :size="14" />{{ t.skillsUploadZip || '上传 ZIP' }}</button>
@@ -165,11 +191,11 @@ async function remove(skill) {
       <button class="icon-button" :title="t.refresh || '刷新'" @click="refreshSkills"><RefreshCw :size="15" :class="{ spin: skillsLoading }" /></button>
     </div>
 
-    <div v-if="!skills.length && !skillsLoading" class="empty-integration skills-empty">
-      <Sparkles :size="28" /><strong>{{ t.skillsEmpty || '还没有安装 Skill' }}</strong><p>{{ t.skillsEmptyHint || 'Skill 只会对被分配的 Agent 可见。' }}</p>
+    <div v-if="!filteredSkills.length && !skillsLoading" class="empty-integration skills-empty">
+      <Sparkles :size="28" /><strong>{{ filterAgentId ? (t.skillsEmptyAgent || '该 Agent 还没有安装 Skill') : (t.skillsEmpty || '还没有安装 Skill') }}</strong><p>{{ filterAgentId ? (t.skillsEmptyAgentHint || '点击上方安装按钮为该 Agent 安装 Skill。') : (t.skillsEmptyHint || 'Skill 只会对被分配的 Agent 可见。') }}</p>
     </div>
     <div v-else class="skills-list">
-      <article v-for="skill in skills" :key="skill.id" class="skill-card">
+      <article v-for="skill in filteredSkills" :key="skill.id" class="skill-card">
         <div class="skill-card__icon"><Sparkles :size="19" /></div>
             <SkillCard :skill="skill">
               <div class="skill-agents"><span>{{ t.skillsAgents || '安装 Agent' }}</span><b v-for="agent in skill.agents" :key="agent.id">{{ agent.name }}</b></div>
@@ -209,5 +235,21 @@ async function remove(skill) {
     <div v-if="editTarget" class="modal-backdrop" @click.self="closeEdit"><section class="agent-editor-dialog skills-dialog" role="dialog" aria-modal="true"><header class="agent-editor-dialog__head"><h2>{{ t.skillsEdit || '编辑 Skill' }}</h2><button class="icon-button" @click="closeEdit"><X :size="16" /></button></header><div class="agent-editor-dialog__body"><fieldset class="skills-agent-picker"><legend>{{ t.skillsChooseAgent || '选择 Agent（至少一个）' }}</legend><label v-for="agent in agentList" :key="agent.id" class="skill-agent-option"><input v-model="editAgents" type="checkbox" :value="agent.id" /><span>{{ agent.name }}</span></label></fieldset><fieldset v-if="editTarget.sourceType !== 'pi'" class="skills-agent-picker"><legend>{{ t.skillsLoadMode || '安装模式' }}</legend><label class="skill-agent-option"><input v-model="editMode" type="radio" value="startup" /><span>{{ t.skillsStartup || '随 pi 启动时加载' }}</span></label><label class="skill-agent-option"><input v-model="editMode" type="radio" value="skills_list" /><span>{{ t.skillsListMode || '通过 skills_list 工具发现' }}</span></label></fieldset><p v-if="notice" class="skills-notice">{{ notice }}</p></div><footer class="agent-editor-dialog__footer"><button class="secondary-button" @click="closeEdit">{{ t.cancel }}</button><button class="primary-button" :disabled="busy || !editAgents.length" @click="saveEdit"><Check :size="14" />{{ t.save }}</button></footer></section></div>
 
     <div v-if="updateTarget" class="modal-backdrop" @click.self="updateTarget = null"><section class="agent-editor-dialog skills-dialog" role="dialog" aria-modal="true"><header class="agent-editor-dialog__head"><h2>{{ updateTarget.sourceType === 'pi' ? (t.skillsUpgrade || '升级 Skill') : (t.skillsUpdate || '更新 Skill') }}</h2><button class="icon-button" @click="updateTarget = null"><X :size="16" /></button></header><div class="agent-editor-dialog__body"><template v-if="updateTarget.sourceType === 'pi'"><p class="field-hint">{{ updateTarget.source }}</p></template><template v-else><label class="skill-field"><span>URL（可选）</span><input v-model="updateURL" placeholder="https://example.com/skill.zip" /></label><span class="skill-or">{{ t.or || '或' }}</span><input ref="updateInput" type="file" accept=".zip,application/zip" hidden @change="event => chooseArchive(event, true)" /><button class="secondary-button" @click="updateInput?.click()"><Upload :size="14" />{{ updateArchive?.name || (t.skillsChooseZip || '选择 ZIP 文件') }}</button></template><p v-if="notice" class="skills-notice">{{ notice }}</p></div><footer class="agent-editor-dialog__footer"><button class="secondary-button" :disabled="busy" @click="updateTarget = null">{{ t.cancel }}</button><button class="primary-button" :disabled="busy || (updateTarget.sourceType !== 'pi' && !updateURL.trim() && !updateArchive)" @click="update"><RefreshCw v-if="busy" class="spin" :size="14" /><Check v-else :size="14" />{{ busy ? (t.updating || '更新中…') : (t.save || '更新') }}</button></footer></section></div>
+
+    <ConfirmDeleteDialog
+      :model-value="!!skillDeleteTarget"
+      :title="t.skillsDeleteTitle"
+      :description="t.skillsDeleteConfirm.replace('{name}', skillDeleteTarget?.name || '')"
+      :busy="deleting"
+      :confirm-label="t.delete"
+      :confirm-busy-label="t.deletingSkill"
+      @cancel="skillDeleteTarget = null"
+      @confirm="confirmRemove"
+    >
+      <div v-if="skillDeleteTarget?.agents && skillDeleteTarget.agents.length" class="confirm-dialog__agents">
+        <span>{{ t.skillsDeleteFromAgents }}</span>
+        <b v-for="agent in skillDeleteTarget.agents" :key="agent.id">{{ agent.name }}</b>
+      </div>
+    </ConfirmDeleteDialog>
   </section>
 </template>

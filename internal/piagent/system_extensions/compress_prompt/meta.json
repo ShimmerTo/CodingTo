@@ -1,0 +1,5 @@
+{
+  "name": "CodingTo Compress Prompt",
+  "version": "1.0.0",
+  "description": "Append the agent's PROMPT_COMPRESS.md after Pi's built-in compaction prompt."
+}

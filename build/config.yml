@@ -11,7 +11,7 @@ info:
   description: "Local-first desktop workspace for Pi Agent"
   copyright: "(c) 2026 CodingTo"
   comments: "Built with Wails 3 and Vue"
-  version: "0.1.2"
+  version: "0.1.3"
   # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)
   #                               # Should match the name of your .icon file without the extension
   #                               # If not set and Assets.car exists, defaults to "appicon"

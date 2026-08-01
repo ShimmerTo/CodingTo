@@ -1,34 +1,15 @@
 package app
 
 import (
-	"archive/zip"
-	"bytes"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"codingto/internal/piagent"
 )
-
-const (
-	maxSkillArchiveBytes        = 50 << 20
-	maxSkillArchiveUncompressed = 200 << 20
-	maxSkillArchiveEntries      = 5000
-)
-
-var skillNamePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`)
 
 type SkillAgent struct {
 	ID   string `json:"id"`
@@ -100,45 +81,6 @@ type discoveredSkill struct {
 	root         string
 }
 
-func validateSkillFrontmatter(raw []byte) (string, string, error) {
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	lines := strings.Split(text, "\n")
-	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "---" {
-		return "", "", errors.New("SKILL.md must start with YAML frontmatter")
-	}
-	end := -1
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			end = i
-			break
-		}
-	}
-	if end < 0 {
-		return "", "", errors.New("SKILL.md frontmatter is not closed")
-	}
-	var name, description string
-	for _, line := range lines[1:end] {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(strings.Trim(value, "\"'"))
-		switch strings.TrimSpace(strings.ToLower(key)) {
-		case "name":
-			name = value
-		case "description":
-			description = value
-		}
-	}
-	if !skillNamePattern.MatchString(name) {
-		return "", "", fmt.Errorf("invalid skill name %q: use lowercase letters, numbers and hyphens", name)
-	}
-	if description == "" || len(description) > 1024 {
-		return "", "", errors.New("SKILL.md description is required and must be at most 1024 characters")
-	}
-	return name, description, nil
-}
-
 func validateSkillMode(mode string) error {
 	if mode != "startup" && mode != "skills_list" {
 		return fmt.Errorf("invalid skill load mode %q", mode)
@@ -146,147 +88,47 @@ func validateSkillMode(mode string) error {
 	return nil
 }
 
-func skillID(sourceType, source, name, relative string) string {
-	sum := sha256.Sum256([]byte(sourceType + "\x00" + source + "\x00" + name + "\x00" + relative))
-	return "skill-" + hex.EncodeToString(sum[:8])
-}
-
-func randomID(prefix string) string {
-	var raw [10]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
-	}
-	return prefix + "-" + hex.EncodeToString(raw[:])
-}
-
-func readSkillMetadata(root string) (skillMetadata, bool) {
-	raw, err := os.ReadFile(filepath.Join(root, ".codingto-skill.json"))
-	if err != nil {
-		return skillMetadata{}, false
-	}
-	var meta skillMetadata
-	if json.Unmarshal(raw, &meta) != nil || meta.ID == "" {
-		return skillMetadata{}, false
-	}
-	return meta, true
-}
-
-func writeSkillMetadata(root string, meta skillMetadata) error {
-	raw, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(root, ".codingto-skill.json"), append(raw, '\n'), 0o600)
-}
-
-func skillWithinPath(root, candidate string) bool {
-	rel, err := filepath.Rel(root, candidate)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-func parseSkillFile(path string) (string, string, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", "", err
-	}
-	return validateSkillFrontmatter(raw)
-}
-
-func discoverSkillRoots(root string) ([]discoveredSkill, error) {
-	var result []discoveredSkill
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return result, nil
-	} else if err != nil {
-		return nil, err
-	}
-	seenRoots := map[string]bool{}
-	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if info.IsDir() {
-			if path != root && (info.Name() == ".git" || info.Name() == "node_modules") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if info.Name() != "SKILL.md" {
-			return nil
-		}
-		skillRoot := filepath.Dir(path)
-		canonical, err := filepath.Abs(skillRoot)
-		if err != nil || seenRoots[canonical] {
-			return nil
-		}
-		name, description, err := parseSkillFile(path)
-		if err != nil {
-			return nil // Pi ignores invalid skills; the installer validates before copying.
-		}
-		seenRoots[canonical] = true
-		meta, hasMeta := readSkillMetadata(skillRoot)
-		if !hasMeta {
-			meta = skillMetadata{
-				ID:   skillID("managed", root, name, filepath.ToSlash(strings.TrimPrefix(canonical, filepath.Clean(root)+string(filepath.Separator)))),
-				Name: name, Description: description, SourceType: "managed", Source: root, LoadMode: "startup",
-			}
-		}
-		mode := meta.LoadMode
-		if mode == "" {
-			mode = "startup"
-		}
-		result = append(result, discoveredSkill{
-			SkillInfo:    SkillInfo{ID: meta.ID, Name: name, Description: description, Path: filepath.Join(canonical, "SKILL.md"), SourceType: meta.SourceType, Source: meta.Source, LoadMode: mode},
-			metadataPath: filepath.Join(skillRoot, ".codingto-skill.json"), root: skillRoot,
-		})
-		return nil
-	})
-	return result, err
-}
-
-func discoverAgentSkills(agent AgentProfile) ([]discoveredSkill, error) {
-	if strings.TrimSpace(agent.DataDir) == "" {
-		return nil, errors.New("agent data directory is required")
-	}
-	dataDir, err := filepath.Abs(agent.DataDir)
-	if err != nil {
-		return nil, err
-	}
-	result := []discoveredSkill{}
-	for _, dir := range []string{filepath.Join(dataDir, "skills"), filepath.Join(dataDir, "skills_list")} {
-		items, err := discoverSkillRoots(dir)
-		if err != nil {
-			return nil, err
-		}
-		for i := range items {
-			if items[i].SourceType == "" {
-				items[i].SourceType = "managed"
-				items[i].SkillInfo.SourceType = "managed"
-			}
-			result = append(result, items[i])
+func normalizeAgentIDs(ids []string) ([]string, error) {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			result = append(result, id)
 		}
 	}
-	packages, err := piagent.InstalledPackageStatuses(dataDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, pkg := range packages {
-		if pkg.SourcePath == "" || !skillWithinPath(dataDir, pkg.SourcePath) {
-			continue
-		}
-		items, err := discoverSkillRoots(pkg.SourcePath)
-		if err != nil {
-			return nil, err
-		}
-		for i := range items {
-			items[i].SkillInfo.SourceType = "pi"
-			items[i].SkillInfo.Source = pkg.Key
-			items[i].SkillInfo.LoadMode = "startup"
-			relative, _ := filepath.Rel(pkg.SourcePath, items[i].Path)
-			items[i].SkillInfo.ID = skillID("pi", pkg.Key, items[i].Name, filepath.ToSlash(relative))
-			result = append(result, items[i])
-		}
+	if len(result) == 0 {
+		return nil, errors.New("at least one agent must be selected")
 	}
 	return result, nil
+}
+
+func containsAgentByID(list []SkillAgent, id string) bool {
+	for _, agent := range list {
+		if agent.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAgent(list []SkillAgent, id string) bool {
+	for _, agent := range list {
+		if agent.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) skillAgent(agentID string) (AgentProfile, error) {
@@ -393,213 +235,6 @@ func (a *App) ListSkills() ([]SkillInfo, error) {
 	return result, nil
 }
 
-func archiveBytes(input SkillArchiveInput) ([]byte, error) {
-	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(input.Data))
-	if err != nil || len(data) == 0 {
-		return nil, errors.New("invalid ZIP data")
-	}
-	if len(data) > maxSkillArchiveBytes {
-		return nil, fmt.Errorf("skill archive is larger than %d MB", maxSkillArchiveBytes>>20)
-	}
-	return data, nil
-}
-
-func safeZipPath(name string) (string, error) {
-	name = filepath.ToSlash(strings.TrimSpace(name))
-	name = strings.TrimPrefix(name, "./")
-	name = strings.TrimSuffix(name, "/")
-	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "\x00") {
-		return "", errors.New("invalid ZIP entry path")
-	}
-	parts := strings.Split(name, "/")
-	for _, part := range parts {
-		if part == ".." || part == "" {
-			return "", errors.New("ZIP entry escapes its extraction directory")
-		}
-	}
-	return name, nil
-}
-
-func extractSkillArchive(data []byte) (string, []discoveredSkill, error) {
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return "", nil, fmt.Errorf("read ZIP archive: %w", err)
-	}
-	if len(reader.File) > maxSkillArchiveEntries {
-		return "", nil, errors.New("skill archive contains too many files")
-	}
-	temp, err := os.MkdirTemp("", "codingto-skills-")
-	if err != nil {
-		return "", nil, err
-	}
-	var total int64
-	for _, entry := range reader.File {
-		name, err := safeZipPath(entry.Name)
-		if err != nil {
-			os.RemoveAll(temp)
-			return "", nil, err
-		}
-		target := filepath.Join(temp, filepath.FromSlash(name))
-		if !skillWithinPath(temp, target) {
-			os.RemoveAll(temp)
-			return "", nil, errors.New("ZIP entry escapes its extraction directory")
-		}
-		if entry.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o700); err != nil {
-				os.RemoveAll(temp)
-				return "", nil, err
-			}
-			continue
-		}
-		if entry.Mode()&os.ModeSymlink != 0 {
-			os.RemoveAll(temp)
-			return "", nil, errors.New("symbolic links are not allowed in skill archives")
-		}
-		total += int64(entry.UncompressedSize64)
-		if total > maxSkillArchiveUncompressed {
-			os.RemoveAll(temp)
-			return "", nil, errors.New("skill archive expands beyond the allowed size")
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			os.RemoveAll(temp)
-			return "", nil, err
-		}
-		in, err := entry.Open()
-		if err != nil {
-			os.RemoveAll(temp)
-			return "", nil, err
-		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err == nil {
-			_, err = io.CopyN(out, in, int64(entry.UncompressedSize64)+1)
-		}
-		_ = in.Close()
-		_ = out.Close()
-		if err != nil && !errors.Is(err, io.EOF) {
-			os.RemoveAll(temp)
-			return "", nil, err
-		}
-	}
-	items, err := discoverSkillRoots(temp)
-	if err != nil || len(items) == 0 {
-		os.RemoveAll(temp)
-		if err != nil {
-			return "", nil, err
-		}
-		return "", nil, errors.New("ZIP does not contain a valid SKILL.md")
-	}
-	// A nested wrapper is harmless. If a skill contains another SKILL.md, the
-	// parent owns that subtree and is the install unit, matching Pi's discovery.
-	roots := make([]discoveredSkill, 0, len(items))
-	for _, item := range items {
-		nested := false
-		for _, other := range items {
-			if item.root != other.root && skillWithinPath(other.root, item.root) {
-				nested = true
-				break
-			}
-		}
-		if !nested {
-			roots = append(roots, item)
-		}
-	}
-	return temp, roots, nil
-}
-
-func downloadSkillURL(rawURL string) ([]byte, error) {
-	u := strings.TrimSpace(rawURL)
-	if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
-		return nil, errors.New("skill URL must use http:// or https://")
-	}
-	client := &http.Client{Timeout: 90 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("too many URL redirects")
-		}
-		return nil
-	}}
-	resp, err := client.Get(u)
-	if err != nil {
-		return nil, fmt.Errorf("download skill archive: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("download skill archive returned HTTP %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSkillArchiveBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxSkillArchiveBytes {
-		return nil, fmt.Errorf("downloaded archive is larger than %d MB", maxSkillArchiveBytes>>20)
-	}
-	return data, nil
-}
-
-func (a *App) PreviewSkillArchive(input SkillArchiveInput) (SkillPreview, error) {
-	data, err := archiveBytes(input)
-	if err != nil {
-		return SkillPreview{}, err
-	}
-	temp, items, err := extractSkillArchive(data)
-	if err != nil {
-		return SkillPreview{}, err
-	}
-	defer os.RemoveAll(temp)
-	first := items[0]
-	return SkillPreview{Name: first.Name, Description: first.Description, Path: first.Path, Count: len(items)}, nil
-}
-
-func (a *App) PreviewSkillURL(rawURL string) (SkillPreview, error) {
-	data, err := downloadSkillURL(rawURL)
-	if err != nil {
-		return SkillPreview{}, err
-	}
-	return a.PreviewSkillArchive(SkillArchiveInput{Data: base64.StdEncoding.EncodeToString(data)})
-}
-
-func copyTree(source, target string) error {
-	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		dest := filepath.Join(target, rel)
-		if info.IsDir() {
-			return os.MkdirAll(dest, 0o700)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(dest, data, 0o600)
-	})
-}
-
-func normalizeAgentIDs(ids []string) ([]string, error) {
-	seen := map[string]bool{}
-	result := []string{}
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			result = append(result, id)
-		}
-	}
-	if len(result) == 0 {
-		return nil, errors.New("at least one agent must be selected")
-	}
-	return result, nil
-}
-
 func (a *App) InstallSkills(req InstallSkillsRequest) ([]SkillInfo, error) {
 	ids, err := normalizeAgentIDs(req.AgentIDs)
 	if err != nil {
@@ -703,111 +338,6 @@ func (a *App) InstallSkills(req InstallSkillsRequest) ([]SkillInfo, error) {
 	return a.ListSkills()
 }
 
-func findSkillByID(a *App, id string) (*discoveredSkill, AgentProfile, error) {
-	// 优先从中央仓库查找 managed（zip/url）skill。
-	registry := registrySkillsDir(a)
-	rdir := filepath.Join(registry, id)
-	if meta, ok := readSkillMetadata(rdir); ok {
-		info := SkillInfo{
-			ID:          meta.ID,
-			Name:        meta.Name,
-			Description: meta.Description,
-			Path:        filepath.Join(rdir, "SKILL.md"),
-			SourceType:  meta.SourceType,
-			Source:      meta.Source,
-			LoadMode:    meta.LoadMode,
-		}
-		cfg := a.store.Get()
-		for _, agentID := range meta.Agents {
-			if p, ok := cfg.Agent(agentID); ok {
-				info.Agents = append(info.Agents, SkillAgent{ID: agentID, Name: p.Name, Mode: meta.LoadMode})
-			}
-		}
-		return &discoveredSkill{SkillInfo: info, metadataPath: filepath.Join(rdir, ".codingto-skill.json"), root: rdir}, AgentProfile{}, nil
-	}
-	// 回退：扫描各 agent 目录（pi 或遗留 managed）。
-	cfg := a.store.Get()
-	var found *discoveredSkill
-	var foundAgent AgentProfile
-	for _, agent := range cfg.Agents {
-		items, err := discoverAgentSkills(agent)
-		if err != nil {
-			return nil, AgentProfile{}, err
-		}
-		for i := range items {
-			if items[i].ID != id {
-				continue
-			}
-			if found == nil {
-				copyItem := items[i]
-				found = &copyItem
-				foundAgent = agent
-			}
-			found.Agents = append(found.Agents, SkillAgent{ID: agent.ID, Name: agent.Name, Path: items[i].Path, Mode: items[i].LoadMode})
-		}
-	}
-	if found != nil {
-		return found, foundAgent, nil
-	}
-	return nil, AgentProfile{}, fmt.Errorf("skill not found: %s", id)
-}
-
-// skillModeDir maps a skill load mode to the directory name inside the agent
-// data dir: "startup" skills live in "skills" (loaded when pi starts), while
-// "skills_list" skills live in "skills_list" (loaded on demand).
-func skillModeDir(mode string) string {
-	if mode == "skills_list" {
-		return "skills_list"
-	}
-	return "skills"
-}
-
-func removeSkillPath(agent AgentProfile, item discoveredSkill) error {
-	root := filepath.Join(agent.DataDir, skillModeDir(item.LoadMode))
-	if !skillWithinPath(root, item.root) {
-		return errors.New("refuse to remove a path outside the agent skill directory")
-	}
-	return os.RemoveAll(item.root)
-}
-
-// registrySkillsDir returns the central skill library directory. Every zip/url
-// skill is stored here exactly once (one sub-directory per skill) and then
-// copied into each assigned agent's skills/ or skills_list/ directory based on
-// its load mode.
-func registrySkillsDir(a *App) string {
-	return filepath.Join(a.store.Dir(), "skills")
-}
-
-// undeployManagedSkill removes every deployed copy of a managed skill (matched
-// by metadata id) from an agent's skills and skills_list directories.
-func undeployManagedSkill(a *App, profile AgentProfile, id string) {
-	for _, mode := range []string{"startup", "skills_list"} {
-		root := filepath.Join(profile.DataDir, skillModeDir(mode))
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			sub := filepath.Join(root, e.Name())
-			if meta, ok := readSkillMetadata(sub); ok && meta.ID == id {
-				_ = os.RemoveAll(sub)
-			}
-		}
-	}
-}
-
-func containsAgentByID(list []SkillAgent, id string) bool {
-	for _, agent := range list {
-		if agent.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
 func (a *App) EditSkill(req EditSkillRequest) ([]SkillInfo, error) {
 	ids, err := normalizeAgentIDs(req.AgentIDs)
 	if err != nil {
@@ -876,57 +406,45 @@ func (a *App) EditSkill(req EditSkillRequest) ([]SkillInfo, error) {
 	return a.ListSkills()
 }
 
-func containsAgent(list []SkillAgent, id string) bool {
-	for _, agent := range list {
-		if agent.ID == id {
-			return true
-		}
-	}
-	return false
-}
-func containsString(list []string, value string) bool {
-	for _, item := range list {
-		if item == value {
-			return true
-		}
-	}
-	return false
-}
-
-func copyManagedSkill(source string, agent AgentProfile, mode, id string) error {
-	root := filepath.Join(agent.DataDir, skillModeDir(mode))
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return err
-	}
-	name, description, err := parseSkillFile(filepath.Join(source, "SKILL.md"))
-	if err != nil {
-		return err
-	}
-	target := filepath.Join(root, name+"-"+strings.TrimPrefix(id, "skill-")[:12])
-	if !skillWithinPath(root, target) {
-		return errors.New("skill destination escapes agent directory")
-	}
-	if err := os.MkdirAll(target, 0o700); err != nil {
-		return err
-	}
-	if err := copyTree(source, target); err != nil {
-		return err
-	}
-	old, _ := readSkillMetadata(source)
-	old.ID, old.Name, old.Description, old.LoadMode = id, name, description, mode
-	return writeSkillMetadata(target, old)
-}
-
-func (a *App) DeleteSkill(skillID string) ([]SkillInfo, error) {
+// DeleteSkill 删除技能。
+//   - agentID 为空：全局删除（zip/url 中央仓库本体 + 所有已部署副本；pi 则删除各 agent 副本）。
+//   - agentID 非空：仅从该 agent 取消部署（其它分配了该技能的 agent 不受影响）。
+func (a *App) DeleteSkill(skillID string, agentID string) ([]SkillInfo, error) {
 	item, _, err := findSkillByID(a, skillID)
 	if err != nil {
 		return nil, err
 	}
-	if item.SourceType == "pi" {
-		for _, agent := range item.Agents {
-			if _, err := a.skillAgent(agent.ID); err == nil {
-				a.UninstallAgentExtension(AgentExtensionKeyRequest{AgentID: agent.ID, Key: item.Source})
+	if agentID != "" {
+		a.removeSingleSkillFromAgent(agentID, skillID)
+		// managed（zip/url）还存在于中央仓库：同步移除该 agent 引用，
+		// 若已无其它 agent 引用则删除中央仓库本体。
+		if item.SourceType != "pi" {
+			registryID := filepath.Join(registrySkillsDir(a), skillID)
+			if item.root == registryID {
+				if meta, ok := readSkillMetadata(item.root); ok {
+					remaining := make([]string, 0, len(meta.Agents))
+					for _, ag := range meta.Agents {
+						if ag != agentID {
+							remaining = append(remaining, ag)
+						}
+					}
+					if len(remaining) == 0 {
+						_ = os.RemoveAll(item.root)
+					} else {
+						meta.Agents = remaining
+						_ = writeSkillMetadata(item.root, meta)
+					}
+				}
 			}
+		}
+		return a.ListSkills()
+	}
+	if item.SourceType == "pi" {
+		// 只删除该 skill 自身目录，而不是卸载整个 npm 包；
+		// 否则同一包内的其它 skill 会被一并删除（例如一个包含 3 个 skill，
+		// 删除其中 1 个会把另外 2 个也删掉）。
+		for _, agent := range item.Agents {
+			a.removeSingleSkillFromAgent(agent.ID, skillID)
 		}
 		return a.ListSkills()
 	}
@@ -1017,37 +535,4 @@ func (a *App) UpdateSkill(req UpdateSkillRequest) ([]SkillInfo, error) {
 		}
 	}
 	return a.ListSkills()
-}
-
-func validateAgentSkillPath(agent AgentProfile, requested string) (string, error) {
-	requested, err := filepath.Abs(strings.TrimSpace(requested))
-	if err != nil || requested == "" {
-		return "", errors.New("invalid skill path")
-	}
-	items, err := AgentSkillPaths(agent)
-	if err != nil {
-		return "", err
-	}
-	for _, item := range items {
-		path, pathErr := filepath.Abs(item.Path)
-		if pathErr == nil && filepath.Clean(path) == filepath.Clean(requested) {
-			return path, nil
-		}
-	}
-	return "", errors.New("selected skill is not installed for this agent")
-}
-
-// AgentSkillPaths is used by prompt startup validation and by the default
-// skills_list tool's contract tests. It intentionally returns only this agent's
-// files and never falls back to the process/global PI_CODING_AGENT_DIR.
-func AgentSkillPaths(agent AgentProfile) ([]SkillInfo, error) {
-	items, err := discoverAgentSkills(agent)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]SkillInfo, len(items))
-	for i, item := range items {
-		result[i] = item.SkillInfo
-	}
-	return result, nil
 }

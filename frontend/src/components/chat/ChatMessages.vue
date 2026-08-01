@@ -220,13 +220,11 @@ function closeSubagentDetails() {
 }
 
 onMounted(() => {
+  // 详情弹窗打开时计时器也要继续走：弹窗内的运行时长、idle 秒数都依赖 now。
   stopRuntimeWatch = watch(
-    [
-      () => props.messages.some(needsRuntimeUpdate),
-      () => Boolean(subagentDetails.value)
-    ],
-    ([live, detailsOpen]) => {
-      if (live && !detailsOpen) startRuntimeTimer()
+    () => props.messages.some(needsRuntimeUpdate),
+    live => {
+      if (live) startRuntimeTimer()
       else stopRuntimeTimer()
     },
     { immediate: true }
@@ -350,7 +348,7 @@ onBeforeUnmount(() => {
       :open="Boolean(subagentDetails)"
       :details="cachedSubagentDetails"
       :agents="agents"
-      :now="subagentDetails ? runtimeNow : 0"
+      :now="runtimeNow"
       :t="t"
       @close="closeSubagentDetails"
       @artifact-error="emit('artifact-error', $event)"

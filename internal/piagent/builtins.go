@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -22,6 +23,10 @@ var builtinTools embed.FS
 var systemExtensions embed.FS
 
 var retiredBuiltinTools = []string{"api", "db", "git", "browser-workflow"}
+
+// mcpKeyPattern restricts MCP server keys to characters that are safe for
+// LLM tool names: letters, digits, underscores and hyphens only.
+var mcpKeyPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // BuiltinToolCatalog discovers every bundled extension directory and reads its
 // display metadata. default_tools is embedded into the application binary, so
@@ -211,6 +216,104 @@ func RemoveBuiltinTools(piDir string, enabled map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+// managedExtensionKeys returns the set of extension directory names owned by
+// CodingTo: builtin tools (default_tools), mandatory system extensions
+// (system_extensions) and the RTK Pi bridge. Anything else physically present
+// under an agent's extensions/ directory was installed outside CodingTo's
+// management and should be surfaced to the user for review and removal.
+func managedExtensionKeys() map[string]bool {
+	keys := map[string]bool{"rtk": true}
+	if catalog, err := BuiltinToolCatalog(); err == nil {
+		for _, tool := range catalog {
+			keys[tool.Key] = true
+		}
+	}
+	if entries, err := fs.ReadDir(systemExtensions, "system_extensions"); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				keys[entry.Name()] = true
+			}
+		}
+	}
+	return keys
+}
+
+// IsManagedExtension reports whether the given extensions/ directory name is
+// owned by CodingTo (builtin tool, system extension or RTK bridge) and therefore
+// must not be deleted through the unmanaged-extension removal path.
+func IsManagedExtension(key string) bool {
+	return managedExtensionKeys()[strings.TrimSpace(key)]
+}
+
+// UnmanagedExtensionStatuses lists the extension directories physically present
+// in the agent's extensions/ folder that are not owned by CodingTo. Pi
+// auto-discovers every entry under extensions/, so an unmanaged entry (for
+// example a manually copied ask-user extension) is still loaded and can block
+// execution with interactive UI requests the user never opted into. Surfacing
+// them lets the user see and delete them.
+func UnmanagedExtensionStatuses(dataDir string) ([]extensions.Status, error) {
+	targetRoot := filepath.Join(dataDir, "extensions")
+	entries, err := os.ReadDir(targetRoot)
+	if os.IsNotExist(err) {
+		return []extensions.Status{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read agent extensions directory: %w", err)
+	}
+	managed := managedExtensionKeys()
+	statuses := []extensions.Status{}
+	for _, entry := range entries {
+		if !entry.IsDir() || managed[entry.Name()] {
+			continue
+		}
+		sourcePath, _ := filepath.Abs(filepath.Join(targetRoot, entry.Name()))
+		status := extensions.Status{
+			Key:         entry.Name(),
+			Name:        entry.Name(),
+			Description: entry.Name(),
+			Installed:   true,
+			Enabled:     true,
+			SourcePath:  sourcePath,
+		}
+		applyUnmanagedManifest(&status, filepath.Join(targetRoot, entry.Name()))
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
+// applyUnmanagedManifest enriches an unmanaged extension status with display
+// metadata from its meta.json or package.json when present.
+func applyUnmanagedManifest(status *extensions.Status, dir string) {
+	for _, manifestName := range []string{"meta.json", "package.json"} {
+		raw, err := os.ReadFile(filepath.Join(dir, manifestName))
+		if err != nil {
+			continue
+		}
+		var manifest struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Version     string `json:"version"`
+			Homepage    string `json:"homepage"`
+		}
+		if json.Unmarshal(raw, &manifest) != nil {
+			continue
+		}
+		if strings.TrimSpace(manifest.Name) != "" {
+			status.Name = manifest.Name
+		}
+		if strings.TrimSpace(manifest.Description) != "" {
+			status.Description = manifest.Description
+		}
+		if strings.TrimSpace(manifest.Version) != "" {
+			status.Version = manifest.Version
+		}
+		if strings.TrimSpace(manifest.Homepage) != "" {
+			status.Homepage = manifest.Homepage
+		}
+		return
+	}
 }
 
 // BuiltinToolStatuses returns the version status of every tool bundled in
@@ -442,6 +545,114 @@ func UpsertMCPServer(dataDir, key, command string, args []string) error {
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return fmt.Errorf("create agent data directory: %w", err)
+	}
+	if err := writeFileIfChanged(configPath, append(encoded, '\n')); err != nil {
+		return fmt.Errorf("write agent MCP config: %w", err)
+	}
+	return nil
+}
+
+// ManualMCPServerConfig describes a user-supplied MCP server entry that can use
+// either stdio (command + args) or remote (URL) transport.
+type ManualMCPServerConfig struct {
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+}
+
+// UpsertManualMCPServer adds or updates a manually configured MCP server entry
+// in an agent's mcp.json. It supports both stdio (command+args+env) and remote
+// (url) transport types while preserving every unrelated server and setting.
+func UpsertManualMCPServer(dataDir, key string, cfg ManualMCPServerConfig) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("MCP server key is required")
+	}
+	if !mcpKeyPattern.MatchString(key) {
+		return fmt.Errorf("MCP server key %q contains invalid characters: only letters, digits, underscores (_) and hyphens (-) are allowed", key)
+	}
+	if strings.TrimSpace(cfg.Command) == "" && strings.TrimSpace(cfg.URL) == "" {
+		return errors.New("either command or url is required for a manual MCP server")
+	}
+	configPath := filepath.Join(dataDir, "mcp.json")
+	config := map[string]any{}
+	if raw, err := os.ReadFile(configPath); err == nil {
+		if len(strings.TrimSpace(string(raw))) > 0 {
+			if err := json.Unmarshal(raw, &config); err != nil {
+				return fmt.Errorf("parse agent MCP config: %w", err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read agent MCP config: %w", err)
+	}
+	servers, ok := config["mcpServers"].(map[string]any)
+	if !ok && config["mcpServers"] != nil {
+		return errors.New("agent MCP config field mcpServers must be an object")
+	}
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	entry := map[string]any{
+		"lifecycle":   "lazy",
+		"directTools": true,
+	}
+	if strings.TrimSpace(cfg.URL) != "" {
+		entry["url"] = strings.TrimSpace(cfg.URL)
+	} else {
+		entry["command"] = strings.TrimSpace(cfg.Command)
+		if len(cfg.Args) > 0 {
+			entry["args"] = cfg.Args
+		}
+		if len(cfg.Env) > 0 {
+			entry["env"] = cfg.Env
+		}
+	}
+	servers[key] = entry
+	config["mcpServers"] = servers
+	encoded, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode agent MCP config: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create agent data directory: %w", err)
+	}
+	if err := writeFileIfChanged(configPath, append(encoded, '\n')); err != nil {
+		return fmt.Errorf("write agent MCP config: %w", err)
+	}
+	return nil
+}
+
+// RemoveMCPServer deletes one MCP server entry from an agent's mcp.json while
+// preserving every unrelated server and setting.
+func RemoveMCPServer(dataDir, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("MCP server key is required")
+	}
+	configPath := filepath.Join(dataDir, "mcp.json")
+	raw, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read agent MCP config: %w", err)
+	}
+	config := map[string]any{}
+	if len(strings.TrimSpace(string(raw))) > 0 {
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return fmt.Errorf("parse agent MCP config: %w", err)
+		}
+	}
+	servers, ok := config["mcpServers"].(map[string]any)
+	if !ok || servers == nil {
+		return nil
+	}
+	delete(servers, key)
+	config["mcpServers"] = servers
+	encoded, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode agent MCP config: %w", err)
 	}
 	if err := writeFileIfChanged(configPath, append(encoded, '\n')); err != nil {
 		return fmt.Errorf("write agent MCP config: %w", err)

@@ -127,7 +127,12 @@ type Snapshot struct {
 	// Packages is the complete per-agent inventory persisted by `pi install`.
 	// Unlike Recommended, it is not limited to extensions known by CodingTo.
 	Packages map[string][]Status `json:"packages"`
-	MCP      map[string][]Status `json:"mcp"`
+	// Directory lists, per agent, the extension directories physically present
+	// under extensions/ that are not owned by CodingTo (unmanaged). These are
+	// auto-discovered by Pi and may include blocking extensions the user is not
+	// aware of, so the UI surfaces them for review and removal.
+	Directory map[string][]Status `json:"directory"`
+	MCP       map[string][]Status `json:"mcp"`
 	// GlobalMCP and GlobalPlugins are user-installed npm packages registered in
 	// their corresponding global scope.
 	GlobalMCP     []Status `json:"globalMcp"`
@@ -140,6 +145,7 @@ type AgentExtensionStatuses struct {
 	Builtins    []BuiltinToolStatus `json:"builtins"`
 	Recommended []Status            `json:"recommended"`
 	Packages    []Status            `json:"packages"`
+	Directory   []Status            `json:"directory"`
 	MCP         []Status            `json:"mcp"`
 }
 

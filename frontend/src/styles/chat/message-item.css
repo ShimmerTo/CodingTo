@@ -1,9 +1,9 @@
 .message { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 18px; }
 .message--user { flex-direction: row; }
-.message__avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: 14px; line-height: 1; user-select: none; }
+.message__avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: 14px; line-height: 1; user-select: none; position: relative; overflow: hidden; }
 .message--user .message__avatar { color: var(--accent); }
 .message__avatar-emoji { font-size: 15px; }
-.message__avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.message__avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
 .message--tool { margin-bottom: 3px; }
 .message--changes { margin-top: 8px; margin-bottom: 14px; }
 .message--system { margin-bottom: 10px; }
@@ -71,12 +71,26 @@
 .change-message__counts { flex: 0 0 auto; }
 .change-message__counts small { color: var(--faint); font: inherit; }
 .tool-call { width: min(660px, 76vw); border: 1px solid transparent; border-radius: 9px; background: transparent; overflow: hidden; transition: border-color .15s; }
-/* edit 工具的代码对比卡片放宽至对话框（消息区）的 70% */
-.tool-call:has(.tool-edit-diff) { width: 70%; }
+/* edit 工具的代码对比卡片同样随内容自动扩展，最宽不超过对话区 90% */
+.tool-call:has(.tool-edit-diff) { width: fit-content; max-width: 90%; }
 
-/* read 工具：读到的文件内容直接展示，整块宽度 70%，
+/* read 工具：读到的文件内容直接展示，宽度随内容自动扩展（最宽不超过对话区 80%），
    并把 limit/offset 等参数显示在文件名右侧 */
-.tool-call--read { width: 70%; }
+.tool-call--read { width: fit-content; max-width: 80%; }
+/* bash / write 工具：宽度随内容自动向右扩展，最宽不超过对话区 90% */
+.tool-call--bash,
+.tool-call--shell,
+.tool-call--terminal,
+.tool-call--command,
+.tool-call--run,
+.tool-call--exec,
+.tool-call--powershell,
+.tool-call--write,
+.tool-call--edit,
+.tool-call--create,
+.tool-call--save,
+.tool-call--update,
+.tool-call--patch { width: fit-content; max-width: 90%; }
 .tool-call--read summary { padding-top: 6px; padding-bottom: 6px; }
 .tool-call__file {
   flex: 1 1 auto;
@@ -105,8 +119,6 @@
   margin-top: 9px;
   padding: 10px 11px;
   overflow: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
   color: var(--muted);
   background: var(--code-bg);
   font: 12px/1.55 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -117,8 +129,6 @@
   max-width: 100%;
   max-height: 30vh;
   margin-top: 9px;
-  border: 1px solid var(--border-soft);
-  border-radius: 6px;
   background: var(--surface);
   object-fit: contain;
 }
@@ -127,12 +137,13 @@
 .tool-call summary::-webkit-details-marker, .thinking-block summary::-webkit-details-marker { display: none; }
 .tool-call__state { display: inline-flex; color: #399162; }
 .tool-call__icon { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: #8c6426; background: transparent; }
-.tool-call__name { flex: 0 1 auto; max-width: 210px; overflow: hidden; color: var(--text); font: 600 12px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+/* 工具名不收缩、不省略：长命令摘要（summary/link/file 均可收缩）承担全部空间压缩。 */
+.tool-call__name { flex: 0 0 auto; color: var(--text); font: 600 12px "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
 .tool-call__link { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; max-width: calc(100% - 96px); color: var(--link); text-decoration: none; cursor: pointer; }
 .tool-call__link:hover { text-decoration: underline; }
 .tool-call__link-title { font-weight: 600; color: var(--text); }
 .tool-call__link-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--link); }
-.tool-call__summary { min-width: 0; flex: 1; overflow: hidden; color: var(--faint); font: 12px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-call__summary { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--faint); font: 12px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .tool-call__changes { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; font: 600 11px "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
 .tool-call__changes b { font-weight: inherit; }
 .tool-call__changes .is-files { color: var(--muted); }
@@ -149,7 +160,7 @@ details[open] > summary .details-chevron { transform: rotate(180deg); }
 .tool-call__details label { display: block; margin-bottom: 4px; color: var(--faint); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
 .tool-call__details pre { max-height: 230px; padding: 9px 10px; overflow: auto; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--muted); background: var(--surface); font: 12px/1.55 "SFMono-Regular", Consolas, monospace; }
 /* edit 工具对比样式已迁移至 edit-diff.css（EditDiff.vue scoped 引入） */
-.thinking-block { margin-bottom: 7px; border-radius: 8px; color: #8a682f; background: transparent; overflow: hidden; }
+.thinking-block { max-width: 80%; margin-bottom: 7px; border-radius: 8px; color: #8a682f; background: transparent; overflow: hidden; }
 .thinking-block.thinking-live { animation: thinking-breathe 2.2s ease-in-out infinite; }
 .thinking-block summary { display: flex; align-items: center; gap: 6px; padding: 6px 9px; cursor: pointer; font-size: 11px; list-style: none; }
 .thinking-block summary > span:nth-child(2) { font-weight: 650; font-size: 12px; }

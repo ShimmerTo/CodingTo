@@ -1,10 +1,10 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { Drama, ExternalLink, Globe2, PackagePlus, RefreshCw, Trash2, Zap } from 'lucide-vue-next'
+import { Drama, ExternalLink, Globe2, Image, PackagePlus, RefreshCw, Settings, Trash2, Zap } from 'lucide-vue-next'
 import { useAppContext } from '../../composables/appContext'
 import InstallDialog from '../InstallDialog.vue'
 
-const { t, refreshExtensions, extensionSnapshot, extensionBusy, extensionAction, installGlobalPackage, removeGlobalPackage } = useAppContext()
+const { t, refreshExtensions, extensionSnapshot, extensionBusy, extensionAction, figma, figmaAction, showFigmaConfig, installGlobalPackage, removeGlobalPackage } = useAppContext()
 const rtkRuntime = computed(() => (extensionSnapshot.value?.tools || []).find(tool => tool.key === 'rtk') || null)
 const browserRuntime = computed(() => (extensionSnapshot.value?.tools || []).find(tool => tool.key === 'agent-browser') || null)
 const playwrightRuntime = computed(() => (extensionSnapshot.value?.tools || []).find(tool => tool.key === 'playwright') || null)
@@ -101,6 +101,27 @@ function confirmRemove(name) {
           <button :class="playwrightRuntime?.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'playwright'" @click="extensionAction(playwrightRuntime || { key: 'playwright', name: 'Playwright' }, 'install')">
             <RefreshCw v-if="playwrightRuntime?.installed || extensionBusy === 'playwright'" :class="{ spin: extensionBusy === 'playwright' }" :size="13" />{{ playwrightRuntime?.installed ? t.update : t.runInstall }}
           </button>
+        </div>
+      </article>
+      <article class="plugin-row">
+        <div class="plugin-icon"><Image :size="19" /></div>
+        <div class="plugin-copy">
+          <div class="plugin-name">
+            <strong>{{ t.figma }}</strong>
+            <span class="status-dot" :class="{ active: figma.installed && figma.hasToken, missing: !figma.installed || !figma.hasToken }"></span>
+            <small>{{ !figma.installed ? t.notInstalled : (figma.hasToken ? t.figmaAuthorized : t.figmaNotAuthorized) }}</small>
+          </div>
+          <p>{{ t.figmaDescription }}</p>
+          <code>figma-developer-mcp</code>
+          <code v-if="figma.activeAuthorizationName">{{ figma.activeAuthorizationName }} · {{ figma.authorizationCount }}</code>
+          <code v-if="figma.version">{{ figma.version }}</code>
+        </div>
+        <div class="plugin-actions">
+          <a href="https://www.figma.com" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
+          <button :class="figma.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'figma-install'" @click="figmaAction('install')">
+            <RefreshCw v-if="figma.installed || extensionBusy === 'figma-install'" :class="{ spin: extensionBusy === 'figma-install' }" :size="13" />{{ figma.installed ? t.update : t.runInstall }}
+          </button>
+          <button v-if="figma.installed" class="secondary-button" @click="showFigmaConfig = true"><Settings :size="13" />{{ t.configure }}</button>
         </div>
       </article>
     </div>

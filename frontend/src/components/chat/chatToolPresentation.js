@@ -491,7 +491,11 @@ export function isReadTool(message) {
   const name = toolName(message)
   if (!name || !READ_TOOL_NAMES.test(name)) return false
   const input = normalizeReadInput(message)
-  return READ_PATH_KEYS.some(key => typeof input[key] === 'string' && input[key].trim())
+  if (READ_PATH_KEYS.some(key => typeof input[key] === 'string' && input[key].trim())) return true
+  // read 类工具在参数尚未流式完成（toolcall 阶段 arguments 为空或部分解析）时也
+  // 按 read 形态渲染：避免运行中显示输入/输出 JSON、完成后才切到文件内容，造成
+  // “read 内容逃逸到折叠框外”的观感。完成后路径必然存在，这里只放宽未完成阶段。
+  return toolStatus(message) !== 'done'
 }
 
 export function readToolMeta(message) {
