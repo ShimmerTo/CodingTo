@@ -9,6 +9,7 @@ import (
 	"codingto/internal/browserworkflow"
 	"codingto/internal/extensions"
 	"codingto/internal/piagent"
+	"codingto/internal/subagentbridge"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -139,7 +140,35 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 			fmt.Printf("sync Pi Figma for %s: %v\n", agent.Name, err)
 		}
 	}
+	a.reconcileOrphanedSubagents()
 	return nil
+}
+
+// reconcileOrphanedSubagents marks subagent runs left as "running" on disk by
+// a previous process as aborted. Subagent bridges and their child Pi processes
+// cannot survive a CodingTo restart, so any run still recorded as running at
+// startup is orphaned: its follow-up result can never be delivered, and keeping
+// it as running would leave the session stuck in the "waiting for subagents"
+// state forever (see runningSubagentCount).
+func (a *App) reconcileOrphanedSubagents() {
+	sessions, err := a.store.Store().ListSessions()
+	if err != nil {
+		fmt.Printf("reconcile orphaned subagents: list sessions: %v\n", err)
+		return
+	}
+	for _, session := range sessions {
+		if session.SessionDir == "" {
+			continue
+		}
+		count, err := subagentbridge.ReconcileOrphanedRuns(session.SessionDir)
+		if err != nil {
+			fmt.Printf("reconcile orphaned subagents for session %d (%s): %v\n", session.ID, session.SessionDir, err)
+			continue
+		}
+		if count > 0 {
+			fmt.Printf("reconcile: session %d: marked %d orphaned subagent run(s) aborted\n", session.ID, count)
+		}
+	}
 }
 
 func (a *App) ServiceShutdown() error {

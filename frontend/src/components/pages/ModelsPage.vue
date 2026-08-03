@@ -58,7 +58,7 @@ function openAddModel() {
     contextWindow: 128000,
     maxTokens: 16384,
     reasoning: false,
-    defaultThinkingLevel: 'off',
+    defaultThinkingLevel: 'high',
     input: ['text'],
     capabilities: { toolCall: true },
     compat: {}
@@ -143,6 +143,9 @@ function formatTokenCount(value) {
 
 <template>
   <div class="models-page">
+    <div class="page-heading models-page__heading">
+      <div><h2>{{ t.modelsTitle }}</h2><p>{{ t.modelsIntro }}</p></div>
+    </div>
     <aside class="models-sidebar">
       <div class="models-sidebar__head">
         <span class="models-sidebar__title">{{ t.providers }}</span>

@@ -5,9 +5,10 @@ import { getSubagentTranscript } from '../../backend.js'
 import { formatDuration } from './chatFormatters.js'
 import { toolOutput, toolStatus } from './chatToolPresentation.js'
 import {
-  backfillSubagentTimeline, subagentTimelineMessages, subagentUIState
+  backfillSubagentTimeline, mergeSubagentRuntime, mergeSubagentUIState, resolvedSubagentStatus,
+  subagentTimelineMessages, subagentUIState
 } from './subagentRuntime.js'
-import { agentAvatar, isImageAvatar, useAppContext } from '../../composables/appContext.js'
+import { useAppContext } from '../../composables/appContext.js'
 import ChatMessageItem from './ChatMessageItem.vue'
 import SubAgentInteraction from './SubAgentInteraction.vue'
 
@@ -25,10 +26,8 @@ const conversationEl = ref(null)
 const thinkingOpenByID = ref({})
 let backfillPending = false
 
-// 与主对话一致的身份展示：用户头像取自个人信息设置，头像昵称开关跟随全局配置。
-const userAvatar = computed(() => (config.userProfile && config.userProfile.avatar) || '')
+// 与主对话一致的对话方向（左侧/左右布局），用于用户问题气泡的对齐。
 const chatLayout = computed(() => (config.preferences && config.preferences.chatLayout) || 'left')
-const showIdentity = computed(() => !(config.preferences && config.preferences.showIdentity === false))
 
 function resultStatus(message) {
   const queue = [toolOutput(message)]
@@ -48,10 +47,11 @@ function resultStatus(message) {
 
 const runtimeStatus = computed(() => {
   const message = props.details?.message
-  return resultStatus(message)
-    || message?.detail?.subagent?.status
-    || props.details?.status
-    || (message && toolStatus(message) === 'done' ? 'completed' : 'running')
+  return resolvedSubagentStatus(
+    resultStatus(message),
+    message?.detail?.subagent,
+    props.details?.status || (message && toolStatus(message) === 'done' ? 'completed' : 'running')
+  )
 })
 const displayDuration = computed(() => {
   const detail = props.details?.message?.detail || {}
@@ -61,6 +61,7 @@ const displayDuration = computed(() => {
       : props.details?.duration || 0)
 })
 const statusLabel = computed(() => {
+  if (runtimeStatus.value === 'aborted_requested') return props.t.subagentAborting
   if (runtimeStatus.value === 'running') return props.t.subagentRunning
   if (runtimeStatus.value === 'completed') return props.t.subagentCompleted
   if (runtimeStatus.value === 'timeout') return props.t.subagentTimeout
@@ -69,39 +70,25 @@ const statusLabel = computed(() => {
 })
 // 与卡片共用同一实时 timeline（mergeSubagentRuntime 增量维护，事件逐条到达），
 // 打开弹窗即可看到与主对话详情一致的实时消息流，无需轮询 transcript。
+// 思考过程与工具调用默认折叠（与卡片内的紧凑展示一致），点击可展开。
 const displayMessages = computed(() => (
   subagentTimelineMessages(props.details?.message?.detail, { includeUser: true })
     .map(message => (
       message.role === 'assistant' && message.thinkingContent
-        ? { ...message, thinkingOpen: thinkingOpenByID.value[message.id] ?? !message.thinkingComplete }
+        ? { ...message, thinkingOpen: thinkingOpenByID.value[message.id] ?? false }
         : message
     ))
 ))
-const displayVersion = computed(() => displayMessages.value.map(message => (
-  `${message.id}:${message.content?.length || 0}:${message.thinkingContent?.length || 0}:${message.detail?.status || ''}:${message.detail?.output?.length || 0}`
-)).join('|'))
-// 按“用户问题”切分节点（与主对话结构一致）：用户消息在前，其后是 Agent 身份头
-// 与 Agent 的消息流。子智能体的首条用户消息即父 agent 下发的任务提示。
-const messageNodes = computed(() => {
-  const nodes = []
-  let current = null
-  for (const message of displayMessages.value) {
-    if (message.role === 'user') {
-      current = { key: `node-${message.id}`, user: message, agentMessages: [] }
-      nodes.push(current)
-    } else if (current) {
-      current.agentMessages.push(message)
-    } else {
-      nodes.push({ key: `node-pre-${message.id}`, user: null, agentMessages: [message] })
-    }
-  }
-  return nodes
+const displayVersion = computed(() => {
+  const messages = displayMessages.value
+  const indexes = [0, Math.floor(messages.length / 2), messages.length - 1]
+    .filter((index, position, all) => index >= 0 && all.indexOf(index) === position)
+  return `${messages.length}:${indexes.map(index => {
+    const message = messages[index]
+    return `${message.id}:${message.content?.length || 0}:${message.thinkingContent?.length || 0}:${message.detail?.status || ''}:${message.detail?.output == null ? 0 : String(message.detail.output).length}`
+  }).join(';')}`
 })
 const uiState = computed(() => subagentUIState(props.details?.message?.detail))
-const dialogAgentAvatar = computed(() => {
-  const agent = props.agents.find(item => item.id === props.details?.agentKey)
-  return agent ? agentAvatar(agent) : ''
-})
 
 // 一次性拉取 transcript 回填进共享 detail（幂等，仅执行一次；有意改写共享的
 // message.detail，与卡片依赖同一引用同步刷新）。实时事件可能先到达，由
@@ -121,6 +108,17 @@ async function ensureBackfill() {
   try {
     const history = await getSubagentTranscript(props.details.sessionId, props.details.runId)
     if (requestedRunKey !== `${props.details?.sessionId || ''}:${props.details?.runId || ''}`) return
+    if (history?.subagent) {
+      message.detail = mergeSubagentRuntime(message.detail, {
+        kind: 'subagent_event', ...history.subagent, event: null
+      })
+    }
+    if (history?.subagentUi) {
+      message.detail = {
+        ...message.detail,
+        subagentUI: mergeSubagentUIState(message.detail?.subagentUI, history.subagentUi)
+      }
+    }
     message.detail = backfillSubagentTimeline(message.detail, history?.messages || [])
   } catch {
     // 实时事件流仍可正常渲染，回填失败仅影响历史补齐。
@@ -183,7 +181,7 @@ onBeforeUnmount(() => {
             <small>{{ details.agentKey }} · {{ t.subagentDetails }}</small>
           </span>
           <span class="subagent-dialog__status" :class="`is-${runtimeStatus}`">
-            <LoaderCircle v-if="runtimeStatus === 'running'" class="spin" :size="14" />
+            <LoaderCircle v-if="runtimeStatus === 'running' || runtimeStatus === 'aborted_requested'" class="spin" :size="14" />
             <CheckCircle2 v-else-if="runtimeStatus === 'completed'" :size="14" />
             <XCircle v-else :size="14" />
             {{ statusLabel }}
@@ -195,46 +193,20 @@ onBeforeUnmount(() => {
         <div ref="conversationEl" class="subagent-dialog__conversation" @scroll.passive="onConversationScroll">
           <p v-if="!displayMessages.length" class="subagent-dialog__notice">{{ t.subagentTranscriptEmpty }}</p>
           <div v-else class="subagent-dialog__messages">
-            <section v-for="node in messageNodes" :key="node.key" class="subagent-dialog__node">
-              <ChatMessageItem
-                v-if="node.user"
-                :message="node.user"
-                :session-id="details.sessionId || 0"
-                :agents="agents"
-                :agent-avatar="dialogAgentAvatar"
-                :agent-name="details.agentName"
-                :user-avatar="userAvatar"
-                :chat-layout="chatLayout"
-                :show-identity="showIdentity"
-                :now="0"
-                :t="t"
-                @artifact-error="emit('artifact-error', $event)"
-              />
-              <header v-if="node.agentMessages.length && showIdentity" class="subagent-dialog__node-header">
-                <span class="subagent-dialog__node-avatar" :class="{ 'has-emoji': dialogAgentAvatar }">
-                  <img v-if="isImageAvatar(dialogAgentAvatar)" :src="dialogAgentAvatar" class="subagent-dialog__node-img" alt="" />
-                  <span v-else-if="dialogAgentAvatar" class="subagent-dialog__node-emoji">{{ dialogAgentAvatar }}</span>
-                  <Bot v-else :size="19" />
-                </span>
-                <strong class="subagent-dialog__node-name">{{ details.agentName }}</strong>
-              </header>
-              <ChatMessageItem
-                v-for="message in node.agentMessages"
-                :key="message.id"
-                :message="message"
-                :session-id="details.sessionId || 0"
-                :agents="agents"
-                :agent-avatar="dialogAgentAvatar"
-                :agent-name="details.agentName"
-                :user-avatar="userAvatar"
-                :chat-layout="chatLayout"
-                :show-identity="showIdentity"
-                :now="message.live ? now : 0"
-                :t="t"
-                @update-thinking-open="setThinkingOpen(message.id, $event)"
-                @artifact-error="emit('artifact-error', $event)"
-              />
-            </section>
+            <ChatMessageItem
+              v-for="message in displayMessages"
+              :key="message.id"
+              :message="message"
+              :session-id="details.sessionId || 0"
+              :agents="agents"
+              :chat-layout="chatLayout"
+              :show-identity="false"
+              :now="message.live ? now : 0"
+              :t="t"
+              collapse-tools-by-default
+              @update-thinking-open="setThinkingOpen(message.id, $event)"
+              @artifact-error="emit('artifact-error', $event)"
+            />
           </div>
         </div>
 
@@ -258,27 +230,19 @@ onBeforeUnmount(() => {
 .subagent-dialog__header { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-height: 58px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .subagent-dialog__avatar { flex: 0 0 auto; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 9px; color: var(--amber); background: var(--amber-soft); }
 .subagent-dialog__title { min-width: 0; flex: 1; display: grid; gap: 1px; }
-.subagent-dialog__title strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-dialog__title small { color: var(--faint); font-size: 11px; }
-.subagent-dialog__status { display: inline-flex; align-items: center; gap: 5px; color: var(--faint); font-size: 12px; white-space: nowrap; }
+.subagent-dialog__title strong { overflow: hidden; font-size: var(--fs-14); text-overflow: ellipsis; white-space: nowrap; }
+.subagent-dialog__title small { color: var(--faint); font-size: var(--fs-12); }
+.subagent-dialog__status { display: inline-flex; align-items: center; gap: 5px; color: var(--faint); font-size: var(--fs-12); white-space: nowrap; }
 .subagent-dialog__status.is-completed { color: var(--success); }
 .subagent-dialog__status.is-failed,.subagent-dialog__status.is-timeout,.subagent-dialog__status.is-aborted { color: var(--danger); }
 .subagent-dialog__status small { color: inherit; }
 .subagent-dialog__header > button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; }
 .subagent-dialog__header > button:hover { color: var(--text); background: var(--surface-2); }
 .subagent-dialog__conversation { min-height: 0; flex: 1; overflow: auto; padding: 22px clamp(16px, 4vw, 48px); background: color-mix(in srgb, var(--surface-2) 35%, var(--surface)); }
-.subagent-dialog__messages { width: min(760px, 100%); margin: 0 auto; }
-.subagent-dialog__node { margin-bottom: 22px; }
-.subagent-dialog__node:last-child { margin-bottom: 0; }
-.subagent-dialog__node-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.subagent-dialog__node-avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: 15px; line-height: 1; user-select: none; position: relative; overflow: hidden; }
-.subagent-dialog__node-emoji { font-size: 16px; }
-.subagent-dialog__node-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
-.subagent-dialog__node-name { color: var(--text); font-size: 14px; font-weight: 650; }
+.subagent-dialog__messages { width: 100%; }
 .subagent-dialog__messages :deep(.message) { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-.subagent-dialog__messages :deep(.message-body) { width: 100%; max-width: min(88%, 720px); }
-.subagent-dialog__messages :deep(.message--tool .message-body),.subagent-dialog__messages :deep(.message--subagent .message-body) { max-width: 100%; }
-.subagent-dialog__messages :deep(.tool-call),.subagent-dialog__messages :deep(.change-message) { width: min(680px, 82vw); }
+.subagent-dialog__messages :deep(.message-body) { width: 100%; max-width: 100%; }
+.subagent-dialog__messages :deep(.tool-call),.subagent-dialog__messages :deep(.change-message) { width: 100%; max-width: 100%; }
 .subagent-dialog__notice { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 120px; color: var(--muted); }
 .subagent-dialog > :deep(.subagent-interaction) { flex: 0 0 auto; padding: 10px 14px 14px; border-top: 1px solid var(--border); background: var(--surface); }
 @media (max-width: 700px) {

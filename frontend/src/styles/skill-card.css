@@ -5,13 +5,13 @@
 .skill-card__body header { display: flex; align-items: center; gap: 8px; }
 .skill-card__name {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-14);
   cursor: help;
   text-decoration: underline dotted;
   text-underline-offset: 3px;
   text-decoration-color: var(--border);
 }
-.skill-card__body p { margin: 6px 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.skill-card__body p { margin: 6px 0; color: var(--muted); font-size: var(--fs-13); line-height: 1.45; }
 
-.skill-source { padding: 3px 7px; border-radius: 9px; color: var(--muted); background: var(--surface); font-size: 11px; }
+.skill-source { padding: 3px 7px; border-radius: 9px; color: var(--muted); background: var(--surface); font-size: var(--fs-12); }
 .skill-source.is-pi { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }

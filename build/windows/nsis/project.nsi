@@ -93,9 +93,6 @@ Section
     
     !insertmacro wails.files
 
-    ; Ship the changelog alongside the binary so it is available at runtime.
-    File "..\..\..\update.md"
-
     CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
     CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
 

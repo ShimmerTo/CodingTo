@@ -160,7 +160,21 @@ func (a *Adapter) Stop() error {
 
 func (a *Adapter) Events() <-chan Event { return a.events }
 func (a *Adapter) IsRunning() bool      { a.mu.Lock(); defer a.mu.Unlock(); return a.running }
-func (a *Adapter) ExitError() error     { a.mu.Lock(); defer a.mu.Unlock(); return a.exitErr }
+
+// KillTree terminates the child Pi process and all its descendants. On
+// Windows the direct child is the pi.cmd cmd.exe shim with node underneath, so
+// a plain Kill would leave the wedged node orphaned; killProcessTree handles
+// the platform differences (taskkill /T on Windows, direct Kill elsewhere).
+func (a *Adapter) KillTree() {
+	a.mu.Lock()
+	cmd := a.cmd
+	a.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	killProcessTree(cmd.Process)
+}
+func (a *Adapter) ExitError() error { a.mu.Lock(); defer a.mu.Unlock(); return a.exitErr }
 func InstallHint() string {
 	if runtime.GOOS == "windows" {
 		return "npm.cmd install -g --ignore-scripts @earendil-works/pi-coding-agent"

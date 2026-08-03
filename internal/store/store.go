@@ -75,47 +75,60 @@ func runMigrations(dbPath string) error {
 // --- Setting (single global row) ---
 
 type Setting struct {
-	Theme           string
-	Language        string
-	AccentColor     string
-	DefaultProvider string
-	DefaultModel    string
-	LastEnvironment string
-	SessionDir      string
-	Figma           string // JSON of extensions.FigmaConfig
-	GlobalMCP       string // JSON of []extensions.GlobalPackage
-	GlobalPlugins   string // JSON of []extensions.GlobalPackage
-	UserName        string // end-user display name shown in the chat UI
-	UserAvatar      string // end-user avatar (data-URL or emoji), shown in the chat UI
-	ChatLayout      string // 'left' (default) or 'side' conversation layout
-	ShowIdentity    bool   // show agent/user avatar + name in conversation
-	DiffMode        string // 'unified' (default) or 'split' code diff layout
+	Theme               string
+	Language            string
+	AccentColor         string
+	DefaultProvider     string
+	DefaultModel        string
+	LastEnvironment     string
+	SessionDir          string
+	Figma               string // JSON of extensions.FigmaConfig
+	GlobalMCP           string // JSON of []extensions.GlobalPackage
+	GlobalPlugins       string // JSON of []extensions.GlobalPackage
+	UserName            string // end-user display name shown in the chat UI
+	UserAvatar          string // end-user avatar (data-URL or emoji), shown in the chat UI
+	ChatLayout          string // 'left' (default) or 'side' conversation layout
+	ShowIdentity        bool   // show agent/user avatar + name in conversation
+	DiffMode            string // 'unified' (default) or 'split' code diff layout
+	FontSize            string // 'small' (default), 'medium' or 'large' UI font size
+	SubagentConcurrency int    // maximum child Agent runs within one parent conversation
+	// SystemNotificationEnabled gates desktop system notifications for plan
+	// approval requests and conversation completion (on by default).
+	SystemNotificationEnabled bool
+	// ToolExecutionTimeoutMinutes bounds one tool (bash) execution in minutes.
+	// Zero means the application default (10); values are clamped to 1..60 in
+	// the AppConfig layer so a corrupted row cannot disable the watchdog.
+	ToolExecutionTimeoutMinutes int
 }
 
 func (s *Store) GetSetting() (Setting, error) {
-	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode", map[string]any{"id": 1}).One()
+	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode, font_size, subagent_concurrency, system_notification_enabled, tool_execution_timeout", map[string]any{"id": 1}).One()
 	if err != nil {
 		return Setting{}, err
 	}
 	if len(row) == 0 {
-		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified"}, nil
+		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small", SubagentConcurrency: 2, SystemNotificationEnabled: true, ToolExecutionTimeoutMinutes: 10}, nil
 	}
 	return Setting{
-		Theme:           asString(row["theme"]),
-		Language:        asString(row["language"]),
-		AccentColor:     asString(row["accent_color"]),
-		DefaultProvider: asString(row["default_provider"]),
-		DefaultModel:    asString(row["default_model"]),
-		LastEnvironment: asString(row["last_environment"]),
-		SessionDir:      asString(row["session_dir"]),
-		Figma:           asString(row["figma"]),
-		GlobalMCP:       asString(row["global_mcp"]),
-		GlobalPlugins:   asString(row["global_plugins"]),
-		UserName:        asString(row["user_name"]),
-		UserAvatar:      asString(row["user_avatar"]),
-		ChatLayout:      asString(row["chat_layout"]),
-		ShowIdentity:    asString(row["show_identity"]) != "0",
-		DiffMode:        asString(row["diff_mode"]),
+		Theme:                       asString(row["theme"]),
+		Language:                    asString(row["language"]),
+		AccentColor:                 asString(row["accent_color"]),
+		DefaultProvider:             asString(row["default_provider"]),
+		DefaultModel:                asString(row["default_model"]),
+		LastEnvironment:             asString(row["last_environment"]),
+		SessionDir:                  asString(row["session_dir"]),
+		Figma:                       asString(row["figma"]),
+		GlobalMCP:                   asString(row["global_mcp"]),
+		GlobalPlugins:               asString(row["global_plugins"]),
+		UserName:                    asString(row["user_name"]),
+		UserAvatar:                  asString(row["user_avatar"]),
+		ChatLayout:                  asString(row["chat_layout"]),
+		ShowIdentity:                asString(row["show_identity"]) != "0",
+		DiffMode:                    asString(row["diff_mode"]),
+		FontSize:                    asString(row["font_size"]),
+		SubagentConcurrency:         int(asInt(row["subagent_concurrency"])),
+		SystemNotificationEnabled:   asString(row["system_notification_enabled"]) != "0",
+		ToolExecutionTimeoutMinutes: int(asInt(row["tool_execution_timeout"])),
 	}, nil
 }
 
@@ -126,40 +139,48 @@ func (s *Store) SaveSetting(set Setting) error {
 	}
 	if _, exists := row["id"]; exists {
 		_, err = s.db.QuickUpdate("tbl_setting", map[string]any{"id": 1}, map[string]any{
-			"theme":            set.Theme,
-			"language":         set.Language,
-			"accent_color":     set.AccentColor,
-			"default_provider": set.DefaultProvider,
-			"default_model":    set.DefaultModel,
-			"last_environment": set.LastEnvironment,
-			"session_dir":      set.SessionDir,
-			"figma":            set.Figma,
-			"global_mcp":       set.GlobalMCP,
-			"global_plugins":   set.GlobalPlugins,
-			"user_name":        set.UserName,
-			"user_avatar":      set.UserAvatar,
-			"chat_layout":      set.ChatLayout,
-			"show_identity":    boolToInt(set.ShowIdentity),
-			"diff_mode":        set.DiffMode,
+			"theme":                       set.Theme,
+			"language":                    set.Language,
+			"accent_color":                set.AccentColor,
+			"default_provider":            set.DefaultProvider,
+			"default_model":               set.DefaultModel,
+			"last_environment":            set.LastEnvironment,
+			"session_dir":                 set.SessionDir,
+			"figma":                       set.Figma,
+			"global_mcp":                  set.GlobalMCP,
+			"global_plugins":              set.GlobalPlugins,
+			"user_name":                   set.UserName,
+			"user_avatar":                 set.UserAvatar,
+			"chat_layout":                 set.ChatLayout,
+			"show_identity":               boolToInt(set.ShowIdentity),
+			"diff_mode":                   set.DiffMode,
+			"font_size":                   set.FontSize,
+			"subagent_concurrency":        set.SubagentConcurrency,
+			"system_notification_enabled": boolToInt(set.SystemNotificationEnabled),
+			"tool_execution_timeout":      set.ToolExecutionTimeoutMinutes,
 		}).Exec()
 		return err
 	}
 	_, err = s.db.QuickCreate("tbl_setting", map[string]any{
-		"id":               1,
-		"theme":            set.Theme,
-		"language":         set.Language,
-		"default_provider": set.DefaultProvider,
-		"default_model":    set.DefaultModel,
-		"last_environment": set.LastEnvironment,
-		"session_dir":      set.SessionDir,
-		"figma":            set.Figma,
-		"global_mcp":       set.GlobalMCP,
-		"global_plugins":   set.GlobalPlugins,
-		"user_name":        set.UserName,
-		"user_avatar":      set.UserAvatar,
-		"chat_layout":      set.ChatLayout,
-		"show_identity":    boolToInt(set.ShowIdentity),
-		"diff_mode":        set.DiffMode,
+		"id":                          1,
+		"theme":                       set.Theme,
+		"language":                    set.Language,
+		"default_provider":            set.DefaultProvider,
+		"default_model":               set.DefaultModel,
+		"last_environment":            set.LastEnvironment,
+		"session_dir":                 set.SessionDir,
+		"figma":                       set.Figma,
+		"global_mcp":                  set.GlobalMCP,
+		"global_plugins":              set.GlobalPlugins,
+		"user_name":                   set.UserName,
+		"user_avatar":                 set.UserAvatar,
+		"chat_layout":                 set.ChatLayout,
+		"show_identity":               boolToInt(set.ShowIdentity),
+		"diff_mode":                   set.DiffMode,
+		"font_size":                   set.FontSize,
+		"subagent_concurrency":        set.SubagentConcurrency,
+		"system_notification_enabled": boolToInt(set.SystemNotificationEnabled),
+		"tool_execution_timeout":      set.ToolExecutionTimeoutMinutes,
 	}).Exec()
 	return err
 }

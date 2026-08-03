@@ -2,8 +2,8 @@
 .titlebar { height: 42px; display: flex; flex: 0 0 42px; align-items: center; border-bottom: 1px solid var(--border-soft); background: var(--sidebar); user-select: none; }
 .titlebar__drag { --wails-draggable: drag; flex: 1; height: 100%; display: flex; align-items: center; gap: 9px; padding: 0 12px; }
 .brand-mark { width: 22px; height: 22px; border-radius: 6px; object-fit: cover; display: block; }
-.brand-name { font-size: 13px; font-weight: 650; letter-spacing: .01em; }
-.run-pill { display: flex; align-items: center; gap: 6px; margin-left: 8px; padding: 3px 8px; background: var(--surface-2); color: var(--muted); border-radius: 10px; font-size: 13px; }
+.brand-name { font-size: var(--fs-13); font-weight: 650; letter-spacing: .01em; }
+.run-pill { display: flex; align-items: center; gap: 6px; margin-left: 8px; padding: 3px 8px; background: var(--surface-2); color: var(--muted); border-radius: 10px; font-size: var(--fs-13); }
 .run-pill span { width: 6px; height: 6px; border-radius: 50%; background: #39a56c; box-shadow: 0 0 0 3px rgba(57,165,108,.13); }
 .window-controls { display: flex; align-self: stretch; }
 .window-controls button { width: 46px; border: 0; background: transparent; display: grid; place-items: center; cursor: default; }

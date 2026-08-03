@@ -66,13 +66,13 @@ const t = computed(() => buildT(lang))
 }
 .pi-gate__title {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--fs-14);
   font-weight: 700;
   color: var(--text);
 }
 .pi-gate__desc {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-14);
   line-height: 1.6;
   color: var(--muted);
 }
@@ -80,7 +80,7 @@ const t = computed(() => buildT(lang))
   margin-top: 6px;
   min-width: 200px;
   padding: 12px 22px;
-  font-size: 15px;
+  font-size: var(--fs-14);
   font-weight: 600;
   color: #fff;
   background: var(--accent, #6d5efc);
@@ -113,12 +113,12 @@ const t = computed(() => buildT(lang))
 }
 .pi-gate__error {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   color: #f85149;
 }
 .pi-gate__hint {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--muted);
 }
 @keyframes pi-gate-spin {

@@ -138,7 +138,8 @@ func (s *AgentService) prepareSubagentRuntime(
 	snapshot := subagentbridge.Snapshot{
 		Version:    subagentbridge.SnapshotVersion,
 		SessionDir: filepath.Clean(sessionDir), WorkDir: filepath.Clean(req.WorkDir),
-		Agents: agents,
+		MaxConcurrency: cfg.SubagentConcurrency,
+		Agents:         agents,
 	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -156,6 +157,7 @@ func (s *AgentService) prepareSubagentRuntime(
 		keys = append(keys, agent.Key)
 	}
 	agentEnv["CODINGTO_SUBAGENT_KEYS"] = strings.Join(keys, ",")
+	agentEnv["CODINGTO_SUBAGENT_MAX_CONCURRENCY"] = fmt.Sprintf("%d", snapshot.MaxConcurrency)
 	agentEnv["CODINGTO_SUBAGENT_BRIDGE_BIN"] = bridgeBinary
 	agentEnv["CODINGTO_SUBAGENT_CONFIG"] = configPath
 	return nil

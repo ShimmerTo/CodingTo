@@ -1,6 +1,7 @@
 package app
 
 import (
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,12 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
+// updateLogMD 是随二进制一起编译的更新日志（internal/app/update.md）。
+// 不再依赖运行时工作目录或 exe 旁边的文件，避免“update.md 不在工作目录”问题。
+//
+//go:embed update.md
+var updateLogMD string
+
 // GetPiVersion returns the installed Pi Agent version.
 func (a *App) GetPiVersion() string {
 	v, err := piagent.Version()
@@ -20,27 +27,22 @@ func (a *App) GetPiVersion() string {
 	return v
 }
 
-// GetUpdateLog reads the project changelog (update.md) and returns its raw
-// content for display in the settings UI. It prefers the copy shipped next to
-// the executable (placed there by the build tasks) and falls back to the
-// working directory so the log can be hot-updated during development.
+// GetUpdateLog returns the project changelog for display in the settings UI.
+// The log is embedded into the binary at build time (internal/app/update.md),
+// so it works regardless of the working directory. A file named update.md
+// placed next to the executable still takes precedence, allowing packaged
+// builds to ship a newer log without rebuilding.
 func (a *App) GetUpdateLog() string {
-	// 优先读取可执行文件所在目录的 update.md（发布产物由构建流程放置）。
+	// 可执行文件旁的 update.md（如有）优先，便于发布包覆盖最新日志。
 	if exePath, err := os.Executable(); err == nil {
 		if data, err := os.ReadFile(filepath.Join(filepath.Dir(exePath), "update.md")); err == nil {
 			return string(data)
 		}
 	}
-	// 回退到工作目录，便于开发期热更新日志。
-	wd, err := os.Getwd()
-	if err != nil {
-		return "# 无法读取更新日志\n（获取工作目录失败）"
+	if updateLogMD == "" {
+		return "# 暂无更新日志"
 	}
-	data, err := os.ReadFile(filepath.Join(wd, "update.md"))
-	if err != nil {
-		return "# 未找到更新日志\n（update.md 不存在于工作目录）"
-	}
-	return string(data)
+	return updateLogMD
 }
 
 // CheckPiUpdate compares the installed Pi Agent version with the latest

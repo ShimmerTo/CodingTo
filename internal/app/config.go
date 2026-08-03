@@ -16,6 +16,7 @@ import (
 	"codingto/internal/extensions"
 	"codingto/internal/piagent"
 	"codingto/internal/store"
+	"codingto/internal/subagentbridge"
 )
 
 // Preferences holds UI preferences persisted in tbl_setting.
@@ -26,26 +27,35 @@ type Preferences struct {
 	ChatLayout   string `json:"chatLayout"`
 	ShowIdentity bool   `json:"showIdentity"`
 	DiffMode     string `json:"diffMode"`
+	FontSize     string `json:"fontSize"`
 }
 
 // AppConfig is the in-memory shape exchanged with the frontend. It is assembled
 // from the normalized database tables on read and split back into tables on
 // save; no single JSON blob is persisted.
 type AppConfig struct {
-	ConfigVersion   int                `json:"configVersion"`
-	Preferences     Preferences        `json:"preferences"`
-	Providers       []piagent.Provider `json:"providers"`
-	DefaultProvider string             `json:"defaultProvider"`
-	DefaultModel    string             `json:"defaultModel"`
-	LastEnvironment string             `json:"lastEnvironment"`
-	SessionDir      string             `json:"sessionDir"`
-	Extensions      extensions.Config  `json:"extensions"`
-	Agents          []AgentProfile     `json:"agents"`
-	ActiveAgentID   string             `json:"activeAgentId"`
-	Environments    []Environment      `json:"environments"`
-	ActiveEnvID     string             `json:"activeEnvId"`
-	SSHConfigs      []SSHConfig        `json:"sshConfigs"`
-	UserProfile     UserProfile        `json:"userProfile"`
+	ConfigVersion       int                `json:"configVersion"`
+	Preferences         Preferences        `json:"preferences"`
+	Providers           []piagent.Provider `json:"providers"`
+	DefaultProvider     string             `json:"defaultProvider"`
+	DefaultModel        string             `json:"defaultModel"`
+	LastEnvironment     string             `json:"lastEnvironment"`
+	SessionDir          string             `json:"sessionDir"`
+	Extensions          extensions.Config  `json:"extensions"`
+	Agents              []AgentProfile     `json:"agents"`
+	ActiveAgentID       string             `json:"activeAgentId"`
+	Environments        []Environment      `json:"environments"`
+	ActiveEnvID         string             `json:"activeEnvId"`
+	SSHConfigs          []SSHConfig        `json:"sshConfigs"`
+	UserProfile         UserProfile        `json:"userProfile"`
+	SubagentConcurrency int                `json:"subagentConcurrency"`
+	// ToolExecutionTimeoutMinutes bounds one tool (bash) execution for every
+	// agent, in minutes. Zero means the application default (10); the effective
+	// value is clamped to 1..60 (one hour) in Normalize.
+	ToolExecutionTimeoutMinutes int `json:"toolExecutionTimeoutMinutes"`
+	// SystemNotificationEnabled gates desktop system notifications for plan
+	// approval requests and conversation completion (default on).
+	SystemNotificationEnabled bool `json:"systemNotificationEnabled"`
 }
 
 // UserProfile holds the end-user's personal identity shown in the chat UI: a
@@ -275,11 +285,14 @@ func (c AppConfig) Agent(id string) (AgentProfile, bool) {
 
 func DefaultConfig() AppConfig {
 	return AppConfig{
-		ConfigVersion: 5,
-		Preferences:   Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified"},
-		Providers:     piagent.DefaultProviders(),
-		SessionDir:    DefaultSessionDir(),
-		Extensions:    extensions.DefaultConfig(),
+		ConfigVersion:               5,
+		Preferences:                 Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small"},
+		Providers:                   piagent.DefaultProviders(),
+		SessionDir:                  DefaultSessionDir(),
+		Extensions:                  extensions.DefaultConfig(),
+		SubagentConcurrency:         subagentbridge.DefaultConcurrency,
+		SystemNotificationEnabled:   true,
+		ToolExecutionTimeoutMinutes: 10,
 	}
 }
 
@@ -293,6 +306,9 @@ func (c *AppConfig) Normalize() {
 	if c.Preferences.Language != "zh-CN" && c.Preferences.Language != "en-US" {
 		c.Preferences.Language = "zh-CN"
 	}
+	if c.Preferences.FontSize != "small" && c.Preferences.FontSize != "medium" && c.Preferences.FontSize != "large" {
+		c.Preferences.FontSize = "small"
+	}
 	if strings.TrimSpace(c.SessionDir) == "" {
 		c.SessionDir = DefaultSessionDir()
 	}
@@ -301,6 +317,15 @@ func (c *AppConfig) Normalize() {
 		c.Providers[i].Normalize()
 	}
 	c.Extensions.Normalize()
+	c.SubagentConcurrency = subagentbridge.NormalizeConcurrency(c.SubagentConcurrency)
+	// Tool execution timeout: 0 means the 10 minute default; clamp to 1..60
+	// minutes so a corrupted value can never disable or unbounded the watchdog.
+	if c.ToolExecutionTimeoutMinutes <= 0 {
+		c.ToolExecutionTimeoutMinutes = 10
+	}
+	if c.ToolExecutionTimeoutMinutes > 60 {
+		c.ToolExecutionTimeoutMinutes = 60
+	}
 	activeFound := false
 	for i := range c.Agents {
 		c.Agents[i].Normalize(i)
@@ -412,6 +437,9 @@ func (s *ConfigStore) assemble() AppConfig {
 		if setting.DiffMode != "" {
 			cfg.Preferences.DiffMode = setting.DiffMode
 		}
+		if setting.FontSize != "" {
+			cfg.Preferences.FontSize = setting.FontSize
+		}
 		cfg.Preferences.ShowIdentity = setting.ShowIdentity
 		cfg.DefaultProvider = setting.DefaultProvider
 		cfg.DefaultModel = setting.DefaultModel
@@ -433,6 +461,9 @@ func (s *ConfigStore) assemble() AppConfig {
 			Name:   setting.UserName,
 			Avatar: setting.UserAvatar,
 		}
+		cfg.SubagentConcurrency = setting.SubagentConcurrency
+		cfg.SystemNotificationEnabled = setting.SystemNotificationEnabled
+		cfg.ToolExecutionTimeoutMinutes = setting.ToolExecutionTimeoutMinutes
 	}
 
 	providers, err := s.st.ListProviders()
@@ -560,21 +591,25 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 	globalMCP, _ := json.Marshal(cfg.Extensions.GlobalMCP)
 	globalPlugins, _ := json.Marshal(cfg.Extensions.GlobalPlugins)
 	if err := s.st.SaveSetting(store.Setting{
-		Theme:           cfg.Preferences.Theme,
-		Language:        cfg.Preferences.Language,
-		AccentColor:     cfg.Preferences.AccentColor,
-		ChatLayout:      cfg.Preferences.ChatLayout,
-		ShowIdentity:    cfg.Preferences.ShowIdentity,
-		DiffMode:        cfg.Preferences.DiffMode,
-		DefaultProvider: cfg.DefaultProvider,
-		DefaultModel:    cfg.DefaultModel,
-		LastEnvironment: cfg.LastEnvironment,
-		SessionDir:      cfg.SessionDir,
-		Figma:           string(figma),
-		GlobalMCP:       string(globalMCP),
-		GlobalPlugins:   string(globalPlugins),
-		UserName:        cfg.UserProfile.Name,
-		UserAvatar:      cfg.UserProfile.Avatar,
+		Theme:                       cfg.Preferences.Theme,
+		Language:                    cfg.Preferences.Language,
+		AccentColor:                 cfg.Preferences.AccentColor,
+		ChatLayout:                  cfg.Preferences.ChatLayout,
+		ShowIdentity:                cfg.Preferences.ShowIdentity,
+		DiffMode:                    cfg.Preferences.DiffMode,
+		FontSize:                    cfg.Preferences.FontSize,
+		DefaultProvider:             cfg.DefaultProvider,
+		DefaultModel:                cfg.DefaultModel,
+		LastEnvironment:             cfg.LastEnvironment,
+		SessionDir:                  cfg.SessionDir,
+		Figma:                       string(figma),
+		GlobalMCP:                   string(globalMCP),
+		GlobalPlugins:               string(globalPlugins),
+		UserName:                    cfg.UserProfile.Name,
+		UserAvatar:                  cfg.UserProfile.Avatar,
+		SubagentConcurrency:         cfg.SubagentConcurrency,
+		SystemNotificationEnabled:   cfg.SystemNotificationEnabled,
+		ToolExecutionTimeoutMinutes: cfg.ToolExecutionTimeoutMinutes,
 	}); err != nil {
 		return err
 	}

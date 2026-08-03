@@ -1,4 +1,6 @@
 const MAX_RUNTIME_EVENTS = 200
+const MAX_TIMELINE_ITEMS = 200
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'aborted', 'timeout'])
 
 export function parseSubagentEvent(value) {
   if (typeof value !== 'string') return value
@@ -9,47 +11,149 @@ export function parseSubagentEvent(value) {
   }
 }
 
+export function resolvedSubagentStatus(outputStatus, runtimeStatus, fallback = '') {
+  const output = typeof outputStatus === 'object' ? String(outputStatus?.status || '') : String(outputStatus || '')
+  const runtimeValue = runtimeStatus && typeof runtimeStatus === 'object' ? runtimeStatus : null
+  // 对象形式的 runtime 只取 status 字段；status 缺失（如子 agent 创建瞬间首个
+  // subagent_run_started 事件不带 status）时视为无状态，绝不把整个对象字符串化
+  // 成 '[object Object]' 当作有效状态返回，否则卡片会误显示失败态。
+  const runtime = runtimeValue ? String(runtimeValue.status || '') : String(runtimeStatus || '')
+  // A durable/follow-up terminal state wins over the transient abort request.
+  if (runtime && runtime !== 'running' && runtime !== 'aborted_requested') return runtime
+  if (output && output !== 'running') return output
+  if (runtimeValue?.abortRequested && runtime === 'running') return 'aborted_requested'
+  return runtime || output || fallback
+}
+
+function mergeRuntimeStatus(previous, incoming) {
+  const oldStatus = String(previous?.status || '')
+  const nextStatus = String(incoming?.status || '')
+  if (TERMINAL_STATUSES.has(oldStatus) && nextStatus === 'running') return oldStatus
+  return nextStatus || oldStatus
+}
+
 export function mergeSubagentRuntime(detail, payload) {
+  const previousSubagent = detail?.subagent && typeof detail.subagent === 'object' ? detail.subagent : {}
   const normalized = {
+    ...previousSubagent,
     ...payload,
     event: parseSubagentEvent(payload?.event),
     receivedAt: Date.now()
   }
+  normalized.status = mergeRuntimeStatus(previousSubagent, normalized)
+  // Keep the visual abort-requested transition until a real terminal payload
+  // arrives, but never let it turn a completed/failed run back into running.
+  if (previousSubagent.abortRequested && normalized.status === 'running' && payload?.abortRequested == null) {
+    normalized.abortRequested = true
+  }
+  if (TERMINAL_STATUSES.has(normalized.status)) delete normalized.abortRequested
+
   const previous = Array.isArray(detail?.subagentEvents) ? detail.subagentEvents : []
   const events = normalized.event == null
     ? previous
     : [...previous, normalized].slice(-MAX_RUNTIME_EVENTS)
   const timeline = normalized.event == null
-    ? (detail?.subagentTimeline || [])
-    : appendSubagentTimeline(detail?.subagentTimeline, normalized.event)
+    ? limitTimeline(detail?.subagentTimeline || [])
+    : limitTimeline(appendSubagentTimeline(detail?.subagentTimeline, normalized.event))
   return {
     ...(detail || {}),
     subagent: normalized,
     subagentEvents: events,
     subagentTimeline: timeline,
-    subagentUI: applySubagentUIEvent(detail?.subagentUI, normalized.event)
+    subagentUI: applySubagentUIEvent(detail?.subagentUI, normalized.event, normalized.receivedAt)
   }
 }
 
 // 阻断式扩展 UI 状态随事件流增量维护，避免受 subagentEvents 滑动窗口
 // （MAX_RUNTIME_EVENTS）截断后丢失待应答的对话框或计划挂件。
-function applySubagentUIEvent(state, rawEvent) {
+function applySubagentUIEvent(state, rawEvent, receivedAt = Date.now()) {
   const previous = state && typeof state === 'object'
-    ? { widgets: { ...(state.widgets || {}) }, ...(state.dialog ? { dialog: state.dialog } : {}) }
-    : { widgets: {} }
+      ? {
+        widgets: { ...(state.widgets || {}) },
+        widgetUpdatedAt: { ...(state.widgetUpdatedAt || {}) },
+        widgetClearedAt: { ...(state.widgetClearedAt || {}) },
+        ...(state.dialog ? { dialog: state.dialog } : {}),
+        ...(state.dialogUpdatedAt ? { dialogUpdatedAt: state.dialogUpdatedAt } : {}),
+        ...(state.dialogClearedAt ? { dialogClearedAt: state.dialogClearedAt } : {})
+      }
+      : { widgets: {}, widgetUpdatedAt: {}, widgetClearedAt: {} }
   const event = parseSubagentEvent(rawEvent)
   if (!event || typeof event !== 'object') return previous
+  const eventAt = Number(event._recordedAt || receivedAt) || receivedAt
   if (event.type === 'extension_ui_request') {
     if (event.method === 'setWidget' && event.widgetKey) {
-      if (event.widgetLines == null) delete previous.widgets[event.widgetKey]
-      else previous.widgets[event.widgetKey] = event.widgetLines
+      if (event.widgetLines == null) {
+        delete previous.widgets[event.widgetKey]
+        previous.widgetClearedAt[event.widgetKey] = eventAt
+      } else {
+        previous.widgets[event.widgetKey] = event.widgetLines
+        previous.widgetUpdatedAt[event.widgetKey] = eventAt
+      }
     } else if (['select', 'confirm', 'input', 'editor'].includes(event.method)) {
       previous.dialog = event
+      previous.dialogUpdatedAt = eventAt
+      delete previous.dialogClearedAt
     }
   } else if (event.type === 'subagent_ui_response' && previous.dialog?.id === event.id) {
     delete previous.dialog
+    previous.dialogClearedAt = eventAt
   }
   return previous
+}
+
+export function mergeSubagentUIState(current, history) {
+  const live = current && typeof current === 'object' ? current : { widgets: {} }
+  const old = history && typeof history === 'object' ? history : { widgets: {} }
+  const liveWidgets = live.widgets || {}
+  const oldWidgets = old.widgets || {}
+  const liveUpdatedAt = live.widgetUpdatedAt || {}
+  const oldUpdatedAt = old.widgetUpdatedAt || {}
+  const liveClearedAt = live.widgetClearedAt || {}
+  const oldClearedAt = old.widgetClearedAt || {}
+  const widgets = {}
+  const widgetUpdatedAt = {}
+  const widgetClearedAt = {}
+  const widgetKeys = new Set([
+    ...Object.keys(oldWidgets), ...Object.keys(liveWidgets),
+    ...Object.keys(oldUpdatedAt), ...Object.keys(liveUpdatedAt),
+    ...Object.keys(oldClearedAt), ...Object.keys(liveClearedAt)
+  ])
+  for (const key of widgetKeys) {
+    const oldUpdate = Number(oldUpdatedAt[key] || 0)
+    const liveUpdate = Number(liveUpdatedAt[key] || 0)
+    const updateAt = Math.max(oldUpdate, liveUpdate)
+    const clearAt = Math.max(Number(oldClearedAt[key] || 0), Number(liveClearedAt[key] || 0))
+    if (updateAt) widgetUpdatedAt[key] = updateAt
+    if (clearAt) widgetClearedAt[key] = clearAt
+    if (clearAt && clearAt >= updateAt) continue
+    if (Object.prototype.hasOwnProperty.call(liveWidgets, key) && liveUpdate >= oldUpdate) {
+      widgets[key] = liveWidgets[key]
+    } else if (Object.prototype.hasOwnProperty.call(oldWidgets, key)) {
+      widgets[key] = oldWidgets[key]
+    } else if (Object.prototype.hasOwnProperty.call(liveWidgets, key)) {
+      widgets[key] = liveWidgets[key]
+    }
+  }
+  const result = {
+    widgets,
+    widgetUpdatedAt,
+    widgetClearedAt,
+    ...(live.dialog ? { dialog: live.dialog } : {}),
+    ...(live.dialogUpdatedAt ? { dialogUpdatedAt: live.dialogUpdatedAt } : {}),
+    ...(live.dialogClearedAt ? { dialogClearedAt: live.dialogClearedAt } : {})
+  }
+  const liveDialogAt = Number(live.dialog?._recordedAt || live.dialogUpdatedAt || 0)
+  const historyDialogAt = Number(old.dialog?._recordedAt || 0)
+  if (old.dialog && (!result.dialog || historyDialogAt > liveDialogAt)) {
+    const clearedAt = Number(live.dialogClearedAt || 0)
+    if (historyDialogAt > clearedAt) result.dialog = old.dialog
+  }
+  return result
+}
+
+function limitTimeline(value) {
+  const items = Array.isArray(value) ? value : []
+  return items.length > MAX_TIMELINE_ITEMS ? items.slice(-MAX_TIMELINE_ITEMS) : items
 }
 
 function timelineText(value) {
@@ -253,7 +357,7 @@ function appendSubagentTimeline(value, rawEvent) {
 
 export function subagentTimeline(value) {
   if (Array.isArray(value?.subagentTimeline)) {
-    return value.subagentTimeline.filter(item => (
+    return limitTimeline(value.subagentTimeline).filter(item => (
       item.kind !== 'thinking' || item.complete
     ))
   }
@@ -261,7 +365,7 @@ export function subagentTimeline(value) {
   const items = events.reduce((timeline, item) => (
     appendSubagentTimeline(timeline, item?.event ?? item)
   ), [])
-  return items.filter(item => item.kind !== 'thinking' || item.complete)
+  return limitTimeline(items).filter(item => item.kind !== 'thinking' || item.complete)
 }
 
 const PLAN_TOOL_NAMES = ['codingto_plan_present', 'codingto_plan_update']
@@ -314,11 +418,11 @@ export function backfillSubagentTimeline(detail, messages) {
     }
   }
   if (!existing.length) {
-    return { ...base, subagentTimeline: items, subagentBackfilled: true }
+    return { ...base, subagentTimeline: limitTimeline(items), subagentBackfilled: true }
   }
   const liveKeys = new Set(existing.map(timelineItemKey))
   const history = items.filter(item => !liveKeys.has(timelineItemKey(item)))
-  return { ...base, subagentTimeline: [...history, ...existing], subagentBackfilled: true }
+  return { ...base, subagentTimeline: limitTimeline([...history, ...existing]), subagentBackfilled: true }
 }
 
 // 工具项优先按 toolCallId 判重，其余按 kind+完成态+文本；仅用于回填历史

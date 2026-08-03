@@ -13,6 +13,8 @@ const props = defineProps({
   changes: { type: Object, default: () => ({ root: '', nodes: [], files: [], added: 0, deleted: 0 }) },
   loading: { type: Boolean, default: false },
   focusRequest: { type: Object, default: null },
+  // 变更消息行尾斜箭头发起的 Git 对比请求：定位节点/文件后复用 GitDiffDialog 打开。
+  diffRequest: { type: Object, default: null },
   t: { type: Object, required: true }
 })
 
@@ -23,15 +25,26 @@ const tabs = computed(() => [
   { id: 'web', label: props.t.changesTabWeb }
 ])
 const activeTab = ref('artifacts')
-const width = ref(390)
 const resizing = ref(false)
 const SIDEBAR_MIN = 300
 const SIDEBAR_MAX = 760
-// 下钻视图：list=时间线列表；node=节点详情（文件 diff 改为就地展开，不再跳转独立页面）
+const SIDEBAR_WIDTH_KEY = 'codingto:right-sidebar-width'
+// 拖动宽度持久化到前端 localStorage：刷新/重启后保持用户调整的宽度。
+function loadSavedSidebarWidth() {
+  try {
+    const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+    if (Number.isFinite(raw) && raw >= SIDEBAR_MIN && raw <= SIDEBAR_MAX) return raw
+  } catch { /* 存储不可用时回退默认宽度 */ }
+  return 390
+}
+function persistSidebarWidth(value) {
+  try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(value)) } catch { /* ignore */ }
+}
+const width = ref(loadSavedSidebarWidth())
+// 视图状态：list=时间线列表；文件 diff 通过 GitDiffDialog 弹窗查看（不再就地展开）
 const view = ref({ type: 'list' })
 const changeNodes = computed(() => props.changes?.nodes || [])
 const expandedNodes = ref(new Set())
-const expandedFiles = ref(new Set())
 // 节点按 startedAt 升序（时间线从早到晚）
 const timelineNodes = computed(() =>
   [...changeNodes.value].sort((a, b) => (Number(a.startedAt) || 0) - (Number(b.startedAt) || 0))
@@ -89,16 +102,11 @@ watch(
   }
 )
 
-// 展开状态独立于后台刷新：节点持续新增文件时，保留用户正在查看的节点和 diff。
-// 切换会话或文件消失时，仅清理已经不在当前数据中的展开项。
+// 展开状态独立于后台刷新：节点持续新增文件时，保留用户正在查看的节点。
+// 切换会话或节点消失时，仅清理已经不在当前数据中的展开项。
 watch(changeNodes, (nodes) => {
   const nodeIds = new Set(nodes.map(node => node.id))
   expandedNodes.value = new Set([...expandedNodes.value].filter(id => nodeIds.has(id)))
-
-  const currentFiles = new Set(nodes.flatMap(node =>
-    (node.files || []).map(file => fileKey(node.id, file.path, file.source))
-  ))
-  expandedFiles.value = new Set([...expandedFiles.value].filter(key => currentFiles.has(key)))
 })
 
 async function focusChangedFile() {
@@ -107,18 +115,7 @@ async function focusChangedFile() {
   activeTab.value = 'artifacts'
   view.value = { type: 'list' }
   if (request.nodeId) {
-    const node = changeNodes.value.find(item => item.id === request.nodeId)
-    const file = node?.files?.find(item => (
-      item.path === request.path &&
-      (!request.source?.runId || item.source?.runId === request.source.runId)
-    ))
     expandedNodes.value = new Set([...expandedNodes.value, request.nodeId])
-    if (request.path) {
-      expandedFiles.value = new Set([
-        ...expandedFiles.value,
-        fileKey(request.nodeId, request.path, file?.source)
-      ])
-    }
   }
   await nextTick()
   if (request.path) {
@@ -146,6 +143,39 @@ watch(
     ).join('|')
   ],
   focusChangedFile
+)
+
+// 变更消息斜箭头：定位节点/文件后弹出 Git 对比框。右侧边栏数据是异步刷新的，
+// 节点可能晚于请求到达，因此 watch 节点摘要，数据就绪后自动重试一次。
+let diffRequestHandledNonce = 0
+function openRequestedFileDiff() {
+  const request = props.diffRequest
+  if (!request?.path || !request.nodeId) return
+  const node = changeNodes.value.find(item => String(item.id) === String(request.nodeId))
+  if (!node || diffRequestHandledNonce === request.nonce) return
+  activeTab.value = 'artifacts'
+  view.value = { type: 'list' }
+  expandedNodes.value = new Set([...expandedNodes.value, request.nodeId])
+  const files = sortedFiles(node)
+  // 同一节点内主/子代理可能修改同一路径文件，必须连同 source 一起匹配，
+  // 否则会命中排序后的第一个同 path 文件，打开错误来源的快照。
+  const index = files.findIndex(item =>
+    item.path === request.path && sourceKey(item.source) === sourceKey(request.source)
+  )
+  // 节点文件被后端剔除（如已还原到基线）时暂不打开：不标记 handled，
+  // 保留 pending 等待后续节点摘要变化重试（配合侧边栏关闭时清空请求避免幽灵弹窗）。
+  if (index === -1) return
+  diffRequestHandledNonce = request.nonce
+  openNodeFileDiff(node, files[index], index)
+}
+watch(
+  [
+    () => props.diffRequest?.nonce,
+    () => changeNodes.value.map(node =>
+      `${node.id}:${(node.files || []).map(file => file.path).join(',')}`
+    ).join('|')
+  ],
+  openRequestedFileDiff
 )
 
 function formatText(template, values) {
@@ -198,22 +228,26 @@ function toggleNode(id) {
   expandedNodes.value = next
 }
 
-// 点击文件：就地展开/收起 diff，不跳转到独立文件页
+// 点击文件：弹出 Git 对比框（复用 git tab 的 GitDiffDialog），不再在侧边栏就地展开。
+// scope 固定为 worktree（节点编辑即工作区未提交变更）；文件附带节点快照 hunks，
+// 供 GitDiffDialog 在 git 实时对比不可用（非 git 仓库 / 文件已提交）时回退渲染。
 function sourceKey(source) {
   return source ? `${source.agentKey || ''}:${source.runId || ''}:${source.nodeId || ''}` : 'main'
 }
 function fileKey(nodeId, path, source) {
   return `${nodeId}::${sourceKey(source)}::${path}`
 }
-function isFileOpen(nodeId, path, source) {
-  return expandedFiles.value.has(fileKey(nodeId, path, source))
-}
-function toggleFile(nodeId, path, source) {
-  const key = fileKey(nodeId, path, source)
-  const next = new Set(expandedFiles.value)
-  if (next.has(key)) next.delete(key)
-  else next.add(key)
-  expandedFiles.value = next
+function openNodeFileDiff(node, file, index) {
+  const files = sortedFiles(node).map(item => ({
+    path: item.path,
+    oldPath: item.oldPath || '',
+    status: item.status,
+    added: item.added || 0,
+    deleted: item.deleted || 0,
+    binary: item.binary || false,
+    hunks: item.hunks || []
+  }))
+  gitDialog.value = { open: true, scope: 'worktree', files, index }
 }
 
 function filename(path) {
@@ -383,15 +417,6 @@ function nodeTime(node) {
   if (!value) return ''
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
-
-function lineClass(kind) {
-  return kind === 'added' ? 'is-added' : kind === 'deleted' ? 'is-deleted' : 'is-context'
-}
-
-function lineSign(kind) {
-  return kind === 'added' ? '+' : kind === 'deleted' ? '-' : ' '
-}
-
 function startResize(event) {
   event.preventDefault()
   resizing.value = true
@@ -406,6 +431,7 @@ function startResize(event) {
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
     resizing.value = false
+    persistSidebarWidth(width.value)
   }
   document.addEventListener('pointermove', onMove)
   document.addEventListener('pointerup', onUp)
@@ -498,16 +524,14 @@ function startResize(event) {
                     <span>{{ t.changesTabFiles }}</span>
                     <small>{{ sortedFiles(node).length }}</small>
                   </div>
-                  <template v-for="file in sortedFiles(node)" :key="fileKey(node.id, file.path, file.source)">
+                  <template v-for="(file, fileIndex) in sortedFiles(node)" :key="fileKey(node.id, file.path, file.source)">
                     <button
                       class="timeline__file"
                       type="button"
-                      :class="{ 'is-open': isFileOpen(node.id, file.path, file.source) }"
                       :title="file.path"
                       :data-node-id="node.id"
                       :data-file-path="file.path"
-                      :aria-expanded="isFileOpen(node.id, file.path, file.source)"
-                      @click="toggleFile(node.id, file.path, file.source)"
+                      @click="openNodeFileDiff(node, file, fileIndex)"
                     >
                       <component :is="fileIcon(file.status)" class="timeline__file-icon" :class="`is-${file.status}`" :size="14" />
                       <span class="timeline__file-path">
@@ -522,23 +546,7 @@ function startResize(event) {
                           <span class="change-count change-count--deleted">-{{ file.deleted }}</span>
                         </template>
                       </span>
-                      <ChevronRight class="timeline__file-chevron" :size="13" />
                     </button>
-                    <div v-if="isFileOpen(node.id, file.path, file.source)" class="timeline__filediff">
-                      <p v-if="file.binary" class="change-file__notice">{{ t.binaryChangeNotice }}</p>
-                      <template v-else-if="file.hunks?.length">
-                        <div v-for="(hunk, index) in file.hunks" :key="index" class="diff-hunk">
-                          <div class="diff-hunk__header">{{ hunk.header }}</div>
-                          <div v-for="(line, lineIndex) in hunk.lines" :key="lineIndex" class="diff-line" :class="lineClass(line.kind)">
-                            <span class="diff-line__number">{{ line.oldNumber || '' }}</span>
-                            <span class="diff-line__number">{{ line.newNumber || '' }}</span>
-                            <span class="diff-line__sign">{{ lineSign(line.kind) }}</span>
-                            <code>{{ line.text }}</code>
-                          </div>
-                        </div>
-                      </template>
-                      <p v-else class="change-file__notice">{{ t.fileChangedNotice }}</p>
-                    </div>
                   </template>
                 </section>
 

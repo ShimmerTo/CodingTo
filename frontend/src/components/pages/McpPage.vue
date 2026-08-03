@@ -409,7 +409,7 @@ async function submitManualMCP() {
   gap: 12px;
 }
 .manual-mcp-hint {
-  font-size: 12px;
+  font-size: var(--fs-12);
   opacity: 0.7;
   margin: 0;
 }
@@ -417,7 +417,7 @@ async function submitManualMCP() {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
 }
 .manual-mcp-field input,
@@ -431,7 +431,7 @@ async function submitManualMCP() {
   padding: 0 10px;
   color: var(--text);
   background: var(--surface);
-  font-size: 13px;
+  font-size: var(--fs-13);
 }
 .manual-mcp-field textarea {
   height: auto;
@@ -447,7 +447,7 @@ async function submitManualMCP() {
 .manual-mcp-env {
   resize: vertical;
   font-family: var(--font-mono, monospace);
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .manual-mcp-json-link {
   display: inline;
@@ -455,7 +455,7 @@ async function submitManualMCP() {
   padding: 0;
   background: none;
   color: var(--link);
-  font-size: 12px;
+  font-size: var(--fs-12);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -466,12 +466,12 @@ async function submitManualMCP() {
 .manual-mcp-json {
   resize: vertical;
   font-family: var(--font-mono, monospace);
-  font-size: 12px;
+  font-size: var(--fs-12);
   white-space: pre;
 }
 .manual-mcp-error {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--danger);
 }
 .manual-mcp-field input.input-error {
@@ -484,7 +484,7 @@ async function submitManualMCP() {
   margin: 0;
 }
 .manual-mcp-agents legend {
-  font-size: 13px;
+  font-size: var(--fs-13);
   font-weight: 500;
   padding: 0 4px;
 }
@@ -493,7 +493,7 @@ async function submitManualMCP() {
   align-items: center;
   gap: 8px;
   padding: 4px 0;
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
 }
 .mcp-entry-agents {
@@ -503,7 +503,7 @@ async function submitManualMCP() {
   gap: 5px;
   margin-top: 8px;
   color: var(--faint);
-  font-size: 11px;
+  font-size: var(--fs-12);
 }
 .mcp-entry-agents b {
   padding: 3px 7px;

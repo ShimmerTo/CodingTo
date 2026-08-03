@@ -143,7 +143,7 @@ onBeforeUnmount(() => {
   background: transparent;
   border: none;
   color: var(--muted);
-  font-size: 22px;
+  font-size: var(--fs-14);
   line-height: 1;
   cursor: pointer;
 }
@@ -158,7 +158,7 @@ onBeforeUnmount(() => {
 .ilm-log {
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  font-size: var(--fs-13);
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -170,7 +170,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--fs-12);
 }
 .ilm-state {
   font-weight: 600;

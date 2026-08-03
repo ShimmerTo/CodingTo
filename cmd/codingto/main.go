@@ -13,6 +13,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 )
 
 func main() {
@@ -48,12 +49,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	notificationService := notifications.New()
 
 	app := application.New(application.Options{
 		Name:        "CodingTo",
 		Description: "A focused local-first desktop workspace for Pi Agent.",
 		Services: []application.Service{
 			application.NewService(appService),
+			application.NewService(notificationService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(Assets),

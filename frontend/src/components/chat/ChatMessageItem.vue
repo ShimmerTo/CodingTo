@@ -1,8 +1,8 @@
 <script setup>
-import { computed, getCurrentInstance, nextTick, ref, watch } from 'vue'
+import { computed, getCurrentInstance, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import {
-  AlertCircle, Bot, CheckCircle2, ChevronDown, ChevronRight, File, FileAudio,
-  FileCode2, FilePlus2, FileText, FileVideo, FileX2, GitBranch, Image, LoaderCircle, User
+  AlertCircle, ArrowUpRight, Bot, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, File,
+  FileAudio, FileCode2, FilePlus2, FileText, FileVideo, FileX2, GitBranch, Image, LoaderCircle, User
 } from 'lucide-vue-next'
 import { openExternal, openSessionArtifact } from '../../backend.js'
 import { localFileURL } from '../../localFileUrl.js'
@@ -19,7 +19,11 @@ import { isImageAvatar } from '../../composables/appContext.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
-  sessionId: { type: Number, required: true },
+  // 会话级渲染由 ChatMessages 传入；该组件在子 Agent 卡片内通过
+  // :is="messageItemComponent" 递归渲染子消息时不会透传 sessionId，
+  // 故此处设为可选，避免无意义的「Missing required prop」告警。
+  // sessionId 仅用于 DocumentDownloadList，子代理工具消息不会出现该组件。
+  sessionId: { type: Number, default: 0 },
   agents: { type: Array, default: () => [] },
   now: { type: Number, required: true },
   t: { type: Object, required: true },
@@ -32,7 +36,7 @@ const props = defineProps({
   showIdentity: { type: Boolean, default: true }
 })
 
-const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-subagent-details'])
+const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'open-subagent-details'])
 const messageItemComponent = getCurrentInstance()?.type
 
 function attachmentKindIcon(kind) {
@@ -95,6 +99,22 @@ const documentDownloadList = computed(() => {
 })
 const isSubagentTool = computed(() => isSubagentRunTool(props.message))
 const isUser = computed(() => props.message.role === 'user')
+// 用户问题复制：点击复制问题原文，短暂显示“已复制”后回落。
+const copied = ref(false)
+let copyResetTimer = 0
+async function copyUserMessage() {
+  const text = String(props.message.content || '')
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    copied.value = true
+    clearTimeout(copyResetTimer)
+    copyResetTimer = window.setTimeout(() => { copied.value = false }, 1600)
+  } catch {
+    // 剪贴板不可用时静默失败，不打断阅读。
+  }
+}
+onBeforeUnmount(() => { clearTimeout(copyResetTimer) })
 const readTool = computed(() => isReadTool(props.message))
 const readMeta = computed(() => readToolMeta(props.message) || { path: '', params: [] })
 const readBlocks = computed(() => readToolBlocks(props.message) || [])
@@ -102,6 +122,10 @@ const toolNameSlug = computed(() => {
   const raw = toolName(props.message).toLowerCase().replace(/[^a-z0-9]+/g, '-')
   return raw.replace(/^-+|-+$/g, '') || 'tool'
 })
+// 基础工具（edit/read/write/bash）已有专属图标，展示时省略工具名文本，
+// 避免图标+名称重复占用一行空间；其余工具仍显示名称。
+const BASIC_ICON_ONLY_TOOLS = /^(?:edit|read|write|bash)$/i
+const hideToolName = computed(() => BASIC_ICON_ONLY_TOOLS.test(toolName(props.message)))
 const agentAvatarValue = computed(() => props.agentAvatar || '')
 const userAvatarValue = computed(() => props.userAvatar || '')
 // 子 Agent 执行块（引用块形态）自带名称行且块内不显示任何头像，外层节点不再渲染头像列。
@@ -114,6 +138,12 @@ const changedFiles = computed(() =>
 // 本次问题未改动任何文件时，整条变更消息不渲染（历史缓存也可能带空 files）。
 const isEmptyChangeMessage = computed(
   () => props.message.role === 'changes' && changedFiles.value.length === 0
+)
+// 文件列表默认只展示前 5 项，超出部分由底部「显示全部」小按钮展开，避免变更消息过长。
+const MAX_VISIBLE_CHANGED_FILES = 5
+const filesExpanded = ref(false)
+const visibleChangedFiles = computed(() =>
+  filesExpanded.value ? changedFiles.value : changedFiles.value.slice(0, MAX_VISIBLE_CHANGED_FILES)
 )
 
 function changeFileIcon(status) {
@@ -134,6 +164,17 @@ function changeFileDir(path) {
 
 function openChangedFile(file) {
   emit('open-change-file', {
+    nodeId: props.message.changes?.nodeId || '',
+    path: file.path,
+    source: file.source,
+  })
+}
+
+// 行尾斜箭头：直接弹出该文件的 Git 对比框（上层 ChatRightSidebar 复用唯一 GitDiffDialog 打开）。
+// 注：changes 消息只出现在主会话时间线，SubAgentCard 内递归渲染的子代理消息无 changes 角色，
+// 故子代理卡片内部无需透传 open-git-diff 事件。
+function openGitDiff(file) {
+  emit('open-git-diff', {
     nodeId: props.message.changes?.nodeId || '',
     path: file.path,
     source: file.source,
@@ -237,7 +278,7 @@ watch(() => props.message.thinkingContent, async () => {
             <CheckCircle2 v-else :size="13" />
           </span>
           <span>{{ thinkingStateText() }}</span>
-          <small v-if="thinkingTimeText()">{{ thinkingTimeText() }}</small>
+          <small v-if="thinkingTimeText()" :title="thinkingTimeText()">{{ thinkingTimeText() }}</small>
           <ChevronDown class="details-chevron" :size="13" />
         </summary>
         <pre ref="thinkingPreRef">{{ message.thinkingContent.replace(/\u200B/g, '') }}</pre>
@@ -261,13 +302,18 @@ watch(() => props.message.thinkingContent, async () => {
           </span>
         </header>
         <div v-if="changedFiles.length" class="change-message__files">
-          <button
-            v-for="file in changedFiles"
+          <!-- 外层用 div role=button（非 button 嵌套 button），支持行内独立「Git 对比」斜箭头按钮 -->
+          <div
+            v-for="file in visibleChangedFiles"
             :key="`${file.source?.runId || 'main'}:${file.path}`"
             class="change-message__file"
-            type="button"
+            role="button"
+            tabindex="0"
             :title="t.changeMessageOpenFile.replace('{path}', file.path)"
+            :aria-label="t.changeMessageOpenFile.replace('{path}', file.path)"
             @click="openChangedFile(file)"
+            @keydown.enter.self="openChangedFile(file)"
+            @keydown.space.self.prevent="openChangedFile(file)"
           >
             <component :is="changeFileIcon(file.status)" :size="14" :class="`is-${file.status}`" />
             <span class="change-message__path">
@@ -281,7 +327,25 @@ watch(() => props.message.thinkingContent, async () => {
                 <b class="is-deleted">-{{ file.deleted || 0 }}</b>
               </template>
             </span>
-            <ChevronRight :size="13" />
+            <button
+              class="change-message__diff"
+              type="button"
+              :title="t.changeMessageDiff"
+              :aria-label="t.changeMessageDiff"
+              @click.stop="openGitDiff(file)"
+            >
+              <ArrowUpRight :size="13" />
+            </button>
+          </div>
+          <button
+            v-if="changedFiles.length > MAX_VISIBLE_CHANGED_FILES"
+            class="change-message__more"
+            type="button"
+            @click="filesExpanded = !filesExpanded"
+          >
+            <ChevronDown v-if="!filesExpanded" :size="12" />
+            <ChevronUp v-else :size="12" />
+            <span>{{ filesExpanded ? t.changeMessageCollapse : t.changeMessageShowAll.replace('{count}', changedFiles.length) }}</span>
           </button>
         </div>
       </section>
@@ -309,7 +373,7 @@ watch(() => props.message.thinkingContent, async () => {
             <LoaderCircle v-else class="spin" :size="14" />
           </span>
           <span class="tool-call__icon"><component :is="toolIcon(message)" :size="13" /></span>
-          <span class="tool-call__name">{{ toolName(message) }}</span>
+          <span v-if="!hideToolName" class="tool-call__name">{{ toolName(message) }}</span>
           <a
             v-if="toolUrl(message)"
             class="tool-call__link"
@@ -348,7 +412,7 @@ watch(() => props.message.thinkingContent, async () => {
             <LoaderCircle v-else class="spin" :size="14" />
           </span>
           <span class="tool-call__icon"><component :is="toolIcon(message)" :size="13" /></span>
-          <span class="tool-call__name">{{ toolName(message) }}</span>
+          <span v-if="!hideToolName" class="tool-call__name">{{ toolName(message) }}</span>
           <span class="tool-call__file" :title="readMeta.path">{{ readMeta.path }}</span>
           <span v-if="readMeta.params.length" class="tool-call__params">{{ readMeta.params.join(', ') }}</span>
           <ChevronDown class="details-chevron" :size="13" />
@@ -371,6 +435,19 @@ watch(() => props.message.thinkingContent, async () => {
         <AlertCircle :size="15" />
         <span class="message-error__text">{{ message.content }}</span>
       </div>
+      <!-- 用户问题复制按钮：位于 v-if/v-else-if 渲染链之后，不打断分支配对。 -->
+      <button
+        v-if="isUser && message.content"
+        class="message-copy-btn"
+        type="button"
+        :title="copied ? t.copiedMessage : t.copyMessage"
+        :aria-label="copied ? t.copiedMessage : t.copyMessage"
+        @click="copyUserMessage"
+      >
+        <Check v-if="copied" :size="12" />
+        <Copy v-else :size="12" />
+        <span>{{ copied ? t.copiedMessage : t.copyMessage }}</span>
+      </button>
     </div>
   </article>
 </template>

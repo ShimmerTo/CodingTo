@@ -1,11 +1,12 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { Bot, CheckCircle2, FileCode2, LoaderCircle, Square, XCircle } from 'lucide-vue-next'
+import { Bot, CheckCircle2, Clock, FileCode2, LoaderCircle, Square, XCircle } from 'lucide-vue-next'
 import { abortSubagent, getSubagentTranscript } from '../../backend.js'
 import { formatDuration } from './chatFormatters.js'
 import { toolInput, toolOutput, toolStatus } from './chatToolPresentation.js'
 import {
-  backfillSubagentTimeline, subagentActivity, subagentTimelineMessages, subagentUIState
+  backfillSubagentTimeline, mergeSubagentRuntime, mergeSubagentUIState, resolvedSubagentStatus, subagentActivity,
+  subagentTimelineMessages, subagentUIState
 } from './subagentRuntime.js'
 import SubAgentInteraction from './SubAgentInteraction.vue'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext.js'
@@ -51,7 +52,14 @@ const outputResult = computed(() => (
 const runtime = computed(() => props.message.detail?.subagent || (
   findObject(props.message.detail, value => value.kind === 'subagent_event') || {}
 ))
-const result = computed(() => Object.keys(outputResult.value).length ? outputResult.value : runtime.value)
+const result = computed(() => {
+  const output = outputResult.value
+  const live = runtime.value
+  const status = resolvedSubagentStatus(output.status, live)
+  if (live.status && live.status !== 'running') return { ...output, ...live, status }
+  if (Object.keys(output).length) return { ...live, ...output, status }
+  return { ...live, status }
+})
 const runId = computed(() => result.value.runId || runtime.value.runId || '')
 const agentKey = computed(() => result.value.agentKey || runtime.value.agentKey || input.value.key || props.t.subagentUnknown)
 const agentName = computed(() => (
@@ -85,9 +93,19 @@ const displayMessages = computed(() => {
   const text = String(result.value.text || '')
   return text ? [{ id: 'subagent-result', role: 'assistant', content: text, live: false }] : []
 })
-const displayVersion = computed(() => displayMessages.value.map(message => (
-  `${message.id}:${message.content?.length || 0}:${message.thinkingContent?.length || 0}:${message.detail?.status || ''}:${message.detail?.output?.length || 0}`
-)).join('|'))
+const displayVersion = computed(() => {
+  const messages = displayMessages.value
+  // 空 timeline（子 agent 任务刚派发、尚无任何事件）时 indexes 必须为空数组，
+  // 否则 messages[0] 为 undefined，message.id 抛 TypeError 导致整个卡片渲染崩溃。
+  const indexes = messages.length
+    ? [0, Math.floor(messages.length / 2), messages.length - 1]
+      .filter((index, position, all) => index >= 0 && all.indexOf(index) === position)
+    : []
+  return `${messages.length}:${indexes.map(index => {
+    const message = messages[index]
+    return `${message?.id ?? ''}:${message?.content?.length || 0}:${message?.thinkingContent?.length || 0}:${message?.detail?.status || ''}:${message?.detail?.output == null ? 0 : String(message.detail.output).length}`
+  }).join(';')}`
+})
 const uiState = computed(() => subagentUIState(props.message.detail))
 const sessionId = computed(() => {
   const value = findObject(props.message.detail, object => (
@@ -101,10 +119,17 @@ const duration = computed(() => {
 })
 const statusLabel = computed(() => {
   if (status.value === 'running') return props.t.subagentRunning
+  if (status.value === 'aborted_requested') return props.t.subagentAborting
   if (status.value === 'completed') return props.t.subagentCompleted
   if (status.value === 'timeout') return props.t.subagentTimeout
   if (status.value === 'aborted') return props.t.subagentAborted
   return props.t.subagentFailed
+})
+// 任务简述：取自 codingto_subagent run 入参的 task 字段，用于在卡片顶部
+// 直接展示当前子 agent 正在做什么，无需展开详情。
+const taskText = computed(() => {
+  const value = input.value && typeof input.value === 'object' && !Array.isArray(input.value) ? input.value : {}
+  return String(value.task || '').trim()
 })
 // 距最后一次实时事件已过去的秒数。子 agent 的模型如果一次性返回（无流式
 // token），事件会长时间中断，此时用 idle 提示替代“正在运行”的空转感。
@@ -118,7 +143,8 @@ const idleSeconds = computed(() => {
   return Math.max(0, Math.floor(((props.now || Date.now()) - lastEventAt.value) / 1000))
 })
 const statusText = computed(() => {
-  if (status.value !== 'running') return statusLabel.value
+  if (status.value !== 'running' && status.value !== 'aborted_requested') return statusLabel.value
+
   if (activity.value) return activity.value
   if (idleSeconds.value >= 5) return `${props.t.subagentThinking} (${idleSeconds.value}s)`
   return statusLabel.value
@@ -141,6 +167,17 @@ async function ensureBackfill() {
   try {
     const history = await getSubagentTranscript(sessionId.value, runId.value)
     if (requestedRunKey !== `${sessionId.value}:${runId.value}`) return
+    if (history?.subagent) {
+      props.message.detail = mergeSubagentRuntime(props.message.detail, {
+        kind: 'subagent_event', ...history.subagent, event: null
+      })
+    }
+    if (history?.subagentUi) {
+      props.message.detail = {
+        ...props.message.detail,
+        subagentUI: mergeSubagentUIState(props.message.detail?.subagentUI, history.subagentUi)
+      }
+    }
     props.message.detail = backfillSubagentTimeline(props.message.detail, history?.messages || [])
   } catch {
     // 实时事件流仍可正常渲染，回填失败仅影响历史补齐。
@@ -176,12 +213,12 @@ async function abortRun() {
   aborting.value = true
   try {
     await abortSubagent(sessionId.value, runId.value)
-    // Optimistic update: flip the card to aborted right away; the backend's
-    // tool_execution_end for this run will confirm the final state.
+    // Abort is a request, not proof of a terminal state. Keep the run visibly
+    // in the stopping transition until run.json/follow-up confirms aborted.
     const detail = props.message.detail || {}
     props.message.detail = {
       ...detail,
-      subagent: { ...(detail.subagent || {}), status: 'aborted' },
+      subagent: { ...(detail.subagent || {}), status: 'running', abortRequested: true },
     }
   } catch (err) {
     emit('artifact-error', String(err?.message || err))
@@ -215,15 +252,18 @@ function openDetails() {
       </span>
       <strong class="subagent-card__name">{{ agentName }}</strong>
       <span class="subagent-card__state" :title="statusText">
-        <LoaderCircle v-if="status === 'running'" class="spin" :size="13" />
+        <LoaderCircle v-if="status === 'running' || status === 'aborted_requested'" class="spin" :size="13" />
         <CheckCircle2 v-else-if="status === 'completed'" :size="13" />
         <XCircle v-else :size="13" />
       </span>
-      <span class="subagent-card__status">{{ statusText }}<small v-if="duration"> · {{ formatDuration(duration) }}</small></span>
+      <span class="subagent-card__status">{{ statusText }}</span>
+      <span v-if="duration" class="subagent-card__duration" :title="t.subagentElapsed">
+        <Clock :size="11" />{{ formatDuration(duration) }}
+      </span>
       <span class="subagent-card__spacer"></span>
       <button type="button" :disabled="!runId" @click="openDetails">{{ t.subagentDetails }}</button>
       <button
-        v-if="status === 'running'"
+        v-if="status === 'running' || status === 'aborted_requested'"
         type="button"
         class="subagent-card__abort"
         :disabled="aborting"
@@ -235,6 +275,7 @@ function openDetails() {
         <Square v-else :size="12" />
       </button>
     </header>
+    <div v-if="taskText" class="subagent-card__task" :title="taskText">{{ taskText }}</div>
 
     <div ref="conversationEl" class="subagent-card__conversation" aria-live="polite" @scroll.passive="onConversationScroll">
       <component
@@ -286,43 +327,50 @@ function openDetails() {
 </template>
 
 <style scoped>
-/* 引用块形态：无边框卡片，仅左侧高亮色条，随内容自动扩展高度（最多对话区 3/5）。
-   头像与名字并列在引用块顶部 header 左侧。 */
-.subagent-card { width: 80%; max-height: 60vh; min-height: 0; display: flex; flex-direction: row; align-items: flex-start; text-align: left; }
-.subagent-card__avatar { flex: 0 0 22px; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: #546fa5; font-size: 12px; line-height: 1; user-select: none; position: relative; overflow: hidden; }
-.subagent-card__avatar-emoji { font-size: 15px; }
+/* 引用块形态：顶部高亮色条（运行中为琥珀色渐变），顶部圆角，随内容自动扩展
+   高度（最多对话区 44/100，比之前更紧凑）。头像与名字并列在顶部 header 左侧。 */
+.subagent-card { width: 80%; max-height: 44vh; min-height: 0; display: flex; flex-direction: row; align-items: flex-start; text-align: left; }
+.subagent-card__avatar { flex: 0 0 22px; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: #546fa5; font-size: var(--fs-12); line-height: 1; user-select: none; position: relative; overflow: hidden; }
+.subagent-card__avatar-emoji { font-size: var(--fs-14); }
 .subagent-card__avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
-.subagent-card__body { flex: 1 1 auto; min-width: 0; max-height: 60vh; display: flex; flex-direction: column; border-left: 3px solid var(--amber); border-radius: 0 10px 10px 0; background: color-mix(in srgb, var(--surface-2) 45%, transparent); overflow: hidden; }
-.subagent-card.is-completed .subagent-card__body { border-left-color: var(--success); }
-.subagent-card.is-failed .subagent-card__body,.subagent-card.is-timeout .subagent-card__body,.subagent-card.is-aborted .subagent-card__body { border-left-color: var(--danger); }
+.subagent-card__body { flex: 1 1 auto; min-width: 0; min-height: 200px; max-height: 44vh; display: flex; flex-direction: column; border-top: 3px solid var(--amber); border-radius: 10px 10px 0 0; background: color-mix(in srgb, var(--surface-2) 45%, transparent); overflow: hidden; }
+/* 运行中：顶部上边框改为高亮渐变（琥珀→透明渐隐），与右侧问题导航的 agent 横杠呼应；
+   结束态回落到纯色（成功绿 / 失败红）。 */
+.subagent-card.is-running .subagent-card__body, .subagent-card.is-aborted_requested .subagent-card__body { border-top-color: transparent; background: linear-gradient(90deg, color-mix(in srgb, var(--amber) 70%, transparent), color-mix(in srgb, var(--amber) 18%, transparent)) top / 100% 3px no-repeat, color-mix(in srgb, var(--surface-2) 45%, transparent); }
+.subagent-card.is-completed .subagent-card__body { border-top-color: var(--success); }
+.subagent-card.is-failed .subagent-card__body,.subagent-card.is-timeout .subagent-card__body,.subagent-card.is-aborted .subagent-card__body { border-top-color: var(--danger); }
 .subagent-card__body > header { flex: 0 0 auto; min-height: 34px; display: flex; align-items: center; gap: 7px; padding: 5px 10px; }
+.subagent-card__task { flex: 0 0 auto; min-width: 0; display: block; padding: 2px 10px 6px; overflow: hidden; color: var(--muted); font-size: var(--fs-12); line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__task::before { content: '· '; color: var(--amber); }
 .subagent-card__state { flex: 0 0 auto; display: inline-flex; color: var(--amber); }
 .subagent-card.is-completed .subagent-card__state { color: var(--success); }
 .subagent-card.is-failed .subagent-card__state,.subagent-card.is-timeout .subagent-card__state,.subagent-card.is-aborted .subagent-card__state { color: var(--danger); }
-.subagent-card__name { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-card__status { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-card__status small { color: inherit; font-variant-numeric: tabular-nums; }
+.subagent-card__name { flex: 0 1 auto; min-width: 0; overflow: hidden; font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__status { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__duration { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 9px; color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); font-size: var(--fs-12); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.subagent-card.is-completed .subagent-card__duration { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.subagent-card.is-failed .subagent-card__duration,.subagent-card.is-timeout .subagent-card__duration,.subagent-card.is-aborted .subagent-card__duration { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .subagent-card__spacer { flex: 1 1 auto; }
-.subagent-card__body > header button { flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: transparent; font-size: 11px; cursor: pointer; }
+.subagent-card__body > header button { flex: 0 0 auto; padding: 3px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: transparent; font-size: var(--fs-12); cursor: pointer; }
 .subagent-card__body > header button:hover:not(:disabled) { background: var(--surface-2); }
 .subagent-card__body > header button:disabled { opacity: .45; cursor: default; }
 .subagent-card__body > header button.subagent-card__abort { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; color: var(--danger); }
 .subagent-card__body > header button.subagent-card__abort:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, var(--surface-2)); }
-.subagent-card__conversation { min-height: 0; flex: 1 1 auto; display: block; padding: 4px 10px 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.subagent-card__conversation { min-height: 108px; flex: 1 1 auto; display: block; margin: 0 6px 6px; padding: 4px 8px 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--border) transparent; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); }
 .subagent-card__conversation :deep(.message) { width: 100%; margin-bottom: 4px; }
 .subagent-card__conversation :deep(.message-body) { width: 100%; max-width: 100%; }
-.subagent-card__conversation :deep(.message-bubble) { padding: 8px 10px; font-size: 12px; }
-.subagent-card__conversation :deep(.message-markdown) { font-size: 12px; line-height: 1.55; }
+.subagent-card__conversation :deep(.message-bubble) { padding: 8px 10px; font-size: var(--fs-12); }
+.subagent-card__conversation :deep(.message-markdown) { font-size: var(--fs-12); line-height: 1.55; }
 .subagent-card__conversation :deep(.tool-call) { width: 100%; max-width: 100%; }
-.subagent-card__conversation :deep(.tool-call summary) { min-height: 30px; padding: 4px 7px; font-size: 11px; }
-.subagent-card__conversation :deep(.tool-call__name),.subagent-card__conversation :deep(.tool-call__summary) { font-size: 11px; }
-.subagent-card__conversation :deep(.tool-call__details pre) { max-height: min(22vh, 160px); font-size: 11px; }
+.subagent-card__conversation :deep(.tool-call summary) { min-height: 30px; padding: 4px 7px; font-size: var(--fs-12); }
+.subagent-card__conversation :deep(.tool-call__name),.subagent-card__conversation :deep(.tool-call__summary) { font-size: var(--fs-12); }
+.subagent-card__conversation :deep(.tool-call__details pre) { max-height: min(22vh, 160px); font-size: var(--fs-12); }
 .subagent-card__conversation :deep(.thinking-block) { max-width: 100%; }
-.subagent-card__conversation :deep(.thinking-block pre) { max-height: min(36vh, 320px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; font-size: 11px !important; }
-.subagent-card__conversation :deep(.message-error) { font-size: 12px; }
+.subagent-card__conversation :deep(.thinking-block pre) { max-height: min(36vh, 320px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; font-size: var(--fs-12) !important; }
+.subagent-card__conversation :deep(.message-error) { font-size: var(--fs-12); }
 .subagent-card__body > :deep(.subagent-interaction),.subagent-card__files { flex: 0 0 auto; }
 .subagent-card__files { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 10px 8px; }
-.subagent-card__files span { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; padding: 3px 7px; overflow: hidden; border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-card__files span { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; padding: 3px 7px; overflow: hidden; border-radius: 6px; color: var(--muted); background: var(--surface); font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) {
   .subagent-card { width: 100%; }
   .subagent-card__status { display: none; }

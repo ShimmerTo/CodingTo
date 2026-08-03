@@ -20,6 +20,26 @@ import (
 const maxConcurrentSessionRuntimes = 4
 const defaultModelFirstResponseTimeout = 60 * time.Second
 
+// defaultToolExecutionTimeout bounds how long a single tool execution (for
+// now the bash tool, whose commands can otherwise hang forever on an
+// unbounded scan or a wedged child process) may run before it is aborted.
+const defaultToolExecutionTimeout = 10 * time.Minute
+
+// toolExecutionTimeoutFromConfig converts the global tool-execution timeout
+// setting (minutes) into a duration. Zero or out-of-range values fall back to
+// the 10 minute default so the watchdog can never be disabled accidentally;
+// the ConfigStore layer already clamps to 1..60 minutes.
+func toolExecutionTimeoutFromConfig(cfg AppConfig) time.Duration {
+	minutes := cfg.ToolExecutionTimeoutMinutes
+	if minutes <= 0 {
+		minutes = 10
+	}
+	if minutes > 60 {
+		minutes = 60
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
 // AgentService is either the application-level runtime pool (runtimes != nil)
 // or one session-scoped Pi runtime. Each conversation gets its own Adapter so
 // different conversations can execute concurrently while turns within the same
@@ -52,10 +72,16 @@ type AgentService struct {
 	// pendingRestart holds a deferred restart request that should run only once
 	// the agent finishes its current task, so we never kill an in-flight turn
 	// (e.g. while materializing a new RTK extension).
-	pendingRestart             bool
-	pendingReq                 PromptRequest
-	pendingTools               bool
-	activeChangeNode           string
+	pendingRestart   bool
+	pendingReq       PromptRequest
+	pendingTools     bool
+	activeChangeNode string
+	abortFollowUp    bool
+	// waitingSubagents 记录会话是否处于"等待后台子 agent"状态：主 agent 回合
+	// 已结束（agent_settled）但仍有子 agent 运行，execTurnStart 被保留以维持
+	// 忙碌。用户终止时必须由后端强制收尾，否则 abort 只会被 Pi 应答、不会再
+	// 有 agent_settled 触发结束（见 forceSettleWaitingLocked）。
+	waitingSubagents           bool
 	firstResponseTimer         *time.Timer
 	firstResponseToken         uint64
 	firstResponseNodeID        string
@@ -68,8 +94,24 @@ type AgentService struct {
 	// never blocked forever by a dialog the frontend cannot show.
 	uiWatchdogTimer *time.Timer
 	uiWatchdogID    string
-	runtimeEnv      func(agentID string, sessionID int64) map[string]string
-	runtimeRelease  func(agentID string, sessionID int64)
+	// toolWatchdog bounds a single tool execution (currently the bash tool). It
+	// is armed when a tool_execution_start event arrives and disarmed as soon as
+	// the tool finishes (tool_execution_end) or the turn ends. If it fires, the
+	// still-running bash command is aborted via Pi's abort_bash RPC so a wedged
+	// command cannot stall the agent forever.
+	toolWatchdogTimer    *time.Timer
+	toolWatchdogToken    uint64
+	toolWatchdogName     string
+	toolWatchdogToolID   string
+	toolExecutionTimeout time.Duration
+	runtimeEnv           func(agentID string, sessionID int64) map[string]string
+	runtimeRelease       func(agentID string, sessionID int64)
+	// sendCommandOverride is test-only dependency injection for event-state
+	// tests. Production command delivery continues to use the Pi adapter.
+	sendCommandOverride func(json.RawMessage) error
+	// emitEventOverride keeps dispatchEvent tests independent of a running Wails
+	// application; production events still go through application.Get().Event.
+	emitEventOverride func(name string, value any)
 }
 
 func NewAgentService(store *ConfigStore, environment ...func(agentID string, sessionID int64) map[string]string) *AgentService {
@@ -78,6 +120,7 @@ func NewAgentService(store *ConfigStore, environment ...func(agentID string, ses
 		store: store, adapter: piagent.NewAdapter(),
 		runtimes: map[int64]*AgentService{}, sharedPrepareMu: sharedPrepareMu,
 		firstResponseTimeout: defaultModelFirstResponseTimeout,
+		toolExecutionTimeout: defaultToolExecutionTimeout,
 	}
 	if len(environment) > 0 {
 		service.runtimeEnv = environment[0]
@@ -111,6 +154,7 @@ func (s *AgentService) newSessionRuntime() *AgentService {
 		store: s.store, adapter: piagent.NewAdapter(),
 		sharedPrepareMu: s.sharedPrepareMu, runtimeEnv: s.runtimeEnv, runtimeRelease: s.runtimeRelease,
 		firstResponseTimeout: s.firstResponseTimeout, firstResponseTimeoutAction: s.firstResponseTimeoutAction,
+		toolExecutionTimeout: s.toolExecutionTimeout,
 	}
 }
 
@@ -176,6 +220,11 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 			return errors.New("cannot switch conversations while an agent turn is running")
 		}
 		commandType := stringValue(req.Command["type"])
+		// 用户终止：写 .abort 标记让 bridge 杀掉所有子 agent 进程并写终态，
+		// 同时强制收尾可能处于"等待子 agent"状态的会话（forceSettleWaitingLocked）。
+		if commandType == "abort" {
+			s.handleAbortCommandLocked()
+		}
 		// extension_ui_ack is a frontend-only acknowledgement that an interactive
 		// dialog was rendered. It disarms the watchdog and is never forwarded to
 		// Pi, which has no notion of it.
@@ -324,6 +373,10 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 	agentDataDir := filepath.Clean(profile.DataDir)
 
 	toolsEnabled := selectedModel.SupportsTools()
+	// Tool execution timeout is a global runtime setting; apply the effective
+	// value (already normalized by ConfigStore.Normalize) to this session's
+	// watchdog before the turn starts.
+	s.toolExecutionTimeout = toolExecutionTimeoutFromConfig(cfg)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.prepareCanceled {

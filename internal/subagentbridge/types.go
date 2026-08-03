@@ -8,15 +8,34 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	SnapshotVersion = 1
+	// Version 3 includes both the version-2 current-agent data-directory security
+	// contract and the configured per-session concurrency contract. Older helpers
+	// would silently keep their compiled-in limit and make Settings disagree with
+	// actual execution, so hosts must reject them.
+	ProtocolVersion = 3
+	// Snapshot version 2 carries MaxConcurrency for the bridge semaphore.
+	SnapshotVersion = 2
+
+	DefaultConcurrency = 2
+	MaxConcurrency     = 4
 )
 
 type Snapshot struct {
-	Version    int           `json:"version"`
-	SessionDir string        `json:"sessionDir"`
-	WorkDir    string        `json:"workDir"`
-	Agents     []AgentConfig `json:"agents"`
+	Version        int           `json:"version"`
+	SessionDir     string        `json:"sessionDir"`
+	WorkDir        string        `json:"workDir"`
+	MaxConcurrency int           `json:"maxConcurrency"`
+	Agents         []AgentConfig `json:"agents"`
+}
+
+func NormalizeConcurrency(value int) int {
+	if value < 1 {
+		return DefaultConcurrency
+	}
+	if value > MaxConcurrency {
+		return MaxConcurrency
+	}
+	return value
 }
 
 type AgentConfig struct {
@@ -120,6 +139,7 @@ func LoadSnapshot(path string) (Snapshot, error) {
 	}
 	value.SessionDir = filepath.Clean(value.SessionDir)
 	value.WorkDir = filepath.Clean(value.WorkDir)
+	value.MaxConcurrency = NormalizeConcurrency(value.MaxConcurrency)
 	return value, nil
 }
 

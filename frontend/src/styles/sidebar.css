@@ -1,20 +1,24 @@
-.sidebar { width: 224px; flex: 0 0 224px; display: flex; flex-direction: column; padding: 10px; background: var(--sidebar); border-right: 1px solid var(--border-soft); transition: width .18s ease, flex-basis .18s ease; }
+.sidebar { position: relative; width: 224px; flex: 0 0 224px; display: flex; flex-direction: column; padding: 10px; background: var(--sidebar); border-right: 1px solid var(--border-soft); transition: width .18s ease, flex-basis .18s ease; }
 .sidebar--closed { width: 52px; flex-basis: 52px; }
+.sidebar.sidebar--resizing { transition: none; }
+/* 主菜单栏右缘拖拽手柄：按住左右拖动调整宽度，样式与右侧栏手柄一致 */
+.sidebar-resizer { position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; z-index: 5; cursor: col-resize; }
+.sidebar-resizer:hover, .sidebar-resizer--active { background: var(--accent); opacity: .25; }
 .sidebar__top { min-height: 36px; display: flex; gap: 6px; align-items: center; }
 .sidebar-toggle, .sidebar__bottom button { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
 .sidebar-toggle:hover, .sidebar__bottom button:hover { background: var(--hover); }
-.new-task { flex: 1; height: 32px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); cursor: pointer; font-size: 13px; font-weight: 550; }
+.new-task { flex: 1; height: 32px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); cursor: pointer; font-size: var(--fs-13); font-weight: 550; }
 .new-task:hover { border-color: var(--faint); }
 .primary-nav { display: flex; flex-direction: column; gap: 2px; margin-top: 15px; }
-.primary-nav button { height: 34px; display: flex; align-items: center; gap: 10px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; font-size: 13px; }
+.primary-nav button { height: 34px; display: flex; align-items: center; gap: 10px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; font-size: var(--fs-13); }
 .primary-nav button:hover { background: var(--hover); color: var(--text); }
 .primary-nav button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-.nav-dev { margin-left: auto; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--faint); font-size: 10px; line-height: 1.5; letter-spacing: .02em; }
+.nav-dev { margin-left: auto; padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--faint); font-size: var(--fs-12); line-height: 1.5; letter-spacing: .02em; }
 .recent-list { flex: 1; min-height: 0; margin-top: 24px; overflow: auto; }
-.section-label { padding: 0 9px 7px; color: var(--faint); font-size: 13px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em; }
-.recent-list button { width: 100%; padding: 7px 9px; overflow: hidden; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-size: 13px; }
+.section-label { padding: 0 9px 7px; color: var(--faint); font-size: var(--fs-13); font-weight: 650; text-transform: uppercase; letter-spacing: .08em; }
+.recent-list button { width: 100%; padding: 7px 9px; overflow: hidden; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-size: var(--fs-13); }
 .recent-list button:hover { color: var(--text); background: var(--hover); }
-.recent-list p { margin: 8px 9px; color: var(--faint); font-size: 13px; }
+.recent-list p { margin: 8px 9px; color: var(--faint); font-size: var(--fs-13); }
 .sidebar__bottom { display: flex; border-top: 1px solid var(--border-soft); padding-top: 8px; }
 .sidebar__bottom button { width: 100%; display: flex; justify-content: flex-start; align-items: center; gap: 10px; padding: 0 9px; }
 .sidebar__bottom button.active { color: var(--text); background: var(--surface); }
@@ -22,7 +26,7 @@
 .sidebar__icon-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
 .sidebar__badge { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 2px var(--sidebar, #fff); }
 .sidebar-browser { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 18px; }
-.sidebar-browser__heading { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 7px; color: var(--faint); font-size: 14px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.sidebar-browser__heading { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 7px; color: var(--faint); font-size: var(--fs-14); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .sidebar-browser__heading--sessions { margin-top: 12px; }
 .sidebar-browser__heading button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--faint); background: transparent; cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, background .12s; }
 .sidebar-browser__heading:hover button { opacity: 1; }
@@ -33,38 +37,41 @@
 .sidebar-browser__list button { width: 100%; min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; text-align: left; }
 .sidebar-browser__list button:hover, .sidebar-browser__list button.active { color: var(--text); background: var(--hover); }
 .sidebar-browser__list button.active { background: var(--surface); }
-.sidebar-browser__list button span { min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-browser__list p, .sidebar-browser__empty { margin: 4px 8px; color: var(--faint); font-size: 11px; line-height: 1.45; }
-.sidebar-group { display: flex; flex-direction: column; }
+.sidebar-browser__list button span { min-width: 0; overflow: hidden; font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-browser__list p, .sidebar-browser__empty { margin: 4px 8px; color: var(--faint); font-size: var(--fs-12); line-height: 1.45; }
+.sidebar-group { display: flex; flex-direction: column; transition: opacity .12s, transform .12s; }
+.sidebar-group--dragging { opacity: .45; }
+.sidebar-group--drag-over { border-top: 2px solid var(--amber); }
 .sidebar-group + .sidebar-group { margin-top: 6px; }
 .sidebar-group .sidebar-group__head { width: 100%; position: relative; display: flex; align-items: center; gap: 4px; padding: 4px 8px; border: 0; border-radius: 0; color: var(--muted); }
 .sidebar-group .sidebar-group__head:hover { background: var(--hover); }
 .sidebar-group .sidebar-group__head.active { color: var(--text); }
 .sidebar-group .sidebar-group__title { flex: 1; min-width: 0; width: auto; display: flex; align-items: center; gap: 8px; padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; text-align: left; }
+.sidebar-group .sidebar-group__title[draggable="true"] { cursor: grab; }
+.sidebar-group .sidebar-group__title[draggable="true"]:active { cursor: grabbing; }
 .sidebar-group__title svg { flex: 0 0 auto; }
-.sidebar-group__title span { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 400; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-group__title span { flex: 1; min-width: 0; overflow: hidden; font-size: var(--fs-13); font-weight: 400; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-group .sidebar-group__actions { flex: 0 0 auto; display: flex; align-items: center; gap: 1px; }
 .sidebar-group .sidebar-group__add { flex: 0 0 auto; width: 22px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--faint); background: transparent; cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, background .12s; }
 .sidebar-group__head:hover .sidebar-group__add { opacity: 1; }
 .sidebar-group__add:hover { color: var(--text); background: var(--surface); }
-.sidebar-browser__list .sidebar-show-more { display: flex; justify-content: center; width: 100%; padding: 4px 8px; border: 0; border-radius: 7px; color: var(--faint); background: transparent; cursor: pointer; text-align: center; font-size: 12px; }
+.sidebar-browser__list .sidebar-show-more { display: flex; justify-content: center; width: 100%; padding: 4px 8px; border: 0; border-radius: 7px; color: var(--faint); background: transparent; cursor: pointer; text-align: center; font-size: var(--fs-12); }
 .sidebar-browser__list .sidebar-show-more:hover { color: var(--text); background: var(--hover); }
 .sidebar-browser__list .session-item { position: relative; display: flex; align-items: center; gap: 8px; min-height: 31px; padding: 0 8px 0 18px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; text-align: left; }
 .sidebar-browser__list .session-item:hover { color: var(--text); background: var(--hover); }
 .sidebar-browser__list .session-item.active { color: var(--text); background: var(--surface); }
 .sidebar-browser__list .session-item--running svg:first-child { color: #39a56c; }
 .archive-pop { position: fixed; z-index: 1000; width: 220px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
-.archive-pop p { margin: 0 0 8px; color: var(--text); font-size: 12px; line-height: 1.4; }
+.archive-pop p { margin: 0 0 8px; color: var(--text); font-size: var(--fs-12); line-height: 1.4; }
 .archive-pop__actions { display: flex; justify-content: flex-end; gap: 6px; }
-.archive-pop__actions button { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--muted); cursor: pointer; font-size: 12px; }
+.archive-pop__actions button { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); color: var(--muted); cursor: pointer; font-size: var(--fs-12); }
 .archive-pop__ok { border-color: transparent; background: var(--accent); color: var(--accent-fg); }
 .archive-pop__actions button:hover { filter: brightness(.97); }
 .sidebar-browser__list .session-item svg { flex: 0 0 auto; }
-.sidebar-browser__list .session-item__name { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-browser__list .session-item__name { flex: 1; min-width: 0; overflow: hidden; font-size: var(--fs-13); text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-browser__list .session-archive { flex: 0 0 auto; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--danger); background: transparent; cursor: pointer; }
 .sidebar-browser__list .session-item:hover .session-archive { display: inline-flex; }
 .sidebar-browser__list .session-archive:hover { color: #fff; background: var(--danger); }
-/* 对话/文件夹待确认提示：高亮色渐变圆点，位于左侧，效果参考对话框顶部文件变动提示圆点 */
-.confirm-dot { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); width: 7px; height: 7px; border-radius: 50%; background: radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--amber) 65%, #fff), var(--amber) 72%); box-shadow: 0 0 4px color-mix(in srgb, var(--amber) 60%, transparent); animation: confirm-dot-blink 2.6s ease-in-out infinite; pointer-events: none; }
-.confirm-dot--session + svg { margin-left: 8px; }
-@keyframes confirm-dot-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* 会话待处理提示：静态红点位于会话左侧，不打扰用户阅读 */
+.sidebar-dot { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); width: 7px; height: 7px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 1px color-mix(in srgb, #ef4444 25%, transparent); pointer-events: none; }
+.sidebar-dot--session + svg { margin-left: 8px; }

@@ -1,32 +1,32 @@
 .settings-page { padding-bottom: 110px; }
 .settings-section { margin: 0 0 32px; padding-top: 10px; }
-.settings-section > h2 { margin: 0 0 13px; font-size: 13px; font-weight: 650; }
+.settings-section > h2 { margin: 0 0 13px; font-size: var(--fs-13); font-weight: 650; }
 .setting-row { min-height: 58px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-soft); }
-.setting-row label { font-size: 13px; }
+.setting-row label { font-size: var(--fs-13); }
 .setting-row--directory { align-items: flex-start; gap: 24px; padding: 12px 0; }
 .setting-row--directory > div:first-child { display: flex; flex-direction: column; gap: 5px; }
-.setting-row--directory small { max-width: 520px; color: var(--faint); font-size: 11px; line-height: 1.45; }
+.setting-row--directory small { max-width: 520px; color: var(--faint); font-size: var(--fs-12); line-height: 1.45; }
 .directory-field { width: min(560px, 60%); display: flex; align-items: center; gap: 8px; }
-.directory-field input { min-width: 0; height: 34px; flex: 1; border: 1px solid var(--border); outline: 0; border-radius: 7px; padding: 0 10px; color: var(--text); background: var(--surface); font: 12px Consolas, "SFMono-Regular", "Cascadia Code", monospace; -webkit-font-smoothing: antialiased; }
+.directory-field input { min-width: 0; height: 34px; flex: 1; border: 1px solid var(--border); outline: 0; border-radius: 7px; padding: 0 10px; color: var(--text); background: var(--surface); font: var(--fs-12) Consolas, "SFMono-Regular", "Cascadia Code", monospace; -webkit-font-smoothing: antialiased; }
 .directory-field input:focus { border-color: var(--amber); box-shadow: 0 0 0 2px rgba(113,113,109,.08); }
 .color-field { display: flex; align-items: center; gap: 8px; }
 .color-field input[type="color"] { width: 34px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); cursor: pointer; }
 .color-field input[type="color"]:focus { outline: 0; border-color: var(--amber); }
-.color-field__hex { font: 13px Consolas, "SFMono-Regular", "Cascadia Code", monospace; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; width: 96px; text-transform: uppercase; -webkit-font-smoothing: antialiased; }
+.color-field__hex { font: var(--fs-13) Consolas, "SFMono-Regular", "Cascadia Code", monospace; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; width: 96px; text-transform: uppercase; -webkit-font-smoothing: antialiased; }
 .color-field__hex:focus { outline: 0; border-color: var(--amber); }
 .color-field__hex::placeholder { color: var(--muted); text-transform: none; }
 .directory-field .secondary-button { flex: 0 0 auto; height: 34px; }
 .segmented { display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--surface-2); }
-.segmented button { height: 28px; display: flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: 13px; }
+.segmented button { height: 28px; display: flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font-size: var(--fs-13); }
 .segmented button.active { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.1); }
 .setting-row--avatar { align-items: flex-start; gap: 24px; padding: 12px 0; }
 .setting-row--avatar > div:first-child { display: flex; flex-direction: column; gap: 5px; }
-.setting-row--avatar small { max-width: 520px; color: var(--faint); font-size: 11px; line-height: 1.45; }
+.setting-row--avatar small { max-width: 520px; color: var(--faint); font-size: var(--fs-12); line-height: 1.45; }
 .avatar-field { display: flex; align-items: center; gap: 14px; }
 .avatar-preview { width: 48px; height: 48px; flex: 0 0 48px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); color: var(--muted); overflow: hidden; }
 .avatar-preview img { width: 100%; height: 100%; object-fit: cover; }
 .avatar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .name-field { width: min(360px, 50%); }
-.name-field input { width: 100%; height: 34px; flex: 1; border: 1px solid var(--border); outline: 0; border-radius: 7px; padding: 0 10px; color: var(--text); background: var(--surface); font-size: 13px; }
+.name-field input { width: 100%; height: 34px; flex: 1; border: 1px solid var(--border); outline: 0; border-radius: 7px; padding: 0 10px; color: var(--text); background: var(--surface); font-size: var(--fs-13); }
 .name-field input:focus { border-color: var(--amber); box-shadow: 0 0 0 2px rgba(113,113,109,.08); }
 .name-field input::placeholder { color: var(--muted); }

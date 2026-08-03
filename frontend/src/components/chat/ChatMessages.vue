@@ -5,6 +5,9 @@ import { useChatAutoScroll } from '../../composables/useChatAutoScroll.js'
 import ChatMessageItem from './ChatMessageItem.vue'
 import SubAgentDetailsDialog from './SubAgentDetailsDialog.vue'
 import { findActiveQuestionIndex } from './questionNavigation.js'
+import { formatDuration } from './chatFormatters.js'
+import { isSubagentRunTool, toolInput, toolOutput } from './chatToolPresentation.js'
+import { resolvedSubagentStatus, subagentActivity } from './subagentRuntime.js'
 import { agentAvatar, isImageAvatar, useAppContext } from '../../composables/appContext.js'
 
 const props = defineProps({
@@ -24,7 +27,7 @@ const chatLayout = computed(() => (config.preferences && config.preferences.chat
 // 头像昵称展示：默认开启，关闭后对话详情不再显示 agent / 用户头像与昵称。
 const showIdentity = computed(() => !(config.preferences && config.preferences.showIdentity === false))
 
-const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file'])
+const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff'])
 
 const PLAN_TOOL_NAMES = ['codingto_plan_present', 'codingto_plan_update']
 const runtimeNow = ref(Date.now())
@@ -49,6 +52,120 @@ const questionMessages = computed(() => displayMessages.value.filter(message => 
 const questionIndexById = computed(() => new Map(
   questionMessages.value.map((message, index) => [message.id, index])
 ))
+
+// ---- 子 Agent 快捷导航 ----
+// 从消息流中收集 codingto_subagent 工具调用（每个子 agent 一次），构建右侧
+// 导航项：运行中高亮渐变、结束后纯色；hover 显示 agent 名/任务/时长/动作。
+function findSubagentOutput(message) {
+  const raw = toolOutput(message)
+  if (raw == null || raw === '') return null
+  const queue = [raw]
+  const seen = new Set()
+  while (queue.length && seen.size < 128) {
+    let current = queue.shift()
+    if (typeof current === 'string') {
+      try { current = JSON.parse(current) } catch { continue }
+    }
+    if (!current || typeof current !== 'object' || seen.has(current)) continue
+    seen.add(current)
+    if (current.runId && current.status) return current
+    queue.push(...(Array.isArray(current) ? current : Object.values(current)))
+  }
+  return null
+}
+
+// codingto_subagent 的工具入参可能是 JSON 字符串（如 detail.args 以字符串形式
+// 持久化），这里安全解析为对象，保证 agent 名/任务名可提取。
+function parsedToolInput(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value !== 'string') return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function subagentNavInfo(message) {
+  const detail = message.detail || {}
+  const subagent = detail.subagent && typeof detail.subagent === 'object' ? detail.subagent : {}
+  const inputObj = parsedToolInput(toolInput(message))
+  const output = findSubagentOutput(message)
+  const status = resolvedSubagentStatus(
+    output?.status || '',
+    subagent,
+    (detail.status === 'done' || detail.type === 'tool_execution_end') ? 'completed' : 'running'
+  )
+  const live = status === 'running' || status === 'aborted_requested'
+  const agentKey = subagent.agentKey || inputObj.key
+  const agent = agentKey ? props.agents.find(candidate => candidate.id === agentKey) : undefined
+  const agentName = subagent.agentName || agent?.name || agentKey || props.t.subagentUnknown
+  // 头像：优先运行时数据，其次按 agentKey 在 agents 列表中匹配（emoji 字符或图片 data URL）。
+  const avatar = (subagent.agentAvatar || (agent ? agentAvatar(agent) : '')) || ''
+  const startedAt = Number(subagent.startedAt || detail.startedAt || 0)
+  // 结束态优先用持久化时长（可能落在 detail / subagent / output 任一层），
+  // 运行中用 now - startedAt 实时刷新。
+  const duration = Number(detail.durationMs || subagent.durationMs || output?.durationMs || 0)
+    || (startedAt && live ? Math.max(0, (runtimeNow.value || Date.now()) - startedAt) : 0)
+  const task = String(inputObj.task || '').trim()
+  const activity = subagentActivity(subagent, {
+    tool: props.t.subagentToolEvent,
+    thinking: props.t.subagentThinking,
+    responding: props.t.subagentResponding
+  })
+  let statusText
+  if (live) statusText = activity || props.t.subagentRunning
+  else if (status === 'completed') statusText = props.t.subagentCompleted
+  else if (status === 'aborted') statusText = props.t.subagentAborted
+  else if (status === 'timeout') statusText = props.t.subagentTimeout
+  else statusText = props.t.subagentFailed
+  return { messageId: message.id, agentName, avatar, task, duration, statusText, live }
+}
+
+// ---- 右侧快捷导航（问题 + 子 Agent 按消息流顺序合并） ----
+// 导航项必须与对话内出现顺序一致：用户问题开启节点，其回复中的子 Agent
+// 调用紧随其后；并行派发的多个子 Agent 按调用先后排列。
+const navItems = computed(() => {
+  const items = []
+  for (const message of displayMessages.value) {
+    if (message.role === 'user') {
+      items.push({
+        type: 'question',
+        key: `q-${message.id}`,
+        index: questionIndexById.value.get(message.id),
+        text: questionText(message)
+      })
+    } else if (isSubagentRunTool(message)) {
+      // 仅 action=run 的子 Agent 调用生成导航项；list/status 等查询调用
+      // 无独立子 Agent 执行，且拿不到 agentKey（名字会回退成占位文案），
+      // 会与同一次 run 的导航项重复。与 SubAgentCard 的展示条件保持一致。
+      items.push({
+        type: 'subagent',
+        key: `sub-${message.id}`,
+        ...subagentNavInfo(message)
+      })
+    }
+  }
+  return items
+})
+// 子 Agent 索引由 navItems 唯一派生（subagentNavInfo 只计算一次，避免运行中
+// 每秒 tick 对同一批子 Agent 重复 BFS）。
+const subagentIndexById = computed(() => new Map(
+  navItems.value
+    .filter(item => item.type === 'subagent')
+    .map((item, index) => [item.messageId, index])
+))
+
+function scrollToSubagent(index) {
+  const element = scrollEl.value
+  const target = element?.querySelector(`[data-subagent-index="${index}"]`)
+  if (!element || !target) return
+  element.scrollTo({
+    top: Math.max(0, target.offsetTop - 24),
+    behavior: 'smooth'
+  })
+}
 
 // 节点头部的 Agent 身份：每个“问题节点”仅展示一次头像与名称。
 const nodeAgentAvatar = computed(() => props.selectedAgent ? agentAvatar(props.selectedAgent) : '')
@@ -285,9 +402,11 @@ onBeforeUnmount(() => {
             :now="needsRuntimeUpdate(message) ? runtimeNow : 0"
             :t="t"
             :data-question-index="questionIndexById.get(message.id)"
+            :data-subagent-index="subagentIndexById.get(message.id)"
             @update-thinking-open="emit('update-thinking-open', { id: message.id, open: $event })"
             @artifact-error="emit('artifact-error', $event)"
             @open-change-file="emit('open-change-file', $event)"
+            @open-git-diff="emit('open-git-diff', $event)"
             @open-subagent-details="openSubagentDetails"
           />
           <header v-if="node.agentMessages.length && showIdentity" class="message-node__header">
@@ -311,29 +430,52 @@ onBeforeUnmount(() => {
             :show-identity="showIdentity"
             :now="needsRuntimeUpdate(message) ? runtimeNow : 0"
             :t="t"
+            :data-subagent-index="subagentIndexById.get(message.id)"
             @update-thinking-open="emit('update-thinking-open', { id: message.id, open: $event })"
             @artifact-error="emit('artifact-error', $event)"
             @open-change-file="emit('open-change-file', $event)"
+            @open-git-diff="emit('open-git-diff', $event)"
             @open-subagent-details="openSubagentDetails"
           />
         </section>
       </div>
 
     </div>
-    <nav v-if="questionMessages.length" class="question-nav" :aria-label="t.questionNavigation">
-      <button
-        v-for="(question, index) in questionMessages"
-        :key="question.id"
-        class="question-nav__item"
-        :class="{ 'is-active': index === activeQuestionIndex }"
-        type="button"
-        :aria-label="questionText(question)"
-        :aria-current="index === activeQuestionIndex ? 'step' : undefined"
-        @click="scrollToQuestion(index)"
-      >
-        <span class="question-nav__bar" aria-hidden="true"></span>
-        <span class="question-nav__tooltip" role="tooltip">{{ questionText(question) }}</span>
-      </button>
+    <nav v-if="navItems.length" class="question-nav" :aria-label="t.questionNavigation">
+      <template v-for="item in navItems" :key="item.key">
+        <button
+          v-if="item.type === 'subagent'"
+          class="question-nav__item question-nav__item--subagent"
+          :class="{ 'is-live': item.live }"
+          type="button"
+          :aria-label="`${item.agentName}${item.task ? ' · ' + item.task : ''}`"
+          @click="scrollToSubagent(subagentIndexById.get(item.messageId))">
+          <span class="question-nav__bar" aria-hidden="true"></span>
+          <span class="question-nav__tooltip question-nav__tooltip--subagent" role="tooltip">
+            <span class="question-nav__agent">
+              <span class="question-nav__agent-avatar" :class="{ 'has-emoji': item.avatar }">
+                <img v-if="isImageAvatar(item.avatar)" :src="item.avatar" class="question-nav__agent-img" alt="" />
+                <span v-else-if="item.avatar" class="question-nav__agent-emoji">{{ item.avatar }}</span>
+                <Bot v-else :size="13" />
+              </span>
+              <strong>{{ item.agentName }}</strong>
+            </span>
+            <span class="question-nav__meta"><template v-if="item.duration">{{ formatDuration(item.duration) }} · </template>{{ item.statusText }}</span>
+            <small v-if="item.task">{{ item.task }}</small>
+          </span>
+        </button>
+        <button
+          v-else
+          class="question-nav__item"
+          :class="{ 'is-active': item.index === activeQuestionIndex }"
+          type="button"
+          :aria-label="item.text"
+          :aria-current="item.index === activeQuestionIndex ? 'step' : undefined"
+          @click="scrollToQuestion(item.index)">
+          <span class="question-nav__bar" aria-hidden="true"></span>
+          <span class="question-nav__tooltip" role="tooltip">{{ item.text }}</span>
+        </button>
+      </template>
     </nav>
     <button
       v-show="showScrollToBottom"

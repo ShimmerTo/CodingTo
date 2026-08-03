@@ -43,6 +43,7 @@ const props = defineProps({
   planItems: { type: Array, default: () => [] },
   executionPlan: { type: Array, default: () => [] },
   extensionDialog: { type: Object, default: null },
+  subagentDialogs: { type: Array, default: () => [] },
   compaction: { type: Object, default: () => ({ running: false, notice: '', error: '' }) },
   error: { type: String, default: '' },
   loadingHistory: { type: Boolean, default: false }
@@ -54,6 +55,7 @@ const emit = defineEmits([
   'update:skill',
   'remove-image', 'add-attachments', 'remove-attachment',
   'compact', 'respond-extension', 'ack-extension', 'clear-error',
+  'respond-subagent-dialog', 'ack-subagent-dialog',
   'update-thinking-open', 'refresh-session-changes', 'edit-pending', 'delete-pending',
   'artifact-error'
 ])
@@ -61,6 +63,8 @@ const emit = defineEmits([
 const rightSidebarOpen = ref(false)
 const previewImage = ref(null)
 const changeFocusRequest = ref(null)
+// 变更消息行尾斜箭头：请求打开 Git 对比框（由 ChatRightSidebar 复用 GitDiffDialog 处理）。
+const changeDiffRequest = ref(null)
 
 // 未读提示：顶部「文件改动」按钮。当本轮对话产生新的文件变动（git 改动或
 // 用户输入附件）且用户尚未点开查看时，在按钮左侧显示红点；点击按钮后清除。
@@ -131,6 +135,28 @@ function openChangedFile(request) {
   changeFocusRequest.value = { ...request, nonce: Date.now() }
   emit('refresh-session-changes')
 }
+
+// 变更消息行尾斜箭头：打开右侧边栏并请求 ChatRightSidebar 弹出该文件的 Git 对比框。
+function openFileDiff(request) {
+  if (!request?.path) return
+  rightSidebarOpen.value = true
+  changesDotVisible.value = false
+  changeDiffRequest.value = { ...request, nonce: Date.now() }
+  emit('refresh-session-changes')
+}
+
+// 关闭右侧边栏时清空未处理的 Git 对比请求：节点数据可能晚于请求到达，
+// 若不清空，之后任意一次数据摘要变化都会延迟弹出对比框（幽灵弹窗）。
+function closeSidebar() {
+  rightSidebarOpen.value = false
+  changeDiffRequest.value = null
+}
+
+// 顶栏按钮切换侧边栏：关闭时同样丢弃未处理的 Git 对比请求。
+function toggleSidebar() {
+  if (rightSidebarOpen.value) changeDiffRequest.value = null
+  rightSidebarOpen.value = !rightSidebarOpen.value
+}
 const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
 </script>
 
@@ -163,7 +189,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
             :title="rightSidebarOpen ? t.rightSidebarClose : t.rightSidebarOpen"
             :aria-label="rightSidebarOpen ? t.rightSidebarClose : t.rightSidebarOpen"
             :aria-pressed="rightSidebarOpen"
-            @click="rightSidebarOpen = !rightSidebarOpen"
+            @click="toggleSidebar"
           >
             <component :is="rightSidebarOpen ? PanelRightClose : PanelRightOpen" :size="18" />
           </button>
@@ -189,6 +215,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @update-thinking-open="emit('update-thinking-open', $event)"
         @artifact-error="emit('artifact-error', $event)"
         @open-change-file="openChangedFile"
+        @open-git-diff="openFileDiff"
       />
 
       <ChatComposer
@@ -214,6 +241,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         :plan-items="planItems"
         :execution-plan="executionPlan"
         :extension-dialog="extensionDialog"
+        :subagent-dialogs="subagentDialogs"
         :compaction="compaction"
         :has-messages="messagesList.length > 0"
         :loading-history="loadingHistory"
@@ -236,6 +264,8 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @compact="emit('compact')"
         @respond-extension="emit('respond-extension', $event)"
         @ack-extension="emit('ack-extension', $event)"
+        @respond-subagent-dialog="emit('respond-subagent-dialog', $event)"
+        @ack-subagent-dialog="emit('ack-subagent-dialog', $event)"
       />
     </main>
 
@@ -245,8 +275,9 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
       :changes="sessionChanges"
       :loading="sessionChangesLoading"
       :focus-request="changeFocusRequest"
+      :diff-request="changeDiffRequest"
       :t="t"
-      @close="rightSidebarOpen = false"
+      @close="closeSidebar"
       @refresh="emit('refresh-session-changes')"
       @artifact-error="emit('artifact-error', $event)"
     />

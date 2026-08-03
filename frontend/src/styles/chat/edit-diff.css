@@ -1,6 +1,6 @@
 /* edit 工具代码对比视图样式（EditDiff.vue 专用，scoped 引入）。
    配色变量（--diff-*）定义在 base.css，随主题切换。 */
-.tool-edit-diff { max-height: 240px; overflow: auto; border-top: 1px solid var(--border-soft); background: var(--code-bg); text-align: left; font: 11px/1.55 "SFMono-Regular", Consolas, monospace; }
+.tool-edit-diff { max-height: 240px; overflow: auto; border-top: 1px solid var(--border-soft); background: var(--code-bg); text-align: left; font: var(--fs-12)/1.55 "SFMono-Regular", Consolas, monospace; }
 .tool-edit-diff__file + .tool-edit-diff__file { border-top: 1px solid var(--border); }
 
 /* 左右对比（split diff）：左侧修改前，右侧修改后 */

@@ -2,12 +2,16 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
 
 	"codingto/internal/piagent"
+	"codingto/internal/subagentbridge"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -48,7 +52,7 @@ func (s *AgentService) forwardEvents(adapter *piagent.Adapter, sessionID int64, 
 				// 与不可合并事件同理：先排空缓冲增量，保证前端按序观察。
 				flushPending()
 				stopFlushTimer()
-				application.Get().Event.Emit("agent:event", payload)
+				s.emitEvent("agent:event", payload)
 				continue
 			}
 			event["_recordedAt"] = time.Now().UnixMilli()
@@ -109,6 +113,23 @@ closed:
 // changeNodeId）的事件：推进会话状态机、持久化、精简并转发前端。raw 为事件
 // 原始 JSON；合并产生的事件没有原始字节（传 nil），仅在提取 agent_end 错误
 // 时按需重新序列化。
+func (s *AgentService) sendAdapterCommand(raw json.RawMessage) error {
+	if s.sendCommandOverride != nil {
+		return s.sendCommandOverride(raw)
+	}
+	return s.adapter.SendCommand(raw)
+}
+
+func (s *AgentService) emitEvent(name string, value any) {
+	if s.emitEventOverride != nil {
+		s.emitEventOverride(name, value)
+		return
+	}
+	if app := application.Get(); app != nil && app.Event != nil {
+		app.Event.Emit(name, value)
+	}
+}
+
 func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, sessionDir string, event map[string]any, raw json.RawMessage) {
 	recordedAt := intValue(event["_recordedAt"])
 	if recordedAt == 0 {
@@ -117,12 +138,60 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	}
 	nodeID := stringValue(event["changeNodeId"])
 	eventType := stringValue(event["type"])
+	completionDetails := subagentCompletionDetails(event)
 
 	var restartReq PromptRequest
 	var restartTools bool
 	restartAfterEvent := false
 	completedNodeID := ""
+	followUpInitError := ""
+	followUpInitNodeID := ""
+	dropFollowUpEvent := false
+	// waitingSubagents 记录主 agent 回合结束时仍有后台子 agent 在运行：会话
+	// 整体仍处于等待子 agent 状态，不应表现为已结束（详见 agent_settled 分支）。
+	waitingSubagents := false
 	s.mu.Lock()
+	// A detached subagent result can trigger a new Pi turn without passing
+	// through AgentService.Prompt. Establish the same change-capture lifecycle
+	// before the follow-up model starts using tools, so its integration edits are
+	// attributed and surfaced like an ordinary user turn.
+	if eventType == "message_start" && completionDetails != nil && s.activeSessionID == sessionID && s.activeChangeNode == "" && !s.abortFollowUp {
+		prompt := fmt.Sprintf("后台子 Agent %s 完成（%s）", stringValue(completionDetails["agentKey"]), stringValue(completionDetails["runId"]))
+		changeNodeID, err := beginChangeNode(sessionDir, s.activeDir, prompt, recordedAt)
+		if err != nil {
+			s.abortFollowUp = true
+			nodeID = ""
+			followUpInitError = fmt.Sprintf("create follow-up change node: %v", err)
+			log.Printf("[session %d] %s", sessionID, followUpInitError)
+		} else if err := os.WriteFile(filepath.Join(sessionDir, ".active-change-node"), []byte(changeNodeID), 0o600); err != nil {
+			// Do not publish the node in memory unless its marker is also
+			// available to the capture extensions. Otherwise later edits would
+			// look tracked to this service but be unowned on disk.
+			s.abortFollowUp = true
+			nodeID = ""
+			followUpInitNodeID = changeNodeID
+			followUpInitError = fmt.Sprintf("write follow-up active change node: %v", err)
+			log.Printf("[session %d] %s", sessionID, followUpInitError)
+		} else {
+			s.activeChangeNode = changeNodeID
+			nodeID = changeNodeID
+			event["changeNodeId"] = changeNodeID
+			if s.execTurnStart.IsZero() {
+				s.execTurnStart = time.UnixMilli(recordedAt)
+			}
+			s.armFirstResponseWatchdogLocked(sessionID, changeNodeID)
+		}
+	}
+	// Once follow-up tracking initialization fails, suppress the remainder of
+	// that model turn (especially tool execution/edit events). Lifecycle events
+	// are retained so Pi can settle after the abort command below.
+	if s.abortFollowUp && eventType != "message_start" && eventType != "agent_end" && eventType != "agent_settled" && eventType != "error" {
+		dropFollowUpEvent = true
+	}
+	if dropFollowUpEvent {
+		s.mu.Unlock()
+		return
+	}
 	if event["type"] == "response" && event["command"] == "get_state" {
 		if data, ok := event["data"].(map[string]any); ok {
 			if path, ok := data["sessionFile"].(string); ok && path != "" {
@@ -153,6 +222,14 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	if isInteractiveUIEvent(event) {
 		s.armUIWatchdogLocked(sessionID, sessionDir, stringValue(event["id"]))
 	}
+	// Tool-execution watchdog: bound how long a single tool call may run. Arm
+	// when a tool starts executing, disarm as soon as it finishes or the turn
+	// ends so a stale timer can never fire into a later turn.
+	if eventType == "tool_execution_start" && s.activeSessionID == sessionID {
+		s.armToolWatchdogLocked(sessionID, stringValue(event["toolName"]), toolID(event))
+	} else if eventType == "tool_execution_end" || eventType == "agent_end" || eventType == "agent_settled" || eventType == "error" {
+		s.disarmToolWatchdogLocked()
+	}
 	if eventType == "agent_end" && s.activeSessionID == sessionID {
 		willRetry, _ := event["willRetry"].(bool)
 		if !willRetry {
@@ -166,19 +243,58 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	// operation and therefore the point where a new prompt or
 	// deferred restart becomes safe.
 	if eventType == "agent_settled" && s.activeSessionID == sessionID {
-		s.finishExecutionLocked("active")
-		s.disarmUIWatchdogLocked("")
-		if s.pendingRestart {
-			restartReq = s.pendingReq
-			if restartReq.SessionPath == "" {
-				restartReq.SessionPath = s.activeSession
+		// 主 agent 回合可能早于其派发的后台子 agent 结束：子 agent 完成时会
+		// 通过 follow-up 消息再次驱动主 agent 继续，因此只要还有子 agent 在
+		// 运行，会话整体就不算结束——保持执行状态（execTurnStart 不清零，
+		// isBusy() 维持 true，exec_progress 继续 running），并让前端保持
+		// "运行中/等待" 表现，避免出现"会话已结束"的假象后又自动恢复。
+		waitingSubagents = runningSubagentCount(sessionDir) > 0
+		// 持久化等待状态，供终止路径强制收尾（forceSettleWaitingLocked）与
+		// 后续回合判定使用。
+		s.waitingSubagents = waitingSubagents
+		if !waitingSubagents {
+			s.finishExecutionLocked("active")
+			s.disarmUIWatchdogLocked("")
+			s.abortFollowUp = false
+			if s.pendingRestart {
+				restartReq = s.pendingReq
+				if restartReq.SessionPath == "" {
+					restartReq.SessionPath = s.activeSession
+				}
+				restartTools = s.pendingTools
+				restartAfterEvent = true
+				s.pendingRestart = false
 			}
-			restartTools = s.pendingTools
-			restartAfterEvent = true
-			s.pendingRestart = false
+		} else {
+			// 等待子 agent 期间不重启主 agent 进程（follow-up 需要它保持存活），
+			// 重启请求继续延迟到最后一个子 agent 完成后的最终 agent_settled。
+			// abortFollowUp 仅作用于单个失败的模型回合，等待结束后应允许新的
+			// follow-up 回合正常初始化变更捕获。
+			s.abortFollowUp = false
 		}
 	}
 	s.mu.Unlock()
+	if followUpInitError != "" {
+		if followUpInitNodeID != "" {
+			if err := finishChangeNode(sessionDir, followUpInitNodeID, "error", recordedAt); err != nil {
+				log.Printf("[session %d] finish failed follow-up change node: %v", sessionID, err)
+			}
+		}
+		errorEvent := map[string]any{
+			"type": "error", "code": "subagent_followup_change_node_failed",
+			"error": followUpInitError, "errorMessage": followUpInitError,
+			"codingToSessionId": sessionID, "_recordedAt": recordedAt,
+		}
+		if err := s.appendEvent(sessionDir, errorEvent); err != nil {
+			log.Printf("[session %d] append follow-up initialization error: %v", sessionID, err)
+		}
+		s.emitEvent("agent:event", errorEvent)
+		if err := s.sendAdapterCommand(mustJSON(map[string]string{
+			"id": "codingto-subagent-followup-abort", "type": "abort",
+		})); err != nil {
+			log.Printf("[session %d] abort failed follow-up turn: %v", sessionID, err)
+		}
+	}
 	if completedNodeID != "" {
 		status := "completed"
 		if raw == nil {
@@ -190,18 +306,23 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 		if err := finishChangeNode(sessionDir, completedNodeID, status, recordedAt); err != nil {
 			log.Printf("[session %d] finish change node: %v", sessionID, err)
 		}
-		summary, err := readChangeSummary(sessionDir, completedNodeID)
-		if err != nil {
-			log.Printf("[session %d] read completed change summary: %v", sessionID, err)
-			// Still emit a completion notice for every prompt. The
-			// sidebar refresh can resolve the node if only the
-			// lightweight summary failed to load.
-			summary = ChangeSummary{
-				NodeID: completedNodeID, Status: status,
-				Files: []FileChangeSummary{},
+		// 主 agent 回合结束时可能仍有后台子 agent 在运行，会话整体尚未结束：
+		// 等待期间的 agent_end 不附带改动清单，避免 UI 提前呈现"本次问题改动"
+		// 这类回合收尾消息；最终回合（无子 agent 运行）的 agent_end 正常附带。
+		if runningSubagentCount(sessionDir) == 0 {
+			summary, err := readChangeSummary(sessionDir, completedNodeID)
+			if err != nil {
+				log.Printf("[session %d] read completed change summary: %v", sessionID, err)
+				// Still emit a completion notice for every prompt. The
+				// sidebar refresh can resolve the node if only the
+				// lightweight summary failed to load.
+				summary = ChangeSummary{
+					NodeID: completedNodeID, Status: status,
+					Files: []FileChangeSummary{},
+				}
 			}
+			event["changeSummary"] = summary
 		}
-		event["changeSummary"] = summary
 	}
 	if err := s.appendEvent(sessionDir, event); err != nil {
 		log.Printf("[session %d] append event: %v", sessionID, err)
@@ -216,24 +337,47 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 			application.Get().Event.Emit("subagent:event", subagent)
 		}
 	}
+	if subagent := findDetachedSubagentEvent(event); subagent != nil {
+		subagent["codingToSessionId"] = sessionID
+		if stringValue(subagent["parentNodeId"]) == "" && nodeID != "" {
+			subagent["parentNodeId"] = nodeID
+		}
+		application.Get().Event.Emit("subagent:event", subagent)
+	}
+	if subagent := findSubagentCompletion(event); subagent != nil {
+		subagent["codingToSessionId"] = sessionID
+		if stringValue(subagent["parentNodeId"]) == "" && nodeID != "" {
+			subagent["parentNodeId"] = nodeID
+		}
+		application.Get().Event.Emit("subagent:event", subagent)
+	}
 	if documentID, page, preview := documentPreviewRequest(event); preview {
-		application.Get().Event.Emit("document:preview", map[string]any{
+		s.emitEvent("document:preview", map[string]any{
 			"codingToSessionId": sessionID, "documentId": documentID, "page": page,
 		})
 	}
-	if eventType == "agent_settled" && !restartAfterEvent {
+	if eventType == "agent_settled" && !restartAfterEvent && !waitingSubagents {
 		// Streamed usage is per-message and provider-shaped. Session stats
 		// are Pi's canonical cumulative token and context-window view.
-		_ = adapter.SendCommand(mustJSON(map[string]string{
+		_ = s.sendAdapterCommand(mustJSON(map[string]string{
 			"id": "codingto-session-stats", "type": "get_session_stats",
 		}))
 	}
-	application.Get().Event.Emit("agent:event", event)
+	s.emitEvent("agent:event", event)
 	if eventType == "agent_settled" && !restartAfterEvent {
-		application.Get().Event.Emit("agent:state", map[string]any{
-			"running": false, "processRunning": true,
-			"codingToSessionId": sessionID,
-		})
+		if waitingSubagents {
+			// 仍有后台子 agent 在运行：保持"运行中/等待"状态，前端转圈与终止
+			// 按钮继续保留；最终 agent_settled（无子 agent）再宣告结束。
+			s.emitEvent("agent:state", map[string]any{
+				"running": true, "processRunning": true,
+				"codingToSessionId": sessionID, "waitingSubagents": true,
+			})
+		} else {
+			s.emitEvent("agent:state", map[string]any{
+				"running": false, "processRunning": true,
+				"codingToSessionId": sessionID,
+			})
+		}
 	}
 	if restartAfterEvent {
 		if err := s.performRestart(restartReq, restartTools); err != nil {
@@ -496,6 +640,63 @@ func findSubagentEvent(event map[string]any) map[string]any {
 	return nil
 }
 
+func findDetachedSubagentEvent(event map[string]any) map[string]any {
+	if stringValue(event["type"]) != "entry_appended" {
+		return nil
+	}
+	entry := mapValue(event["entry"])
+	if stringValue(entry["type"]) != "custom" || stringValue(entry["customType"]) != "codingto-subagent-event" {
+		return nil
+	}
+	data := mapValue(entry["data"])
+	if stringValue(data["kind"]) != "subagent_event" || stringValue(data["runId"]) == "" || stringValue(data["toolCallId"]) == "" {
+		return nil
+	}
+	result := make(map[string]any, len(data))
+	for key, value := range data {
+		result[key] = value
+	}
+	return result
+}
+
+// findSubagentCompletion maps the detached run's durable follow-up message
+// back to the original tool card. Background onUpdate callbacks are ignored by
+// Pi after a tool returns, so this low-frequency terminal message is the
+// authoritative live completion signal for the frontend.
+func findSubagentCompletion(event map[string]any) map[string]any {
+	if stringValue(event["type"]) != "message_end" {
+		return nil
+	}
+	details := subagentCompletionDetails(event)
+	if details == nil {
+		return nil
+	}
+	result := make(map[string]any, len(details)+1)
+	for key, value := range details {
+		result[key] = value
+	}
+	result["kind"] = "subagent_event"
+	if text := stringValue(details["text"]); text != "" {
+		result["event"] = map[string]any{
+			"type":    "message_end",
+			"message": map[string]any{"role": "assistant", "content": text},
+		}
+	}
+	return result
+}
+
+func subagentCompletionDetails(event map[string]any) map[string]any {
+	message := mapValue(event["message"])
+	if stringValue(message["role"]) != "custom" || stringValue(message["customType"]) != "codingto-subagent-result" {
+		return nil
+	}
+	details := mapValue(message["details"])
+	if stringValue(details["runId"]) == "" || stringValue(details["toolCallId"]) == "" {
+		return nil
+	}
+	return details
+}
+
 func (s *AgentService) appendEvent(sessionDir string, event any) error {
 	s.eventLogMu.Lock()
 	defer s.eventLogMu.Unlock()
@@ -504,6 +705,36 @@ func (s *AgentService) appendEvent(sessionDir string, event any) error {
 		return nil
 	}
 	return appendSessionEventWithDurability(sessionDir, persisted, sessionEventNeedsSync(persisted))
+}
+
+// runningSubagentCount 统计会话目录下仍处于 running 状态的子 agent run 数量。
+// 主 agent 回合可能早于其派发的后台子 agent 结束：子 agent 完成时通过
+// follow-up 消息再次驱动主 agent 继续，因此只要计数大于 0，会话整体就仍处于
+// "等待子 agent" 的进行中状态，不应表现为已结束。run.json 由 subagent bridge
+// 原子写入（running → completed/failed/aborted），是权威的终态来源。
+func runningSubagentCount(sessionDir string) int {
+	root := filepath.Join(sessionDir, "subagents")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// 尚未写入 run.json（bridge 初始化中）视为运行中：与父 agent 停止时
+		// abortRunningSubagentsLocked 的防御策略一致，避免把刚启动的 run 漏判。
+		record, readErr := subagentbridge.ReadRunRecord(filepath.Join(root, entry.Name(), "run.json"))
+		if readErr != nil {
+			count++
+			continue
+		}
+		if record.Status == "running" {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *AgentService) emitExecProgressFor(expectedSessionID int64) {

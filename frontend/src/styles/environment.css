@@ -1,11 +1,11 @@
 /* Environment: workspace + SSH */
 .environment-page .page-heading { margin-bottom: 24px; }
 .environment-tabs { display: flex; align-items: center; gap: 4px; margin-bottom: 24px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
-.environment-tabs button { min-width: 144px; height: 36px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 13px; font-weight: 600; }
+.environment-tabs button { min-width: 144px; height: 36px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: var(--fs-13); font-weight: 600; }
 .environment-tabs button:hover { color: var(--text); }
 .environment-tabs button.active { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,.09); }
-.environment-tabs button > span { min-width: 20px; padding: 1px 6px; border-radius: 999px; color: var(--faint); background: var(--surface-2); font-size: 11px; }
-.environment-tabs button > span.tab-dev { padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--faint); font-size: 10px; line-height: 1.5; letter-spacing: .02em; }
+.environment-tabs button > span { min-width: 20px; padding: 1px 6px; border-radius: 999px; color: var(--faint); background: var(--surface-2); font-size: var(--fs-12); }
+.environment-tabs button > span.tab-dev { padding: 1px 6px; border-radius: 999px; background: var(--surface-2); color: var(--faint); font-size: var(--fs-12); line-height: 1.5; letter-spacing: .02em; }
 .environment-tab-panel { min-height: 320px; }
 .workspace-layout { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .workspace-list { display: flex; flex-direction: column; gap: 5px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
@@ -15,48 +15,48 @@
 .workspace-list__icon { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); }
 .workspace-list__copy { min-width: 0; }
 .workspace-list strong, .workspace-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-list strong { font-size: 13px; }
-.workspace-list small { margin-top: 3px; color: var(--faint); font-size: 11px; }
-.workspace-list strong em { margin-left: 4px; color: #b57924; font-size: 11px; font-style: normal; font-weight: 600; }
-.active-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; color: #1c7a3f; background: rgba(28,122,63,0.12); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.workspace-list strong { font-size: var(--fs-13); }
+.workspace-list small { margin-top: 3px; color: var(--faint); font-size: var(--fs-12); }
+.workspace-list strong em { margin-left: 4px; color: #b57924; font-size: var(--fs-12); font-style: normal; font-weight: 600; }
+.active-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; color: #1c7a3f; background: rgba(28,122,63,0.12); font-size: var(--fs-12); font-weight: 650; white-space: nowrap; }
 .workspace-list .active-pill { padding: 3px 6px; }
 .workspace-view { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
 .workspace-view__head { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 17px 18px; border-bottom: 1px solid var(--border-soft); background: var(--surface-2); }
 .workspace-view__head .agent-view__title { min-width: 0; }
 .workspace-view__head .agent-view__title > div { min-width: 0; }
 .workspace-view__head .agent-view__title strong, .workspace-view__head .agent-view__title small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-view__head .agent-view__title small { max-width: 420px; margin-top: 3px; color: var(--faint); font-size: 12px; }
+.workspace-view__head .agent-view__title small { max-width: 420px; margin-top: 3px; color: var(--faint); font-size: var(--fs-12); }
 .workspace-view__actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
 .workspace-composition { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 18px; }
 .workspace-composition--remote { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .workspace-composition article { position: relative; min-width: 0; min-height: 132px; display: flex; align-items: flex-start; flex-direction: column; gap: 12px; padding: 15px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface-2); }
-.workspace-composition article:not(:last-child)::after { content: "›"; position: absolute; z-index: 1; top: 52px; right: -9px; width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--faint); background: var(--surface); font-size: 17px; line-height: 1; }
-.workspace-step { position: absolute; top: 11px; right: 11px; color: var(--faint); font-size: 11px; font-weight: 700; }
+.workspace-composition article:not(:last-child)::after { content: "›"; position: absolute; z-index: 1; top: 52px; right: -9px; width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--faint); background: var(--surface); font-size: var(--fs-14); line-height: 1; }
+.workspace-step { position: absolute; top: 11px; right: 11px; color: var(--faint); font-size: var(--fs-12); font-weight: 700; }
 .workspace-composition__icon { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: var(--surface); }
 .workspace-composition article > div:last-child { width: 100%; min-width: 0; }
 .workspace-composition small, .workspace-composition strong { display: block; }
-.workspace-composition small { margin-bottom: 5px; color: var(--faint); font-size: 11px; }
-.workspace-composition strong { overflow: hidden; color: var(--text); font: 12px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-composition small { margin-bottom: 5px; color: var(--faint); font-size: var(--fs-12); }
+.workspace-composition strong { overflow: hidden; color: var(--text); font: var(--fs-12) "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-statusbar { min-height: 50px; display: flex; align-items: center; gap: 12px; padding: 10px 18px; border-top: 1px solid var(--border-soft); background: var(--surface-2); }
-.workspace-statusbar p { margin: 0; color: var(--faint); font-size: 12px; line-height: 1.45; }
+.workspace-statusbar p { margin: 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.45; }
 
 /* SSH profile cards */
 .item-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .item-card { min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 15px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .item-card__head { display: flex; align-items: center; gap: 8px; }
 .item-card__icon { width: 32px; height: 32px; display: grid; flex: 0 0 32px; place-items: center; border: 1px solid var(--border-soft); border-radius: 9px; color: var(--muted); background: var(--surface-2); }
-.item-card__head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.item-card__head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-13); }
 .item-card__body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; margin: 0; padding-top: 13px; border-top: 1px solid var(--border-soft); }
 .item-card__body > div:last-child { grid-column: 1 / -1; }
-.item-card__body dt { color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
-.item-card__body dd { margin: 4px 0 0; overflow: hidden; color: var(--text); font: 12px Consolas, "SFMono-Regular", "Microsoft YaHei", "PingFang SC", monospace; -webkit-font-smoothing: auto; text-overflow: ellipsis; white-space: nowrap; }
+.item-card__body dt { color: var(--faint); font-size: var(--fs-12); text-transform: uppercase; letter-spacing: .06em; }
+.item-card__body dd { margin: 4px 0 0; overflow: hidden; color: var(--text); font: var(--fs-12) Consolas, "SFMono-Regular", "Microsoft YaHei", "PingFang SC", monospace; -webkit-font-smoothing: auto; text-overflow: ellipsis; white-space: nowrap; }
 
 .workspace-editor-dialog { width: min(650px, 100%); }
 .workspace-editor-dialog .form-grid { gap: 14px; }
 .workspace-editor-field { grid-column: 1 / -1; }
 .workspace-editor-field > span { display: flex; align-items: center; gap: 7px; }
-.workspace-editor-field > span b { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; color: var(--muted); background: var(--surface-2); font-size: 11px; }
+.workspace-editor-field > span b { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; color: var(--muted); background: var(--surface-2); font-size: var(--fs-12); }
 .workspace-editor-field--local > div { display: flex; gap: 8px; }
 .workspace-editor-field--local input { flex: 1; }
-.workspace-editor-hint { display: flex; align-items: center; gap: 7px; margin: 16px 0 0; padding: 10px 12px; border-radius: 8px; color: var(--muted); background: var(--surface-2); font-size: 12px; line-height: 1.5; }
-.ssh-auth-hint { display: flex; align-items: center; gap: 7px; margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; color: var(--muted); background: var(--surface-2); font-size: 12px; line-height: 1.5; }
+.workspace-editor-hint { display: flex; align-items: center; gap: 7px; margin: 16px 0 0; padding: 10px 12px; border-radius: 8px; color: var(--muted); background: var(--surface-2); font-size: var(--fs-12); line-height: 1.5; }
+.ssh-auth-hint { display: flex; align-items: center; gap: 7px; margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; color: var(--muted); background: var(--surface-2); font-size: var(--fs-12); line-height: 1.5; }

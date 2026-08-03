@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
-import { CheckCircle2, KeyRound, ListTodo } from 'lucide-vue-next'
+import { CheckCircle2, ChevronDown, ChevronUp, KeyRound, ListTodo } from 'lucide-vue-next'
 import { extensionDialogTitle } from './extensionDialog.js'
 
 const props = defineProps({
@@ -10,6 +10,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['respond', 'ack'])
+// 计划列表折叠：折叠后仅保留头部，点击右侧按钮展开/收起。
+const planCollapsed = ref(false)
 const responseValue = ref('')
 const dialogEl = ref(null)
 const browserProfile = ref({
@@ -76,8 +78,19 @@ function isPrimaryOption(option) {
         <ListTodo :size="14" />
         <span>{{ t.planProposalTitle || '执行计划' }}</span>
         <small>{{ items.length }} {{ t.planStepsUnit || '步' }}</small>
+        <button
+          class="plan-proposal__collapse"
+          type="button"
+          :title="planCollapsed ? t.planExpand : t.planCollapse"
+          :aria-label="planCollapsed ? t.planExpand : t.planCollapse"
+          :aria-expanded="String(!planCollapsed)"
+          @click="planCollapsed = !planCollapsed"
+        >
+          <ChevronDown v-if="planCollapsed" :size="14" />
+          <ChevronUp v-else :size="14" />
+        </button>
       </div>
-      <ol class="plan-proposal__list">
+      <ol v-show="!planCollapsed" class="plan-proposal__list">
         <li
           v-for="item in items"
           :key="item.step"

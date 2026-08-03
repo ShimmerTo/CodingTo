@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,10 +66,11 @@ type SessionContextUsage struct {
 }
 
 type SessionHistory struct {
-	Messages     []map[string]any    `json:"messages"`
-	TokenStats   SessionTokenStats   `json:"tokenStats"`
-	ContextUsage SessionContextUsage `json:"contextUsage"`
-	SubagentUI   map[string]any      `json:"subagentUi,omitempty"`
+	Messages     []map[string]any          `json:"messages"`
+	TokenStats   SessionTokenStats         `json:"tokenStats"`
+	ContextUsage SessionContextUsage       `json:"contextUsage"`
+	SubagentUI   map[string]any            `json:"subagentUi,omitempty"`
+	Subagent     *subagentbridge.RunRecord `json:"subagent,omitempty"`
 }
 
 type SubagentUIResponse struct {
@@ -168,9 +170,16 @@ func (a *App) GetSubagentTranscript(sessionID int64, runID string) (SessionHisto
 	}
 	messages := ParseSubagentPiSession(runDir)
 	tokenStats, contextUsage := readSubagentTokenStats(runDir)
+	var runRecord *subagentbridge.RunRecord
+	if record, readErr := subagentbridge.ReadRunRecord(filepath.Join(runDir, "run.json")); readErr == nil {
+		runRecord = &record
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		log.Printf("[session %d] read subagent run record %s: %v", sessionID, runID, readErr)
+		return SessionHistory{}, fmt.Errorf("read subagent run record: %w", readErr)
+	}
 	return SessionHistory{
 		Messages: messages, TokenStats: tokenStats, ContextUsage: contextUsage,
-		SubagentUI: readSubagentUIState(runDir),
+		SubagentUI: readSubagentUIState(runDir), Subagent: runRecord,
 	}, nil
 }
 
@@ -307,7 +316,11 @@ func (a *App) subagentRunDir(sessionID int64, runID string) (string, error) {
 }
 
 func readSubagentUIState(runDir string) map[string]any {
-	state := map[string]any{"widgets": map[string]any{}}
+	state := map[string]any{
+		"widgets":         map[string]any{},
+		"widgetUpdatedAt": map[string]any{},
+		"widgetClearedAt": map[string]any{},
+	}
 	file, err := os.Open(filepath.Join(runDir, sessionEventFile))
 	if err != nil {
 		return state
@@ -329,12 +342,19 @@ func readSubagentUIState(runDir string) map[string]any {
 					continue
 				}
 				widgets := mapValue(state["widgets"])
+				updatedAt := mapValue(state["widgetUpdatedAt"])
+				clearedAt := mapValue(state["widgetClearedAt"])
+				eventAt := intValue(event["_recordedAt"])
 				if event["widgetLines"] == nil {
 					delete(widgets, key)
+					clearedAt[key] = eventAt
 				} else {
 					widgets[key] = event["widgetLines"]
+					updatedAt[key] = eventAt
 				}
 				state["widgets"] = widgets
+				state["widgetUpdatedAt"] = updatedAt
+				state["widgetClearedAt"] = clearedAt
 			} else if method == "select" || method == "confirm" || method == "input" || method == "editor" {
 				state["dialog"] = event
 			}

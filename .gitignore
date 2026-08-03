@@ -37,4 +37,5 @@ frontend/bindings/
 /.workbuddy/
 /.codebuddy/
 /test/
+/docs/review/
 /scripts/

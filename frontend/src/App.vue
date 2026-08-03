@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import {
   Archive, Blocks, Bot, Brain, Folder, LoaderCircle, Maximize2,
   Minus, Network, Plus, Settings, Sparkles,
@@ -13,6 +13,7 @@ import {
   getExtensions, getAgentExtensions, installPi, manageExtension, restartAgent, saveConfig,
   saveFigmaConfig, sendAgentCommand, startPrompt, testModel, toggleMaximise,
   saveBrowserProfile,
+  respondSubagentUI, ackSubagentUI,
   readAgentFile, writeAgentFile,
   listSkills, installSkills, previewSkillArchive, previewSkillUrl, editSkill, deleteSkill, updateSkill,
   installGlobalPackage as beInstallGlobalPackage,
@@ -30,21 +31,24 @@ import logo from './assets/logo.png'
 import AppDialogs from './components/AppDialogs.vue'
 import InstallLogModal from './components/InstallLogModal.vue'
 import PiInstallGate from './components/PiInstallGate.vue'
-import AgentsPage from './components/pages/AgentsPage.vue'
-import AgentConfigPage from './components/pages/AgentConfigPage.vue'
-import DocsPage from './components/pages/DocsPage.vue'
-import EnvironmentPage from './components/pages/EnvironmentPage.vue'
-import McpPage from './components/pages/McpPage.vue'
-import ModelsPage from './components/pages/ModelsPage.vue'
-import PluginsPage from './components/pages/PluginsPage.vue'
-import SettingsPage from './components/pages/SettingsPage.vue'
-import SkillsPage from './components/pages/SkillsPage.vue'
-import TasksPage from './components/pages/TasksPage.vue'
-import { shouldAbortAfterExtensionResponse, isPlanConfirmationDialog, BROWSER_IDENTITY_DIALOG_TITLE } from './components/chat/extensionDialog'
-import { mergeSubagentRuntime } from './components/chat/subagentRuntime'
+// 页面组件按需懒加载：每个菜单页独立 chunk，仅首次打开时加载，减小首屏主包体积。
+// 菜单页以模态浮层打开，本地文件加载开销可忽略，切换无感知。
+const AgentsPage = defineAsyncComponent(() => import('./components/pages/AgentsPage.vue'))
+const AgentConfigPage = defineAsyncComponent(() => import('./components/pages/AgentConfigPage.vue'))
+const DocsPage = defineAsyncComponent(() => import('./components/pages/DocsPage.vue'))
+const EnvironmentPage = defineAsyncComponent(() => import('./components/pages/EnvironmentPage.vue'))
+const McpPage = defineAsyncComponent(() => import('./components/pages/McpPage.vue'))
+const ModelsPage = defineAsyncComponent(() => import('./components/pages/ModelsPage.vue'))
+const PluginsPage = defineAsyncComponent(() => import('./components/pages/PluginsPage.vue'))
+const SettingsPage = defineAsyncComponent(() => import('./components/pages/SettingsPage.vue'))
+const SkillsPage = defineAsyncComponent(() => import('./components/pages/SkillsPage.vue'))
+const TasksPage = defineAsyncComponent(() => import('./components/pages/TasksPage.vue'))
+import { BROWSER_IDENTITY_DIALOG_TITLE, isPlanConfirmationDialog, shouldAbortAfterExtensionResponse } from './components/chat/extensionDialog'
+import { mergeSubagentRuntime, parseSubagentEvent } from './components/chat/subagentRuntime'
 import { completeCompactionMessage, createCompactionMessage } from './components/chat/compactionMessages'
 import { appContextKey } from './composables/appContext'
 import { defaultThinkingLevelForModel } from './modelThinking'
+import { sendSystemNotification } from './systemNotifications'
 import {
   loadDraftForEnv, persistDraftForEnv,
   persistExecPlan as persistExecPlanStorage, restoreExecPlan as restoreExecPlanStorage,
@@ -71,11 +75,50 @@ const pageComponent = computed(() => pageComponents[activePage.value] || null)
 function goHome() { activePage.value = 'chat' }
 const environmentTab = ref('workspace')
 const sidebarOpen = ref(true)
+// 左侧主菜单栏宽度：可拖拽调整（min 160 / max 420 / 默认 224px），宽度持久化到 localStorage。
+const SIDEBAR_MIN = 160
+const SIDEBAR_MAX = 420
+const SIDEBAR_WIDTH_KEY = 'codingto:left-sidebar-width'
+function loadSidebarWidth() {
+  try {
+    const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+    if (Number.isFinite(raw) && raw >= SIDEBAR_MIN && raw <= SIDEBAR_MAX) return raw
+  } catch { /* 存储不可用时回退默认宽度 */ }
+  return 224
+}
+function persistSidebarWidth(value) {
+  try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(value)) } catch { /* ignore */ }
+}
+const sidebarWidth = ref(loadSidebarWidth())
+const sidebarResizing = ref(false)
+// 按住右缘手柄左右拖动：向右加宽、向左收窄；释放时保存宽度（拖动过程不写存储）。
+function startSidebarResize(event) {
+  if (!sidebarOpen.value) return
+  event.preventDefault()
+  sidebarResizing.value = true
+  const startX = event.clientX
+  const startWidth = sidebarWidth.value
+  const onMove = (moveEvent) => {
+    sidebarWidth.value = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + (moveEvent.clientX - startX)))
+  }
+  const onUp = () => {
+    document.removeEventListener('pointermove', onMove)
+    document.removeEventListener('pointerup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    sidebarResizing.value = false
+    persistSidebarWidth(sidebarWidth.value)
+  }
+  document.addEventListener('pointermove', onMove)
+  document.addEventListener('pointerup', onUp)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
 const bootstrap = ref(null)
 // 客户端自身更新：启动后后台检查一次，有新版本时为 true，用于设置菜单红点。
 const appUpdateAvailable = ref(false)
 const config = reactive({
-  preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified' },
+  preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified', fontSize: 'small' },
   userProfile: { name: '', avatar: '' },
   providers: [],
   defaultProvider: '',
@@ -85,7 +128,9 @@ const config = reactive({
   agents: [],
   environments: [],
   activeEnvId: '',
-  sshConfigs: []
+  sshConfigs: [],
+  subagentConcurrency: 4,
+  systemNotificationEnabled: true
 })
 const draft = ref('')
 // 未发送内容（输入框草稿）按工作空间分别持久化：每个工作空间各自保存一份，
@@ -137,28 +182,137 @@ watch(executionPlan, persistExecPlan, { deep: true })
 watch(planItems, persistPlanItems, { deep: true })
 // 扩展交互对话框（如计划确认）在本地点持久化，刷新页面后按当前任务恢复，
 // 避免刷新后 agent 仍在等待确认却没有任何可操作的对话框（一直"转圈"）。
-function persistExtDialog() { persistExtDialogStorage(activeTaskId.value, extensionDialog.value) }
-function persistExtDialogForTask(taskId, dialog) { persistExtDialogStorage(taskId, dialog) }
-function clearPersistedExtDialog(taskId) { clearExtDialogStorage(taskId || activeTaskId.value || '') }
+function persistExtDialog() { persistExtDialogForTask(activeTaskId.value, extensionDialog.value) }
+function persistExtDialogForTask(taskId, dialog) {
+  persistExtDialogStorage(taskId, dialog)
+  syncTaskPendingAttention(taskId, dialog)
+}
+function clearPersistedExtDialog(taskId) {
+  const targetTaskId = taskId || activeTaskId.value || ''
+  clearExtDialogStorage(targetTaskId)
+  clearTaskPendingAttention(targetTaskId, 'main')
+}
 function restoreExtDialog(taskId) {
   const restored = readPersistedExtDialog(taskId)
-  if (restored) extensionDialog.value = restored
+  if (restored) {
+    extensionDialog.value = restored
+    syncTaskPendingAttention(taskId, restored)
+  }
 }
-// 仅「待确认的执行计划」与「待选择的浏览器身份」两种对话框需要显示渐变圆点，
-// 其它扩展对话框（通用 confirm/select/prompt）不视为待确认内容。
+const sidebarDotTaskIds = reactive(new Set())
+const pendingAttentionByTask = reactive(new Map())
 function isBrowserIdentityDialog(dialog) {
   return dialog?.method === 'select' && String(dialog?.title || '').startsWith(BROWSER_IDENTITY_DIALOG_TITLE)
 }
-function isPendingConfirmDialog(dialog) {
+function isSidebarAttentionDialog(dialog) {
   return isPlanConfirmationDialog(dialog) || isBrowserIdentityDialog(dialog)
 }
-function readTaskDialog(id) {
-  if (!id) return null
-  if (String(id) === String(activeTaskId.value)) return extensionDialog.value
-  return readPersistedExtDialog(String(id))
+function syncTaskPendingAttention(id, dialog) {
+  if (isSidebarAttentionDialog(dialog)) markTaskPendingAttention(id, 'main', dialog)
+  else clearTaskPendingAttention(id, 'main')
 }
-function taskNeedsConfirm(id) {
-  return isPendingConfirmDialog(readTaskDialog(id))
+function systemNotificationTypeLabel(type) {
+  switch (type) {
+    case 'plan-request': return t.value.systemTypePlanRequest
+    case 'browser-identity': return t.value.systemTypeBrowserIdentity
+    case 'conversation-complete': return t.value.systemTypeCompletion
+    default: return t.value.systemTypeAttention
+  }
+}
+// 系统通知正文的占位文本（任务标题/操作描述）可能含英文双引号等字符：
+// Windows toast XML 文本节点不转义引号会显示杂乱，统一替换为中文引号并压缩空白。
+function cleanNotificationText(text) {
+  let open = true
+  return String(text || '')
+    .replace(/"/g, () => {
+      const q = open ? '“' : '”'
+      open = !open
+      return q
+    })
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+function notifyTaskPendingAttention(id, requestKey, dialog) {
+  const task = taskById(id)
+  const taskTitle = cleanNotificationText(task?.title || t.value.chatNewSession)
+  const operation = cleanNotificationText(dialog?.title || t.value.systemAttentionOperation)
+  const type = isPlanConfirmationDialog(dialog) ? 'plan-request'
+    : isBrowserIdentityDialog(dialog) ? 'browser-identity'
+    : 'attention'
+  // 设置（Agent 运行设置 → 系统通知）关闭后，计划审批等场景不再发送系统通知（红点保留）。
+  if (type === 'plan-request' && config.systemNotificationEnabled === false) return
+  // 正文以【类型】开头，即使部分平台不渲染标题也能看出通知类型。
+  const body = `【${systemNotificationTypeLabel(type)}】${t.value.systemAttentionBody
+    .replace('{task}', taskTitle)
+    .replace('{operation}', operation)}`
+  void sendSystemNotification({
+    id: `codingto-attention-${id}-${requestKey}-${Date.now()}`,
+    taskId: id,
+    type,
+    title: `CodingTo · ${systemNotificationTypeLabel(type)}`,
+    body
+  }).catch(() => {})
+}
+function markTaskPendingAttention(id, requestKey = 'main', dialog = null, options = {}) {
+  const key = String(id ?? '')
+  if (!key) return
+  let requests = pendingAttentionByTask.get(key)
+  if (!requests) {
+    requests = reactive(new Set())
+    pendingAttentionByTask.set(key, requests)
+  }
+  const normalizedRequestKey = String(requestKey || 'main')
+  if (requests.has(normalizedRequestKey)) return
+  requests.add(normalizedRequestKey)
+  if (options.announce !== false) {
+    // 红点只提示一次：当前正在查看的对话无需点亮；后台对话的新请求点亮后，
+    // 用户点击清除，待确认状态本身继续保留但不会在切走后重新生成红点。
+    if (key !== String(activeTaskId.value ?? '')) sidebarDotTaskIds.add(key)
+    notifyTaskPendingAttention(key, normalizedRequestKey, dialog)
+  }
+}
+function clearTaskPendingAttention(id, requestKey) {
+  const key = String(id ?? '')
+  if (!key) return
+  if (requestKey == null) {
+    pendingAttentionByTask.delete(key)
+    return
+  }
+  const requests = pendingAttentionByTask.get(key)
+  if (!requests) return
+  requests.delete(String(requestKey))
+  if (!requests.size) pendingAttentionByTask.delete(key)
+}
+function restorePendingAttentionState(taskList) {
+  for (const task of taskList || []) {
+    const dialog = readPersistedExtDialog(task.id)
+    // 刷新后只恢复仍需处理的弹窗状态，不恢复也不重新通知上个页面生命周期的红点。
+    if (isSidebarAttentionDialog(dialog)) markTaskPendingAttention(task.id, 'main', dialog, { announce: false })
+  }
+}
+function markTaskForSidebar(id) {
+  const key = String(id ?? '')
+  if (!key || key === String(activeTaskId.value ?? '') || sidebarDotTaskIds.has(key)) return
+  sidebarDotTaskIds.add(key)
+  // 设置（Agent 运行设置 → 系统通知）关闭后，任务完成不再发送系统通知（侧边栏红点保留）。
+  if (config.systemNotificationEnabled === false) return
+  const taskTitle = cleanNotificationText(taskById(key)?.title || t.value.chatNewSession)
+  void sendSystemNotification({
+    id: `codingto-completed-${key}-${Date.now()}`,
+    taskId: key,
+    type: 'conversation-complete',
+    title: `CodingTo · ${systemNotificationTypeLabel('conversation-complete')}`,
+    body: `【${systemNotificationTypeLabel('conversation-complete')}】${t.value.systemCompletionBody.replace('{task}', taskTitle)}`
+  }).catch(() => {})
+}
+function clearTaskSidebarDot(id) {
+  const key = String(id ?? '')
+  if (!key) return
+  sidebarDotTaskIds.delete(key)
+}
+function taskHasSidebarDot(id) {
+  const key = String(id ?? '')
+  return key !== String(activeTaskId.value ?? '') && sidebarDotTaskIds.has(key)
 }
 const contextWindow = computed(() => selectedModel.value?.contextWindow || 0)
 // 顶部条错误（兼容旧 UI，提示最新一次失败）。重试/失败的历史以
@@ -293,6 +447,25 @@ function setTaskRunning(id, live) {
   setTaskRuntimeStatus(id, live ? 'running' : 'active')
 }
 
+// 当前会话是否仍有后台子 agent 在运行（含已请求中止但未终结的）。
+// 主 agent 回合可以先于其派发的子 agent 结束：子 agent 完成时会通过
+// follow-up 消息再次驱动主 agent 继续，因此会话整体仍处于"等待子 agent"
+// 的进行中状态，不应在 agent_settled 时表现为会话已结束。
+// 状态来源与 SubAgentCard 一致：优先 tool 卡片上实时合并的 subagent 运行时
+// 状态，其次为工具返回/持久化结果里的 status 字段。
+function hasRunningSubagents() {
+  return messagesList.value.some(message => {
+    if (message.role !== 'tool') return false
+    const detail = message.detail && typeof message.detail === 'object' ? message.detail : {}
+    const subagent = detail.subagent && typeof detail.subagent === 'object' ? detail.subagent : {}
+    if (['running', 'aborted_requested'].includes(String(subagent.status))) return true
+    const output = detail.output && typeof detail.output === 'object' ? detail.output : null
+    if (output && ['running', 'aborted_requested'].includes(String(output.status))) return true
+    if (output?.details && ['running', 'aborted_requested'].includes(String(output.details.status))) return true
+    return false
+  })
+}
+
 function setTaskRuntimeAvailable(id, available) {
   const key = String(id ?? '')
   if (!key) return
@@ -376,9 +549,18 @@ function applyTheme() {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   document.documentElement.lang = config.preferences.language
   document.documentElement.style.setProperty('--amber', config.preferences.accentColor || '#d9a441')
+  // 界面字号档位：小（默认，12/13/14px）、中（+1，13/14/15px）、大（+2，14/15/16px）。
+  // 全系统字号只声明三档变量（--fs-12/13/14），此处整体改写三档数值即可缩放全界面。
+  const fontSize = config.preferences.fontSize || 'small'
+  const base = 12 + ({ small: 0, medium: 1, large: 2 }[fontSize] ?? 0)
+  document.documentElement.style.setProperty('--fs-12', `${base}px`)
+  document.documentElement.style.setProperty('--fs-13', `${base + 1}px`)
+  document.documentElement.style.setProperty('--fs-14', `${base + 2}px`)
+  // 页头标题（.page-heading h2）独立档位：小=22、中=23、大=24px。
+  document.documentElement.style.setProperty('--fs-heading', `${base + 10}px`)
 }
 
-watch(() => [config.preferences.theme, config.preferences.language, config.preferences.accentColor], applyTheme)
+watch(() => [config.preferences.theme, config.preferences.language, config.preferences.accentColor, config.preferences.fontSize], applyTheme)
 watch(() => config.defaultProvider, () => {
   if (!availableModels.value.some(model => model.id === config.defaultModel)) {
     config.defaultModel = availableModels.value[0]?.id || ''
@@ -408,6 +590,7 @@ async function load() {
   Object.assign(config, rawConfig)
   if (!config.preferences) config.preferences = {}
   config.preferences.accentColor ||= '#d9a441'
+  config.preferences.fontSize ||= 'small'
   config.providers ||= []
   config.configVersion ||= 4
   config.providers.forEach(normalizeProvider)
@@ -433,9 +616,19 @@ async function load() {
   const envIds = new Set(config.environments.map(ws => ws.id))
   for (const id of [...collapsedWorkspaceIds]) if (!envIds.has(id)) collapsedWorkspaceIds.delete(id)
   workspaceOrder.value = workspaceOrder.value.filter(id => envIds.has(id))
+  // 清理工作目录智能体记忆中已失效的引用（环境被删除 / 智能体被删除）。
+  let envAgentCacheChanged = false
+  for (const envId of Object.keys(envLastAgent)) {
+    if (!envIds.has(envId) || !config.agents.some(agent => agent.id === envLastAgent[envId])) {
+      delete envLastAgent[envId]
+      envAgentCacheChanged = true
+    }
+  }
+  if (envAgentCacheChanged) persistEnvLastAgent()
   const initialTasks = (await listSessions()) || []
   mergeTaskRuntimeStatus(initialTasks)
   tasks.value = initialTasks
+  restorePendingAttentionState(initialTasks)
   // 仅首次加载时做一次全量扩展扫描；之后返回列表/编辑扩展都只静默刷新单个 agent。
   await refreshExtensions()
   await refreshSkills()
@@ -769,6 +962,7 @@ async function saveNewWs() {
   if (remote && !remote.sshConfigId) remote.remotePath = ''
   const previousActiveId = config.activeEnvId
   const previousEnvironment = config.lastEnvironment
+  const previousWorkspaceOrder = [...workspaceOrder.value]
   config.environments.push(ws)
   selectedWorkspaceId.value = ws.id
   if (!previousActiveId) {
@@ -777,6 +971,8 @@ async function saveNewWs() {
   }
   const ok = await persist()
   if (ok) {
+    // 新环境创建后立即加入主菜单排序首位，避免被已有环境列表挤到末尾。
+    bumpWorkspaceToTop(ws.id)
     newWsId.value = ''
     wsDraft.value = null
     editingNewWs.value = false
@@ -784,6 +980,8 @@ async function saveNewWs() {
     pushToast('success', t.value.wsCreated)
   } else {
     config.environments = config.environments.filter(item => item.id !== ws.id)
+    workspaceOrder.value = previousWorkspaceOrder
+    persistWorkspaceOrder()
     selectedWorkspaceId.value = ''
     config.activeEnvId = previousActiveId
     config.lastEnvironment = previousEnvironment
@@ -1003,6 +1201,15 @@ async function confirmDeleteAgent() {
   try {
     const result = await deleteAgent(agent.id)
     Object.assign(config, result)
+    // 清理工作目录智能体记忆中指向已删除智能体的记录，避免残留失效引用。
+    let envAgentCacheChanged = false
+    for (const envId of Object.keys(envLastAgent)) {
+      if (envLastAgent[envId] === agent.id) {
+        delete envLastAgent[envId]
+        envAgentCacheChanged = true
+      }
+    }
+    if (envAgentCacheChanged) persistEnvLastAgent()
     if (!config.agents.some(item => item.id === currentAgentId.value)) currentAgentId.value = config.activeAgentId
     pendingDeleteAgent.value = null
     showAgentNotice('success', t.value.agentDeleted.replace('{name}', agent.name))
@@ -1530,6 +1737,72 @@ try {
 function persistWorkspaceOrder() {
   try { localStorage.setItem(WS_ORDER_KEY, JSON.stringify(workspaceOrder.value)) } catch {}
 }
+// 每个工作目录记忆「上次选中的智能体」：前端 localStorage 缓存（envId -> agentId），
+// 新建对话 / 切换工作目录时恢复，无记录时回退系统默认智能体（config.activeAgentId）。
+const ENV_LAST_AGENT_KEY = 'codingto:env-last-agent'
+const envLastAgent = reactive({})
+try {
+  const raw = localStorage.getItem(ENV_LAST_AGENT_KEY)
+  if (raw) Object.assign(envLastAgent, JSON.parse(raw))
+} catch {}
+function persistEnvLastAgent() {
+  try { localStorage.setItem(ENV_LAST_AGENT_KEY, JSON.stringify(envLastAgent)) } catch {}
+}
+function setEnvLastAgent(envId, agentId) {
+  if (!envId) return
+  if (agentId && config.agents.some(agent => agent.id === agentId)) {
+    envLastAgent[envId] = agentId
+  } else {
+    delete envLastAgent[envId]
+  }
+  persistEnvLastAgent()
+}
+// 返回该工作目录记录的上次智能体；记录缺失、失效（智能体已删除）时返回空串。
+function envLastAgentId(envId) {
+  const id = envId ? envLastAgent[envId] : ''
+  return id && config.agents.some(agent => agent.id === id) ? id : ''
+}
+// 工作空间在主菜单中的手动排序。只保存环境 ID，不改动配置中的环境数据，
+// 因此拖动排序不会触发后端配置写入，也不会影响当前会话运行。
+const draggedWorkspaceId = ref('')
+const dragOverWorkspaceId = ref('')
+function startWorkspaceDrag(group, event) {
+  if (!group?.id) return
+  draggedWorkspaceId.value = group.id
+  dragOverWorkspaceId.value = ''
+  if (event?.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', group.id)
+  }
+}
+function handleWorkspaceDragOver(group) {
+  if (!draggedWorkspaceId.value || !group?.id || group.id === draggedWorkspaceId.value) return
+  dragOverWorkspaceId.value = group.id
+}
+function dropWorkspace(group) {
+  const sourceId = draggedWorkspaceId.value
+  const targetId = group?.id
+  if (!sourceId || !targetId || sourceId === targetId) {
+    endWorkspaceDrag()
+    return
+  }
+  const ids = sessionGroups.value.filter(item => item.id).map(item => item.id)
+  const sourceIndex = ids.indexOf(sourceId)
+  const targetIndex = ids.indexOf(targetId)
+  if (sourceIndex < 0 || targetIndex < 0) {
+    endWorkspaceDrag()
+    return
+  }
+  ids.splice(sourceIndex, 1)
+  ids.splice(ids.indexOf(targetId), 0, sourceId)
+  workspaceOrder.value = ids
+  persistWorkspaceOrder()
+  endWorkspaceDrag()
+}
+function endWorkspaceDrag() {
+  draggedWorkspaceId.value = ''
+  dragOverWorkspaceId.value = ''
+}
 // 当在工作空间执行对话或在历史对话中发消息时，把该工作空间置为第一位。
 function bumpWorkspaceToTop(envId) {
   if (!envId || !config.environments.some(ws => ws.id === envId)) return
@@ -1711,6 +1984,84 @@ async function requestSessionStats() {
   }
 }
 
+// 所有仍待应答的子 Agent 权限申请 / 计划确认弹窗。数据实时增量维护在各
+// codingto_subagent 工具消息的 detail.subagentUI.dialog 中（handleSubagentEvent
+// → mergeSubagentRuntime），这里统一收集后提升到主对话弹窗区渲染，每个弹窗
+// 标注来源子 Agent 名称。
+const subagentDialogs = computed(() => {
+  const dialogs = []
+  for (const message of messagesList.value) {
+    if (message.role !== 'tool') continue
+    const detail = message.detail && typeof message.detail === 'object' ? message.detail : {}
+    const dialog = detail.subagentUI?.dialog
+    if (!dialog || typeof dialog !== 'object' || !dialog.id) continue
+    const subagent = detail.subagent && typeof detail.subagent === 'object' ? detail.subagent : {}
+    const agentName = subagent.agentName
+      || config.agents.find(agent => agent.id === subagent.agentKey)?.name
+      || subagent.agentKey
+      || ''
+    // 子 Agent 申请执行计划时先 setWidget('plan-todos') 写入完整步骤再弹确认框，
+    // 这里随弹窗一并提取，供主对话弹窗区展示完整计划（不再只有标题与步数）。
+    const ui = detail.subagentUI && typeof detail.subagentUI === 'object' ? detail.subagentUI : {}
+    const widgets = ui.widgets && typeof ui.widgets === 'object' ? ui.widgets : {}
+    const planLines = Array.isArray(widgets['plan-todos']) ? widgets['plan-todos']
+      : Array.isArray(widgets['plan-execution']) ? widgets['plan-execution']
+      : []
+    dialogs.push({
+      messageId: message.id,
+      sessionId: Number(activeTaskId.value) || 0,
+      runId: String(subagent.runId || dialog.runId || ''),
+      agentName,
+      planLines,
+      dialog
+    })
+  }
+  return dialogs
+})
+
+// 弹窗成功渲染后由 SubagentDialogDock 经 ChatComposer/ChatView 转发至此，向
+// 后端回传子 Agent 的 extension_ui_ack，解除桥接端渲染超时（与主 Agent 一致）。
+function ackSubagentDialog({ item, id }) {
+  if (!item?.sessionId || !item?.runId || !id) return
+  ackSubagentUI(item.sessionId, item.runId, String(id)).catch(() => {})
+}
+
+// 应答后本地立即清除该 dialog（后端随后会通过 subagent_ui_response 事件再次
+// 驱动 applySubagentUIEvent 清理，本地先清避免残留闪烁）。清除前校验当前
+// dialog ID 仍为本次应答的 ID：应答期间同一 run 可能已发起新的弹窗，无条件
+// 清除会误删新请求。
+function clearSubagentDialog(item) {
+  const message = messagesList.value.find(entry => entry.id === item?.messageId)
+  const currentDialog = message?.detail?.subagentUI?.dialog
+  if (!message || !currentDialog || currentDialog.id !== item?.dialog?.id) return
+  message.detail = {
+    ...message.detail,
+    subagentUI: { ...message.detail.subagentUI, dialog: undefined }
+  }
+}
+
+async function respondSubagentDialog({ item, payload }) {
+  const dialog = item?.dialog
+  if (!dialog?.id || !item?.runId) return
+  const command = { id: dialog.id, ...payload }
+  try {
+    if (payload?.browserProfile) {
+      const form = payload.browserProfile
+      const profile = await saveBrowserProfile({
+        key: form.key,
+        targetUrl: form.targetUrl,
+        loginUrl: form.targetUrl,
+        authMode: 'manual'
+      })
+      command.value = profile.id
+    }
+    await respondSubagentUI(item.sessionId, item.runId, command)
+    clearSubagentDialog(item)
+  } catch (err) {
+    pushToast('error', localizeError(String(err?.message || err)))
+  }
+}
+
 // 弹窗成功渲染后由 ChatPlanPanel 经 ChatComposer/ChatView 转发至此，向后端回传
 // extension_ui_ack 解除交互请求看门狗。ack 只是“弹窗已展示”的确认，不是答案；
 // 静默失败，不影响主流程。taskId 用于后台任务弹窗的确认路由。
@@ -1844,6 +2195,12 @@ function handleCompactionEvent(event, taskId, sourceIsActive) {
 
 function handleSubagentEvent(event) {
   const sourceTaskId = eventTaskId(event)
+  const childEvent = parseSubagentEvent(event?.event)
+  const attentionTaskId = sourceTaskId || activeTaskId.value
+  const childRequestKey = `subagent:${event?.runId || event?.childRunId || event?.toolCallId || ''}:${childEvent?.id || ''}`
+  if (childEvent?.type === 'subagent_ui_response') {
+    clearTaskPendingAttention(attentionTaskId, childRequestKey)
+  }
   if (
     sourceTaskId !== ''
     && String(sourceTaskId) !== String(activeTaskId.value)
@@ -1897,6 +2254,8 @@ function handleAgentEvent(event) {
         } catch {}
       }
     } else if (type === 'agent_settled') {
+      markTaskForSidebar(sourceTaskId)
+      clearTaskPendingAttention(sourceTaskId)
       setTaskRunning(sourceTaskId, false)
       persistExtDialogForTask(sourceTaskId, null)
       refreshSessions().catch(() => {})
@@ -2030,8 +2389,15 @@ function handleAgentEvent(event) {
     refreshSessions().catch(() => {})
     scheduleSessionChangesRefresh(60)
   } else if (type === 'agent_settled') {
-    setTaskRunning(sourceTaskId || activeTaskId.value, false)
-    executionRunning.value = false
+    markTaskForSidebar(sourceTaskId || activeTaskId.value)
+    clearTaskPendingAttention(sourceTaskId || activeTaskId.value)
+    // 主 agent 回合结束但仍有后台子 agent 在运行：会话整体尚未结束，保持
+    // 运行中表现（转圈/终止按钮保留），等最后一批 follow-up 回合真正收尾。
+    // 后端也会在 agent:state 中以 running:true 兜底（权威判定见 run.json）。
+    if (!hasRunningSubagents()) {
+      setTaskRunning(sourceTaskId || activeTaskId.value, false)
+      executionRunning.value = false
+    }
     requestSessionStats()
     refreshSessions().catch(() => {})
     void sendNextPendingPrompt(sourceTaskId || activeTaskId.value)
@@ -2160,6 +2526,7 @@ function upsertToolMessage(event) {
 async function runPrompt({ message, images, attachments: promptAttachments, skillPath, agentId, provider, model, workDir, mode: promptMode, thinkingLevel: promptThinking }) {
   error.value = ''
   const task = await ensureConversation(message)
+  clearTaskSidebarDot(task.id)
   const promptAgent = config.agents.find(agent => agent.id === agentId) || selectedAgent.value
   // 新问题真正进入消息流时，折叠此前所有轮次的思考；本轮新产生的
   // assistant 消息会由 ensureAssistant 以展开状态创建。
@@ -2219,6 +2586,7 @@ async function runBackgroundPrompt(taskId, prompt) {
   const task = taskById(taskId)
   if (!task) return
   const environment = config.environments.find(item => item.id === task.environmentId)
+  clearTaskSidebarDot(taskId)
   setTaskRunning(taskId, true)
   try {
     await startPrompt({
@@ -2312,6 +2680,9 @@ async function stop() {
   stoppingTaskIds.add(key)
   try {
     await abortPrompt(taskId)
+    // 成功也立即清除转圈标记，不依赖后续 agent_settled/agent:state 事件链：
+    // 会话处于"等待子 agent"状态时 abort 只被 Pi 应答、不会再产生收尾事件。
+    stoppingTaskIds.delete(key)
   } catch (err) {
     stoppingTaskIds.delete(key)
     error.value = localizeError(String(err))
@@ -2333,8 +2704,10 @@ async function pickSessionDirectory() {
 async function chatNewSession() {
   syncCurrentTask()
   activeTaskId.value = ''
-  currentAgentId.value = config.activeAgentId
-  const defaultAgent = config.agents.find(agent => agent.id === config.activeAgentId)
+  // 新建对话默认选中该工作目录上次使用的智能体；无记录回退系统默认智能体。
+  const envAgentId = envLastAgentId(config.activeEnvId) || config.activeAgentId
+  currentAgentId.value = envAgentId
+  const defaultAgent = config.agents.find(agent => agent.id === envAgentId)
   if (defaultAgent?.defaultProvider && defaultAgent?.defaultModel) {
     config.defaultProvider = defaultAgent.defaultProvider
     config.defaultModel = defaultAgent.defaultModel
@@ -2371,6 +2744,7 @@ async function chatNewSession() {
 
 async function selectTask(task) {
   if (!task) return
+  clearTaskSidebarDot(task.id)
   if (String(task.id) === String(activeTaskId.value)) {
     goHome()
     return
@@ -2449,15 +2823,34 @@ function chatSelectEnvironment(env) {
   // 切换工作空间时，仅当处于首页模式才保存/载入草稿；历史会话视图下
   // 输入框为空，不覆盖目标工作空间已保存的未发送草稿。
   if (isHomeMode.value) persistDraftForEnv(config.activeEnvId, draft.value)
+  // 把当前选中的智能体记到旧工作目录，下次回到该目录时恢复。
+  setEnvLastAgent(config.activeEnvId, currentAgentId.value)
   config.activeEnvId = env.id
   config.lastEnvironment = env.path
   draft.value = isHomeMode.value ? loadDraftForEnv(env.id) : ''
+  // 恢复目标工作目录上次选中的智能体；无记录回退系统默认智能体，
+  // 保证切换过来后直接发消息 / 新建对话都使用该目录的智能体。
+  const targetAgentId = envLastAgentId(env.id) || config.activeAgentId
+  const targetAgent = config.agents.find(agent => agent.id === targetAgentId)
+  if (targetAgent) {
+    currentAgentId.value = targetAgent.id
+    if (targetAgent.defaultProvider && targetAgent.defaultModel) {
+      config.defaultProvider = targetAgent.defaultProvider
+      config.defaultModel = targetAgent.defaultModel
+    } else {
+      const first = config.providers.find(p => p.enabled !== false && (p.models || []).length)
+      config.defaultProvider = first?.name || ''
+      config.defaultModel = first?.models?.[0]?.id || ''
+    }
+  }
   persist()
 }
 
 function chatSelectAgent(agent) {
   if (!agent) return
   currentAgentId.value = agent.id
+  // 记录该工作目录上次选中的智能体，下次新建对话时默认恢复。
+  setEnvLastAgent(config.activeEnvId, agent.id)
   selectedSkill.value = null
   if (agent.defaultProvider && agent.defaultModel) {
     config.defaultProvider = agent.defaultProvider
@@ -2572,7 +2965,7 @@ const piThinkingFormats = [
   'qwen', 'chat-template', 'qwen-chat-template', 'string-thinking', 'ant-ling'
 ]
 
-const piThinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const piThinkingLevels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 function ensureCompat(target) {
   if (!target.compat || Array.isArray(target.compat) || typeof target.compat !== 'object') target.compat = {}
@@ -3084,6 +3477,11 @@ provide(appContextKey, {
   openWsEditor,
   openSshEditor,
   requestDeleteWs,
+  startWorkspaceDrag,
+  handleWorkspaceDragOver,
+  dropWorkspace,
+  endWorkspaceDrag,
+  workspaceDragOverId: dragOverWorkspaceId,
   workspaceSsh,
   workspaceRemote,
   setActiveWorkspace,
@@ -3225,7 +3623,8 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="workspace-shell">
-      <aside class="sidebar" :class="{ 'sidebar--closed': !sidebarOpen }">
+      <aside class="sidebar" :class="{ 'sidebar--closed': !sidebarOpen, 'sidebar--resizing': sidebarResizing }" :style="sidebarOpen ? { width: sidebarWidth + 'px', flexBasis: sidebarWidth + 'px' } : null">
+        <div v-if="sidebarOpen" class="sidebar-resizer" @pointerdown="startSidebarResize"></div>
         <nav class="primary-nav">
           <button v-for="item in nav" :key="item.id" :class="{ active: activePage === item.id }" @click="activePage = item.id">
             <component :is="item.icon" :size="14" />
@@ -3242,12 +3641,26 @@ onBeforeUnmount(() => {
 
           <div class="sidebar-browser__groups">
             <template v-if="sessionGroups.length">
-              <div v-for="group in sessionGroups" :key="group.id || 'orphan'" class="sidebar-group">
+              <div
+                v-for="group in sessionGroups"
+                :key="group.id || 'orphan'"
+                class="sidebar-group"
+                :class="{ 'sidebar-group--dragging': group.id === draggedWorkspaceId, 'sidebar-group--drag-over': group.id === dragOverWorkspaceId }"
+                @dragover.prevent="handleWorkspaceDragOver(group)"
+                @drop.prevent="dropWorkspace(group)"
+              >
                 <div
                   class="sidebar-group__head"
                   :class="{ active: group.id && group.id === config.activeEnvId }"
                 >
-                  <button class="sidebar-group__title" @click="group.id && toggleWorkspaceCollapse(group.id)" :title="group.id ? (collapsedWorkspaceIds.has(group.id) ? t.expand : t.collapse) : ''">
+                  <button
+                    class="sidebar-group__title"
+                    :draggable="!!group.id"
+                    :title="group.id ? (collapsedWorkspaceIds.has(group.id) ? t.expand : t.collapse) : ''"
+                    @click="group.id && toggleWorkspaceCollapse(group.id)"
+                    @dragstart="startWorkspaceDrag(group, $event)"
+                    @dragend="endWorkspaceDrag"
+                  >
                     <Folder :size="14" />
                     <span :title="group.env?.path || group.name">{{ group.name }}</span>
                   </button>
@@ -3265,7 +3678,7 @@ onBeforeUnmount(() => {
                     :class="{ active: task.id === activeTaskId, 'session-item--running': task.status === 'running' }"
                     @click="selectTask(task)"
                   >
-                    <span v-if="taskNeedsConfirm(task.id)" class="confirm-dot confirm-dot--session"></span>
+                    <span v-if="taskHasSidebarDot(task.id)" class="sidebar-dot sidebar-dot--session"></span>
                     <LoaderCircle v-if="task.status === 'running'" class="spin" :size="14" />
                     <span class="session-item__name">{{ task.title }}</span>
                     <button class="session-archive" :title="t.archive" @click.stop="requestArchive($event, task)">
@@ -3351,6 +3764,7 @@ onBeforeUnmount(() => {
             :plan-items="planItems"
             :execution-plan="executionPlan"
             :extension-dialog="extensionDialog"
+            :subagent-dialogs="subagentDialogs"
             :compaction="compaction"
             :error="error"
             @update:draft="draft = $event"
@@ -3372,6 +3786,8 @@ onBeforeUnmount(() => {
             @compact="compactContext"
             @respond-extension="respondExtensionDialog"
             @ack-extension="ackExtensionDialog"
+            @respond-subagent-dialog="respondSubagentDialog"
+            @ack-subagent-dialog="ackSubagentDialog"
             @refresh-session-changes="refreshSessionChanges"
             @artifact-error="pushToast('error', localizeError(String($event)))"
           />

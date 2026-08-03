@@ -8,6 +8,7 @@ import { formatFileSize, formatTokenCount, imageSrc } from './chatFormatters.js'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext'
 import ChatExecutionPlan from './ChatExecutionPlan.vue'
 import ChatPlanPanel from './ChatPlanPanel.vue'
+import SubagentDialogDock from './SubagentDialogDock.vue'
 
 const props = defineProps({
   config: { type: Object, required: true },
@@ -32,6 +33,7 @@ const props = defineProps({
   planItems: { type: Array, default: () => [] },
   executionPlan: { type: Array, default: () => [] },
   extensionDialog: { type: Object, default: null },
+  subagentDialogs: { type: Array, default: () => [] },
   compaction: { type: Object, required: true },
   hasMessages: { type: Boolean, default: false },
   loadingHistory: { type: Boolean, default: false },
@@ -43,6 +45,7 @@ const emit = defineEmits([
   'update:model', 'add-images', 'update:thinking',
   'update:skill',
   'remove-image', 'preview-image', 'compact', 'respond-extension', 'ack-extension',
+  'respond-subagent-dialog', 'ack-subagent-dialog',
   'edit-pending', 'delete-pending',
   'add-attachments', 'remove-attachment'
 ])
@@ -283,13 +286,20 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
 
 <template>
   <footer v-show="!loadingHistory" class="chat-main__input">
-    <div v-if="extensionDialog" class="chat-plan-dock">
+    <div v-if="extensionDialog || subagentDialogs.length" class="chat-plan-dock">
       <ChatPlanPanel
+        v-if="extensionDialog"
         :items="planItems"
         :dialog="extensionDialog"
         :t="t"
         @respond="emit('respond-extension', $event)"
         @ack="emit('ack-extension', $event)"
+      />
+      <SubagentDialogDock
+        :dialogs="subagentDialogs"
+        :t="t"
+        @respond="emit('respond-subagent-dialog', $event)"
+        @ack="emit('ack-subagent-dialog', $event)"
       />
     </div>
     <ChatExecutionPlan v-else-if="executionPlan.length" :items="executionPlan" :t="t" />

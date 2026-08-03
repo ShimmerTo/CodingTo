@@ -4,85 +4,85 @@
 .chat-right-side.is-open { flex: 0 0 390px; width: 390px; }
 .chat-right-side__handle { position: absolute; top: 0; left: -3px; bottom: 0; width: 6px; z-index: 5; cursor: col-resize; }
 .chat-right-side__handle:hover { background: var(--accent); opacity: .25; }
-.chat-right-side__head { flex: 0 0 46px; height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 16px; border-bottom: 1px solid var(--border-soft); font-size: 13px; font-weight: 600; color: var(--text); }
+.chat-right-side__head { flex: 0 0 46px; height: 46px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 16px; border-bottom: 1px solid var(--border-soft); font-size: var(--fs-13); font-weight: 600; color: var(--text); }
 .chat-right-side__title { display: inline-flex; align-items: center; gap: 7px; }
 .chat-right-side__body { flex: 1; min-height: 0; overflow: auto; padding: 0; }
-.chat-right-side__placeholder { color: var(--muted); font-size: 13px; }
+.chat-right-side__placeholder { color: var(--muted); font-size: var(--fs-13); }
 .chat-right-side__tabs { display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border-soft); }
-.chat-right-side__tab { flex: 1; height: 30px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 13px; transition: color .15s, background .15s; }
+.chat-right-side__tab { flex: 1; height: 30px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: var(--fs-13); transition: color .15s, background .15s; }
 .chat-right-side__tab:hover { color: var(--text); background: var(--hover); }
 .chat-right-side__tab.is-active { color: var(--accent-fg); background: var(--accent); }
 .topbar-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; transition: color .15s, background .15s; }
 .topbar-btn:hover { color: var(--text); background: var(--hover); }
 .change-overview { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 6px; }
 .change-overview__summary { min-width: 0; display: flex; align-items: baseline; gap: 4px; overflow: hidden; white-space: nowrap; }
-.change-overview__summary strong { font-size: 14px; font-weight: 700; }
-.change-overview__summary span { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
-.change-overview__summary small { overflow: hidden; color: var(--faint); font-size: 11px; text-overflow: ellipsis; }
+.change-overview__summary strong { font-size: var(--fs-14); font-weight: 700; }
+.change-overview__summary span { flex: 0 0 auto; color: var(--muted); font-size: var(--fs-12); }
+.change-overview__summary small { overflow: hidden; color: var(--faint); font-size: var(--fs-12); text-overflow: ellipsis; }
 .change-overview__summary .change-overview__separator { color: var(--faint); }
 .change-overview__counts { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
 .change-overview__counts button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
 .change-overview__counts button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
 .change-overview__counts button:disabled { opacity: .55; }
-.change-count { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.change-count { font-size: var(--fs-12); font-weight: 700; font-variant-numeric: tabular-nums; }
 .change-count--added { color: #299764; }
 .change-count--deleted { color: #d14b42; }
-.change-root { margin: 0; padding: 0 10px 7px; overflow: hidden; color: var(--faint); font: 11px/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.change-root { margin: 0; padding: 0 10px 7px; overflow: hidden; color: var(--faint); font: var(--fs-12)/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 /* Git 仓库快照 */
 .git-panel { display: flex; flex-direction: column; gap: 10px; padding: 8px; }
 .git-panel__tabs { display: flex; gap: 4px; padding: 0 2px 4px; }
-.git-panel__tab { flex: 1; height: 30px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: 12.5px; transition: color .15s, background .15s; }
+.git-panel__tab { flex: 1; height: 30px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; font-size: var(--fs-13); transition: color .15s, background .15s; }
 .git-panel__tab:hover { color: var(--text); background: var(--hover); }
 .git-panel__tab.is-active { color: var(--accent-fg); background: var(--accent); }
 .git-panel__toolbar { min-height: 28px; display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
 .git-panel__toolbar button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; }
 .git-panel__toolbar button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
 .git-panel__toolbar button:disabled { opacity: .55; }
-.git-panel__branch { min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; color: var(--text); font: 12px/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.git-panel__branch { min-width: 0; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; color: var(--text); font: var(--fs-12)/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .git-panel__branch svg { flex: 0 0 auto; color: var(--accent); }
-.git-panel__root { margin: -8px 2px 0; overflow: hidden; color: var(--faint); font: 11px/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.git-panel__root { margin: -8px 2px 0; overflow: hidden; color: var(--faint); font: var(--fs-12)/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .git-panel__not-repository { display: flex; flex-direction: column; align-items: center; padding: 54px 22px; color: var(--faint); text-align: center; }
-.git-panel__not-repository strong { margin-top: 11px; color: var(--text); font-size: 13px; font-weight: 600; }
-.git-panel__not-repository p { margin: 7px 0 0; color: var(--faint); font-size: 11px; line-height: 1.55; }
+.git-panel__not-repository strong { margin-top: 11px; color: var(--text); font-size: var(--fs-13); font-weight: 600; }
+.git-panel__not-repository p { margin: 7px 0 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.55; }
 .git-section { overflow: hidden; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface); }
 .git-section__head { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; }
 .git-section__head > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.git-section__head strong { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.git-section__head small { overflow: hidden; color: var(--faint); font: 11px/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.git-section__total { flex: 0 0 auto; min-width: 22px; height: 22px; display: grid; place-items: center; padding: 0 6px; border-radius: 999px; color: var(--muted); background: var(--hover); font-size: 11px; font-weight: 600; }
-.git-section__summary { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 5px 11px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); color: var(--faint); background: var(--surface-2); font-size: 11px; }
+.git-section__head strong { overflow: hidden; color: var(--text); font-size: var(--fs-13); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.git-section__head small { overflow: hidden; color: var(--faint); font: var(--fs-12)/1.45 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.git-section__total { flex: 0 0 auto; min-width: 22px; height: 22px; display: grid; place-items: center; padding: 0 6px; border-radius: 999px; color: var(--muted); background: var(--hover); font-size: var(--fs-12); font-weight: 600; }
+.git-section__summary { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 5px 11px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); color: var(--faint); background: var(--surface-2); font-size: var(--fs-12); }
 .git-section__summary > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-file-list { display: flex; flex-direction: column; }
 .git-file { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border-soft); outline: 0; cursor: default; }
 .git-file:last-child { border-bottom: 0; }
 .git-file:hover,.git-file:focus-visible { background: var(--hover); }
 .git-file:focus-visible { box-shadow: inset 2px 0 var(--accent); }
-.git-file__status { flex: 0 0 auto; width: 21px; height: 21px; display: grid; place-items: center; border-radius: 5px; color: #9a6a1c; background: rgba(217,164,65,.12); font: 700 11px Consolas, "Cascadia Mono", monospace; }
+.git-file__status { flex: 0 0 auto; width: 21px; height: 21px; display: grid; place-items: center; border-radius: 5px; color: #9a6a1c; background: rgba(217,164,65,.12); font: 700 var(--fs-12) Consolas, "Cascadia Mono", monospace; }
 .git-file__status.is-added, .git-file__status.is-untracked { color: #237d53; background: rgba(41,151,100,.12); }
 .git-file__status.is-deleted { color: #b33b34; background: rgba(209,75,66,.12); }
 .git-file__status.is-renamed { color: #596eb0; background: rgba(89,110,176,.12); }
 .git-file__path { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.git-file__path strong { overflow: hidden; color: var(--text); font: 12px/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.git-file__path small { overflow: hidden; color: var(--faint); font: 11px/1.35 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.git-file__path strong { overflow: hidden; color: var(--text); font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.git-file__path small { overflow: hidden; color: var(--faint); font: var(--fs-12)/1.35 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .git-file__path .git-file__state { color: var(--muted); direction: ltr; }
 .git-file__numbers { flex: 0 0 auto; display: flex; gap: 6px; }
-.git-section__empty { margin: 0; padding: 20px 12px; color: var(--faint); font-size: 12px; line-height: 1.55; text-align: center; }
-.git-base-picker { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.git-section__empty { margin: 0; padding: 20px 12px; color: var(--faint); font-size: var(--fs-12); line-height: 1.55; text-align: center; }
+.git-base-picker { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: var(--muted); font-size: var(--fs-12); font-weight: 400; }
 .git-base-picker__label { flex: none; white-space: nowrap; }
 .git-base-select { position: relative; flex: 1 1 auto; min-width: 0; }
 .git-base-select.is-disabled { opacity: .6; }
-.git-base-select__trigger { width: 100%; height: 27px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-2); color: var(--text); cursor: pointer; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
+.git-base-select__trigger { width: 100%; height: 27px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-2); color: var(--text); cursor: pointer; font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; }
 .git-base-select__trigger:disabled { cursor: not-allowed; }
 .git-base-select__trigger:focus { outline: 0; border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); }
 .git-base-select__value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .git-base-select__caret { flex: none; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--muted); }
 .git-base-select.is-open .git-base-select__caret { transform: rotate(180deg); }
 .git-base-select__pop { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); overflow: hidden; }
-.git-base-select__filter { width: 100%; height: 30px; box-sizing: border-box; padding: 0 10px; border: 0; border-bottom: 1px solid var(--border-soft); outline: 0; background: var(--surface-2); color: var(--text); font: 12px/1.4 Consolas, "Cascadia Mono", monospace; }
+.git-base-select__filter { width: 100%; height: 30px; box-sizing: border-box; padding: 0 10px; border: 0; border-bottom: 1px solid var(--border-soft); outline: 0; background: var(--surface-2); color: var(--text); font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; }
 .git-base-select__filter::placeholder { color: var(--faint); }
 .git-base-select__list { max-height: 180px; overflow-y: auto; margin: 0; padding: 4px; list-style: none; }
-.git-base-select__empty { padding: 8px; color: var(--faint); font-size: 12px; text-align: center; }
-.git-base-select__option { padding: 6px 8px; border-radius: 5px; color: var(--text); cursor: pointer; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-base-select__empty { padding: 8px; color: var(--faint); font-size: var(--fs-12); text-align: center; }
+.git-base-select__option { padding: 6px 8px; border-radius: 5px; color: var(--text); cursor: pointer; font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .git-base-select__option:hover { background: var(--hover); }
 .git-base-select__option.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
 /* 时间线（节点产物） */
@@ -109,21 +109,21 @@
 .timeline__node-row.is-static { cursor: default; opacity: .78; }
 .timeline__node-row.is-static:hover { background: transparent; }
 .timeline__node-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.timeline__node-main strong { flex: 1 1 auto; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline__node-main strong { flex: 1 1 auto; min-width: 0; font-size: var(--fs-13); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .timeline__node-meta { min-width: 0; display: flex; align-items: center; gap: 5px; overflow: hidden; }
-.timeline__node-meta small { flex: 0 0 auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+.timeline__node-meta small { flex: 0 0 auto; color: var(--faint); font-size: var(--fs-12); white-space: nowrap; }
 .timeline__node-meta small + small::before { margin-right: 5px; content: '·'; }
 .timeline__node-side { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.timeline__node-numbers { display: flex; gap: 5px; font-size: 11px; }
-.timeline__node-running { padding: 1px 6px; border-radius: 999px; color: #9a6a1c; background: rgba(217, 164, 65, .14); font-size: 11px; font-weight: 600; }
+.timeline__node-numbers { display: flex; gap: 5px; font-size: var(--fs-12); }
+.timeline__node-running { padding: 1px 6px; border-radius: 999px; color: #9a6a1c; background: rgba(217, 164, 65, .14); font-size: var(--fs-12); font-weight: 600; }
 .timeline__node-chevron, .timeline__node-chevron-spacer { flex: 0 0 auto; width: 14px; }
 .timeline__node-chevron { color: var(--faint); transition: transform .15s ease, color .15s ease; }
 .timeline__node-row:hover .timeline__node-chevron { color: var(--muted); }
 .timeline__node-row.is-open .timeline__node-chevron { transform: rotate(90deg); color: var(--muted); }
 .timeline__children { display: flex; flex-direction: column; padding: 3px 0 5px; }
 .timeline__section + .timeline__section { margin-top: 2px; border-top: 1px solid var(--border-soft); }
-.timeline__section-head { display: flex; align-items: center; gap: 5px; padding: 7px 10px 4px 32px; color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
-.timeline__section-head small { min-width: 18px; padding: 0 4px; border-radius: 999px; background: var(--hover); font-size: 11px; line-height: 18px; text-align: center; }
+.timeline__section-head { display: flex; align-items: center; gap: 5px; padding: 7px 10px 4px 32px; color: var(--faint); font-size: var(--fs-12); font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
+.timeline__section-head small { min-width: 18px; padding: 0 4px; border-radius: 999px; background: var(--hover); font-size: var(--fs-12); line-height: 18px; text-align: center; }
 .timeline__file, .timeline__artifact { position: relative; display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 6px 9px 6px 11px; border: 0; color: var(--text); background: transparent; cursor: pointer; text-align: left; transition: background .15s ease; }
 .timeline__file:hover, .timeline__artifact:hover { background: var(--hover); }
 .timeline__file-icon, .timeline__artifact-icon { flex: 0 0 auto; width: 14px; }
@@ -131,36 +131,31 @@
 .timeline__file-icon.is-deleted { color: #d14b42; }
 .timeline__artifact-icon { color: var(--accent); }
 .timeline__file-path { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.timeline__file-path strong { min-width: 0; overflow: hidden; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.timeline__file-path small { min-width: 0; overflow: hidden; color: var(--faint); font: 11px/1.35 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-.timeline__file-numbers { flex: 0 0 auto; display: flex; gap: 6px; font-size: 11px; }
+.timeline__file-path strong { min-width: 0; overflow: hidden; font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.timeline__file-path small { min-width: 0; overflow: hidden; color: var(--faint); font: var(--fs-12)/1.35 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.timeline__file-numbers { flex: 0 0 auto; display: flex; gap: 6px; font-size: var(--fs-12); }
 .timeline__artifact-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.timeline__artifact-name { min-width: 0; overflow: hidden; font: 12px/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.timeline__artifact-main small { color: var(--faint); font-size: 11px; }
-.timeline__file-chevron { flex: 0 0 auto; color: var(--faint); transition: transform .15s ease, color .15s ease; }
-.timeline__file.is-open .timeline__file-chevron { transform: rotate(90deg); color: var(--muted); }
-.timeline__filediff { margin: 0 8px 8px 32px; border-left: 2px solid color-mix(in srgb, var(--accent) 40%, var(--border-soft)); border-radius: 0 6px 6px 0; background: var(--surface-2); overflow-x: auto; }
-.timeline__filediff .change-file__notice { padding: 14px; }
-.timeline__filediff .diff-hunk + .diff-hunk { border-top: 1px solid var(--border-soft); }
+.timeline__artifact-name { min-width: 0; overflow: hidden; font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.timeline__artifact-main small { color: var(--faint); font-size: var(--fs-12); }
 
 /* 下钻详情 */
 .detail-head { display: flex; align-items: center; padding: 4px 2px 8px; border-bottom: 1px solid var(--border-soft); margin-bottom: 8px; }
-.back-btn { display: inline-flex; align-items: center; gap: 2px; padding: 4px 8px; border: 0; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; border-radius: 6px; }
+.back-btn { display: inline-flex; align-items: center; gap: 2px; padding: 4px 8px; border: 0; background: transparent; color: var(--muted); font-size: var(--fs-12); cursor: pointer; border-radius: 6px; }
 .back-btn:hover { background: var(--hover); color: var(--text); }
-.detail-title { margin: 0; padding: 0 2px; font-size: 14px; font-weight: 600; color: var(--text); word-break: break-word; }
-.detail-meta { margin: 4px 0 12px; padding: 0 2px; font-size: 11px; color: var(--faint); }
+.detail-title { margin: 0; padding: 0 2px; font-size: var(--fs-14); font-weight: 600; color: var(--text); word-break: break-word; }
+.detail-meta { margin: 4px 0 12px; padding: 0 2px; font-size: var(--fs-12); color: var(--faint); }
 
-.change-node__empty { margin: 0; padding: 13px 34px; color: var(--faint); font-size: 11px; }
+.change-node__empty { margin: 0; padding: 13px 34px; color: var(--faint); font-size: var(--fs-12); }
 .change-files { border-top: 1px solid var(--border-soft); margin-top: 4px; }
 .change-artifacts { border-top: 1px solid var(--border-soft); margin-top: 8px; }
-.change-artifacts__head { padding: 9px 12px 3px; color: var(--faint); font-size: 11px; letter-spacing: .03em; text-transform: uppercase; }
+.change-artifacts__head { padding: 9px 12px 3px; color: var(--faint); font-size: var(--fs-12); letter-spacing: .03em; text-transform: uppercase; }
 .change-artifact__row { width: 100%; min-height: 42px; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 7px 12px; border: 0; border-bottom: 1px solid var(--border-soft); color: var(--text); background: transparent; cursor: pointer; text-align: left; }
 .change-artifact__row:last-child { border-bottom: 0; }
 .change-artifact__row:hover { background: var(--hover); }
 .change-artifact__icon { color: var(--accent); }
-.change-artifact__name { overflow: hidden; font: 12px Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.change-artifact__kind { padding: 1px 6px; border-radius: 4px; color: var(--muted); background: var(--hover); font-size: 11px; }
-.change-artifact__size { color: var(--faint); font: 11px Consolas, "Cascadia Mono", monospace; font-variant-numeric: tabular-nums; }
+.change-artifact__name { overflow: hidden; font: var(--fs-12) Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.change-artifact__kind { padding: 1px 6px; border-radius: 4px; color: var(--muted); background: var(--hover); font-size: var(--fs-12); }
+.change-artifact__size { color: var(--faint); font: var(--fs-12) Consolas, "Cascadia Mono", monospace; font-variant-numeric: tabular-nums; }
 .change-file { border-bottom: 1px solid var(--border-soft); background: var(--surface); }
 .change-file__row { width: 100%; min-height: 44px; display: grid; grid-template-columns: 14px 16px minmax(0, 1fr) auto 20px; align-items: center; gap: 7px; padding: 7px 10px; border: 0; color: var(--text); background: transparent; cursor: pointer; text-align: left; }
 .change-file__row:hover { background: var(--hover); }
@@ -170,19 +165,19 @@
 .change-file__icon { color: var(--muted); }
 .change-file__icon.is-added { color: #299764; }
 .change-file__icon.is-deleted { color: #d14b42; }
-.change-file__path { min-width: 0; display: flex; align-items: baseline; overflow: hidden; font-size: 12px; }
-.change-file__path small { overflow: hidden; color: var(--faint); font: 11px Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.change-file__path strong { flex-shrink: 0; font: 12px Consolas, monospace; }
+.change-file__path { min-width: 0; display: flex; align-items: baseline; overflow: hidden; font-size: var(--fs-12); }
+.change-file__path small { overflow: hidden; color: var(--faint); font: var(--fs-12) Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.change-file__path strong { flex-shrink: 0; font: var(--fs-12) Consolas, monospace; }
 .change-file__numbers { display: inline-flex; align-items: center; gap: 6px; }
-.change-file__binary { color: var(--faint); font: 11px Consolas, "Cascadia Mono", monospace; }
-.change-file__status { width: 19px; height: 19px; display: grid; place-items: center; border-radius: 4px; color: #9a6a1c; background: rgba(217,164,65,.12); font: 11px Consolas, "Cascadia Mono", monospace; }
+.change-file__binary { color: var(--faint); font: var(--fs-12) Consolas, "Cascadia Mono", monospace; }
+.change-file__status { width: 19px; height: 19px; display: grid; place-items: center; border-radius: 4px; color: #9a6a1c; background: rgba(217,164,65,.12); font: var(--fs-12) Consolas, "Cascadia Mono", monospace; }
 .change-file__status.is-added { color: #237d53; background: rgba(41,151,100,.12); }
 .change-file__status.is-deleted { color: #b33b34; background: rgba(209,75,66,.12); }
 .change-file__diff { overflow-x: auto; border-top: 1px solid var(--border-soft); background: var(--surface-2); padding: 8px 2px; }
-.change-file__notice { margin: 0; padding: 14px; color: var(--muted); font-size: 11px; }
+.change-file__notice { margin: 0; padding: 14px; color: var(--muted); font-size: var(--fs-12); }
 .diff-hunk + .diff-hunk { border-top: 1px solid var(--border-soft); }
-.diff-hunk__header { padding: 6px 10px; color: #5b70a6; background: rgba(70,103,170,.08); font: 11px/1.5 Consolas, "Cascadia Mono", monospace; }
-.diff-line { min-width: max-content; display: grid; grid-template-columns: 38px 38px 14px minmax(240px, 1fr); font: 12px/1.6 Consolas, "Cascadia Mono", monospace; }
+.diff-hunk__header { padding: 6px 10px; color: #5b70a6; background: rgba(70,103,170,.08); font: var(--fs-12)/1.5 Consolas, "Cascadia Mono", monospace; }
+.diff-line { min-width: max-content; display: grid; grid-template-columns: 38px 38px 14px minmax(240px, 1fr); font: var(--fs-12)/1.6 Consolas, "Cascadia Mono", monospace; }
 .diff-line.is-added { background: rgba(41,151,100,.11); }
 .diff-line.is-deleted { background: rgba(209,75,66,.10); }
 .diff-line__number { padding: 1px 5px; color: var(--faint); background: rgba(120,120,115,.05); text-align: right; user-select: none; }
@@ -192,6 +187,6 @@
 .diff-line code { display: block; padding: 1px 10px 1px 2px; color: var(--text); white-space: pre; }
 .change-empty { display: flex; flex-direction: column; align-items: center; padding: 54px 24px; color: var(--muted); text-align: center; }
 .change-empty > div { width: 42px; height: 42px; display: grid; place-items: center; margin-bottom: 13px; border: 1px solid var(--border-soft); border-radius: 11px; color: var(--faint); background: var(--surface); }
-.change-empty strong { color: var(--text); font-size: 13px; font-weight: 600; }
-.change-empty p { max-width: 240px; margin: 7px 0 0; color: var(--faint); font-size: 11px; line-height: 1.6; }
+.change-empty strong { color: var(--text); font-size: var(--fs-13); font-weight: 600; }
+.change-empty p { max-width: 240px; margin: 7px 0 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.6; }
 .timeline__file-source { color: var(--amber) !important; }

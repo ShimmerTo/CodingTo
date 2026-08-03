@@ -26,7 +26,9 @@ const activeFile = computed(() => props.files[props.index] || null)
 const positionLabel = computed(() => `${Math.min(props.index + 1, props.files.length)} / ${props.files.length}`)
 
 watch(
-  [() => props.open, () => props.index, () => activeFile.value?.path, () => props.baseBranch],
+  // 包含 props.files：节点产物入口每次点击都会传入新数组（引用变化），
+  // 确保跨节点点击同路径同 index 的文件时也会重载，避免显示陈旧快照。
+  [() => props.open, () => props.index, () => activeFile.value?.path, () => props.files, () => props.baseBranch],
   loadDetail,
   { immediate: true }
 )
@@ -46,10 +48,42 @@ async function loadDetail() {
     )
     if (nonce === requestNonce) detail.value = result
   } catch (cause) {
-    if (nonce === requestNonce) error.value = String(cause)
+    if (nonce === requestNonce) {
+      // 节点产物入口的文件附带编辑快照 hunks：git 实时对比不可用
+      // （非 git 仓库 / 文件已提交）时回退渲染节点快照 diff。
+      const file = activeFile.value
+      if (file?.hunks?.length) {
+        detail.value = {
+          path: file.path,
+          oldPath: file.oldPath || '',
+          scope: props.scope,
+          status: file.status,
+          kind: 'text',
+          hunks: file.hunks,
+          added: file.added || 0,
+          deleted: file.deleted || 0,
+          fromNodeSnapshot: true,
+          before: { lineCount: maxHunkLine(file.hunks, 'oldNumber') },
+          after: { lineCount: maxHunkLine(file.hunks, 'newNumber') }
+        }
+      } else {
+        error.value = String(cause)
+      }
+    }
   } finally {
     if (nonce === requestNonce) loading.value = false
   }
+}
+
+function maxHunkLine(hunks, key) {
+  let max = 0
+  for (const hunk of hunks || []) {
+    for (const line of hunk.lines || []) {
+      const value = Number(line[key]) || 0
+      if (value > max) max = value
+    }
+  }
+  return max
 }
 
 function navigate(delta) {
@@ -200,7 +234,8 @@ function versionTitle(side) {
         </main>
 
         <footer class="git-diff-dialog__foot">
-          <span>{{ t.gitNavigationHint }}</span>
+          <span v-if="detail?.fromNodeSnapshot">{{ t.gitNodeSnapshotHint }}</span>
+          <span v-else>{{ t.gitNavigationHint }}</span>
           <span v-if="detail?.oldPath">{{ detail.oldPath }} → {{ detail.path }}</span>
         </footer>
       </section>
@@ -214,23 +249,23 @@ function versionTitle(side) {
 .git-diff-dialog__head { flex: 0 0 auto; min-height: 62px; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .git-diff-dialog__icon { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .git-diff-dialog__title { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.git-diff-dialog__title strong { overflow: hidden; color: var(--text); font: 13px/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.git-diff-dialog__title small { color: var(--muted); font-size: 12px; }
+.git-diff-dialog__title strong { overflow: hidden; color: var(--text); font: var(--fs-13)/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.git-diff-dialog__title small { color: var(--muted); font-size: var(--fs-12); }
 .git-diff-dialog__counts { flex: 0 0 auto; display: flex; gap: 8px; }
 .git-diff-dialog__nav { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
 .git-diff-dialog__nav button,.git-diff-dialog__close { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--muted); background: transparent; cursor: pointer; }
 .git-diff-dialog__nav button:hover:not(:disabled),.git-diff-dialog__close:hover { color: var(--text); background: var(--hover); }
 .git-diff-dialog__nav button:disabled { opacity: .35; cursor: default; }
-.git-diff-dialog__nav span { min-width: 52px; color: var(--muted); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.git-diff-dialog__nav span { min-width: 52px; color: var(--muted); font-size: var(--fs-12); text-align: center; font-variant-numeric: tabular-nums; }
 .git-diff-dialog__body { flex: 1 1 auto; min-height: 0; overflow: auto; background: color-mix(in srgb, var(--surface-2) 52%, var(--surface)); }
-.git-diff-dialog__state { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.git-diff-dialog__state { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: var(--fs-13); }
 .git-diff-dialog__state.is-error { color: var(--danger); }
-.git-diff-dialog__foot { flex: 0 0 auto; min-height: 38px; display: flex; justify-content: space-between; gap: 16px; padding: 9px 14px; border-top: 1px solid var(--border); color: var(--faint); background: var(--surface); font-size: 11px; }
-.git-diff-version-bar { position: sticky; top: 0; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; padding: 8px 16px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--surface); font-size: 12px; }
+.git-diff-dialog__foot { flex: 0 0 auto; min-height: 38px; display: flex; justify-content: space-between; gap: 16px; padding: 9px 14px; border-top: 1px solid var(--border); color: var(--faint); background: var(--surface); font-size: var(--fs-12); }
+.git-diff-version-bar { position: sticky; top: 0; z-index: 1; display: grid; grid-template-columns: 1fr 1fr; padding: 8px 16px; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--surface); font-size: var(--fs-12); }
 .git-diff-version-bar span:last-child { text-align: right; }
 .git-diff-hunk + .git-diff-hunk { border-top: 1px solid var(--border); }
-.git-diff-hunk__head { padding: 7px 14px; color: #667ab0; background: rgb(80 110 175 / .09); font: 12px/1.5 Consolas, "Cascadia Mono", monospace; }
-.git-diff-line { min-width: max-content; display: grid; grid-template-columns: 48px 48px 18px minmax(580px, 1fr); font: 12px/1.62 Consolas, "Cascadia Mono", monospace; }
+.git-diff-hunk__head { padding: 7px 14px; color: #667ab0; background: rgb(80 110 175 / .09); font: var(--fs-12)/1.5 Consolas, "Cascadia Mono", monospace; }
+.git-diff-line { min-width: max-content; display: grid; grid-template-columns: 48px 48px 18px minmax(580px, 1fr); font: var(--fs-12)/1.62 Consolas, "Cascadia Mono", monospace; }
 .git-diff-line.is-added { background: rgb(41 151 100 / .11); }
 .git-diff-line.is-deleted { background: rgb(209 75 66 / .1); }
 .git-diff-line__number { padding: 1px 8px; color: var(--faint); background: rgb(120 120 115 / .05); text-align: right; user-select: none; font-variant-numeric: tabular-nums; }
@@ -240,15 +275,15 @@ function versionTitle(side) {
 .git-diff-line code { display: block; padding: 1px 16px 1px 4px; color: var(--text); white-space: pre; }
 .git-visual-compare,.git-binary-compare { min-height: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 16px; }
 .git-version-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }
-.git-version-card > header { padding: 10px 12px; border-bottom: 1px solid var(--border-soft); color: var(--text); font-size: 13px; font-weight: 600; }
-.git-image-preview { min-height: 300px; display: grid; place-items: center; padding: 14px; color: var(--faint); background-image: linear-gradient(45deg, var(--surface-2) 25%, transparent 25%),linear-gradient(-45deg, var(--surface-2) 25%, transparent 25%),linear-gradient(45deg, transparent 75%, var(--surface-2) 75%),linear-gradient(-45deg, transparent 75%, var(--surface-2) 75%); background-position: 0 0,0 8px,8px -8px,-8px 0; background-size: 16px 16px; font-size: 12px; }
+.git-version-card > header { padding: 10px 12px; border-bottom: 1px solid var(--border-soft); color: var(--text); font-size: var(--fs-13); font-weight: 600; }
+.git-image-preview { min-height: 300px; display: grid; place-items: center; padding: 14px; color: var(--faint); background-image: linear-gradient(45deg, var(--surface-2) 25%, transparent 25%),linear-gradient(-45deg, var(--surface-2) 25%, transparent 25%),linear-gradient(45deg, transparent 75%, var(--surface-2) 75%),linear-gradient(-45deg, transparent 75%, var(--surface-2) 75%); background-position: 0 0,0 8px,8px -8px,-8px 0; background-size: 16px 16px; font-size: var(--fs-12); }
 .git-image-preview img { max-width: 100%; max-height: 460px; object-fit: contain; }
 .git-file-metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; margin: 0; }
 .git-file-metadata > div { min-width: 0; padding: 10px 12px; border-top: 1px solid var(--border-soft); }
 .git-file-metadata > div:nth-child(odd) { border-right: 1px solid var(--border-soft); }
-.git-file-metadata dt { color: var(--faint); font-size: 11px; }
-.git-file-metadata dd { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--text); font: 12px/1.45 Consolas, "Cascadia Mono", monospace; }
-.git-version-card__missing { min-height: 220px; display: grid; place-items: center; color: var(--faint); font-size: 12px; }
+.git-file-metadata dt { color: var(--faint); font-size: var(--fs-12); }
+.git-file-metadata dd { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--text); font: var(--fs-12)/1.45 Consolas, "Cascadia Mono", monospace; }
+.git-version-card__missing { min-height: 220px; display: grid; place-items: center; color: var(--faint); font-size: var(--fs-12); }
 @media (max-width: 760px) {
   .git-diff-backdrop { padding: 0; }
   .git-diff-dialog { width: 100vw; height: 100vh; max-height: none; border: 0; border-radius: 0; }

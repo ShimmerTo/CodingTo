@@ -917,7 +917,6 @@ watch(
                 <div class="agent-ext-row__meta">
                   <span v-if="status.required" class="agent-ext-row__version agent-ext-row__version--latest">{{ t.requiredBuiltin }}</span>
                   <span v-if="status.installed && status.installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ status.installedVersion }}</span>
-                  <span class="agent-ext-row__version agent-ext-row__version--latest"><span class="agent-ext-row__version-label">{{ t.latestVersionLabel }}</span>v{{ status.currentVersion }}</span>
                   <button v-if="status.installed && status.installedVersion && status.installedVersion !== status.currentVersion" class="primary-button compact" :disabled="builtinBusy === status.key" @click="updateBuiltinTool(status.key)"><RefreshCw v-if="builtinBusy === status.key" :size="13" />{{ t.updateBuiltin }}</button>
                 </div>
               </div>

@@ -1,13 +1,12 @@
 <script setup>
 import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
-import { Download, FolderOpen, Globe2, Moon, RefreshCw, Settings, Sun, Upload, User } from 'lucide-vue-next'
+import { Download, FolderOpen, Globe2, Moon, RefreshCw, Sun, Upload, User } from 'lucide-vue-next'
 import { Call, Events } from '@wailsio/runtime'
 import { useAppContext } from '../../composables/appContext'
 import InstallDialog from '../../components/InstallDialog.vue'
 import { renderMarkdown } from '../../components/chat/chatFormatters.js'
 
 const { t, config, bootstrap, pickSessionDirectory, persist, appUpdateAvailable } = useAppContext()
-
 const piVersion = ref('')
 const checkingUpdate = ref(false)
 const updating = ref(false)
@@ -150,6 +149,11 @@ function setTheme(value) {
   config.preferences.theme = value
   persist()
 }
+// 界面字号档位：小（默认，12/13/14px）、中（+1）、大（+2），由 App.vue applyTheme() 改写 --fs-* 变量生效。
+function setFontSize(value) {
+  config.preferences.fontSize = value
+  persist()
+}
 function applyAccent() {
   const s = accentInput.value.trim()
   const ok = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s)
@@ -175,6 +179,20 @@ function setDiffMode(value) {
 // 头像昵称展示：默认开启，关闭后对话详情不再显示 agent / 用户头像与昵称。
 function setShowIdentity(value) {
   config.preferences.showIdentity = value
+  persist()
+}
+function setSubagentConcurrency(value) {
+  config.subagentConcurrency = Math.min(4, Math.max(1, Number(value) || 4))
+  persist()
+}
+// 工具调用超时：限制单次工具（bash）执行时长，默认 10 分钟，最大 1 小时（60 分钟）。
+function setToolExecutionTimeout(value) {
+  config.toolExecutionTimeoutMinutes = Math.min(60, Math.max(1, Number(value) || 10))
+  persist()
+}
+// 计划审批 / 任务完成时是否发送系统通知（默认开启）。
+function setSystemNotification(value) {
+  config.systemNotificationEnabled = !!value
   persist()
 }
 
@@ -225,7 +243,7 @@ function resizeImageFile(file, maxSize) {
 
 <template>
 <section class="content-page settings-page">
-          <div class="page-heading"><div><h2>{{ t.settingsTitle }}</h2><p>Preferences, providers and Pi runtime</p></div><Settings :size="28" /></div>
+          <div class="page-heading"><div><h2>{{ t.settingsTitle }}</h2><p>{{ t.settingsIntro }}</p></div></div>
 
           <div class="settings-section">
             <h2>{{ t.appearance }}</h2>
@@ -235,6 +253,14 @@ function resizeImageFile(file, maxSize) {
                 <button :class="{ active: config.preferences.theme === 'system' }" @click="setTheme('system')"><Globe2 :size="14" />{{ t.system }}</button>
                 <button :class="{ active: config.preferences.theme === 'light' }" @click="setTheme('light')"><Sun :size="14" />{{ t.light }}</button>
                 <button :class="{ active: config.preferences.theme === 'dark' }" @click="setTheme('dark')"><Moon :size="14" />{{ t.dark }}</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div><label>{{ t.fontSize }}</label></div>
+              <div class="segmented">
+                <button :class="{ active: config.preferences.fontSize !== 'medium' && config.preferences.fontSize !== 'large' }" @click="setFontSize('small')">{{ t.fontSizeSmall }}</button>
+                <button :class="{ active: config.preferences.fontSize === 'medium' }" @click="setFontSize('medium')">{{ t.fontSizeMedium }}</button>
+                <button :class="{ active: config.preferences.fontSize === 'large' }" @click="setFontSize('large')">{{ t.fontSizeLarge }}</button>
               </div>
             </div>
             <!-- 中英文切换栏 temporarily disabled
@@ -281,6 +307,49 @@ function resizeImageFile(file, maxSize) {
                 <button :class="{ active: config.preferences.showIdentity === false }" @click="setShowIdentity(false)">{{ t.off }}</button>
               </div>
             </div>
+          </div>
+
+          <div class="settings-section">
+            <h2>{{ t.agentRuntimeSettings }}</h2>
+            <div class="setting-row">
+              <div>
+                <label>{{ t.subagentConcurrency }}</label>
+                <small>{{ t.subagentConcurrencyHint }}</small>
+              </div>
+              <div class="segmented" role="group" :aria-label="t.subagentConcurrency">
+                <button
+                  v-for="count in 4"
+                  :key="count"
+                  :class="{ active: config.subagentConcurrency === count }"
+                  @click="setSubagentConcurrency(count)"
+                >{{ count }}</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div>
+                <label>{{ t.toolExecutionTimeout }}</label>
+                <small>{{ t.toolExecutionTimeoutHint }}</small>
+              </div>
+              <input
+                type="number"
+                min="1"
+                max="60"
+                class="tool-timeout-input"
+                :value="config.toolExecutionTimeoutMinutes || 10"
+                @change="setToolExecutionTimeout($event.target.value)"
+              />
+            </div>
+            <div class="setting-row">
+              <div>
+                <label>{{ t.systemNotification }}</label>
+                <small>{{ t.systemNotificationHint }}</small>
+              </div>
+              <div class="segmented">
+                <button :class="{ active: config.systemNotificationEnabled !== false }" @click="setSystemNotification(true)">{{ t.on }}</button>
+                <button :class="{ active: config.systemNotificationEnabled === false }" @click="setSystemNotification(false)">{{ t.off }}</button>
+              </div>
+            </div>
+            <p class="settings-note">{{ t.subagentConcurrencyNextStart }}</p>
           </div>
 
           <div class="settings-section">
@@ -396,6 +465,12 @@ function resizeImageFile(file, maxSize) {
 </template>
 
 <style scoped>
+.settings-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-12);
+  line-height: 1.55;
+}
 .update-log-md {
   max-height: 60vh;
   overflow: auto;
@@ -410,10 +485,10 @@ function resizeImageFile(file, maxSize) {
 .update-log-md :deep(h2),
 .update-log-md :deep(h3),
 .update-log-md :deep(h4) { margin: 16px 0 8px; color: var(--text); line-height: 1.35; }
-.update-log-md :deep(h1) { font-size: 18px; }
-.update-log-md :deep(h2) { font-size: 16px; }
+.update-log-md :deep(h1) { font-size: var(--fs-14); }
+.update-log-md :deep(h2) { font-size: var(--fs-14); }
 .update-log-md :deep(h3),
-.update-log-md :deep(h4) { font-size: 14px; }
+.update-log-md :deep(h4) { font-size: var(--fs-14); }
 .update-log-md :deep(ul),
 .update-log-md :deep(ol) { margin: 7px 0 10px; padding-left: 22px; }
 .update-log-md :deep(li + li) { margin-top: 3px; }
@@ -421,9 +496,9 @@ function resizeImageFile(file, maxSize) {
 .update-log-md :deep(strong) { font-weight: 700; }
 .update-log-md :deep(blockquote) { margin: 9px 0; padding: 2px 0 2px 11px; border-left: 3px solid var(--border); color: var(--muted); }
 .update-log-md :deep(hr) { margin: 14px 0; border: 0; border-top: 1px solid var(--border-soft); }
-.update-log-md :deep(code) { padding: 1px 4px; border-radius: 4px; background: var(--surface-2); font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
+.update-log-md :deep(code) { padding: 1px 4px; border-radius: 4px; background: var(--surface-2); font: var(--fs-12)/1.5 "SFMono-Regular", Consolas, monospace; }
 .update-log-md :deep(pre) { max-width: 100%; margin: 9px 0; padding: 10px 11px; overflow-x: auto; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); white-space: pre; }
-.update-log-md :deep(pre code) { padding: 0; background: transparent; font-size: 11px; }
+.update-log-md :deep(pre code) { padding: 0; background: transparent; font-size: var(--fs-12); }
 .update-log-md :deep(table) { display: block; max-width: 100%; margin: 10px 0; overflow-x: auto; border-collapse: collapse; }
 .update-log-md :deep(th),
 .update-log-md :deep(td) { min-width: 90px; padding: 6px 9px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
@@ -443,7 +518,7 @@ function resizeImageFile(file, maxSize) {
   border: 0;
   background: transparent;
   color: var(--accent);
-  font-size: 13px;
+  font-size: var(--fs-13);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -452,4 +527,22 @@ function resizeImageFile(file, maxSize) {
 .app-update-new { color: var(--accent); font-weight: 650; }
 .app-update-note { color: var(--muted); }
 .app-update-error { color: #ef4444; }
+.tool-timeout-input {
+  width: 76px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-13);
+  text-align: center;
+}
+.tool-timeout-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.tool-timeout-input::-webkit-outer-spin-button,
+.tool-timeout-input::-webkit-inner-spin-button {
+  opacity: 1;
+}
 </style>

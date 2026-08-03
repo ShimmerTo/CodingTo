@@ -105,23 +105,23 @@ function buttonLabel(file) {
   flex: 1 1 auto;
 }
 .doc-download-name {
-  font-size: 12.5px;
+  font-size: var(--fs-13);
   color: var(--text, #e7e7ea);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .doc-download-size {
-  font-size: 11px;
+  font-size: var(--fs-12);
   color: var(--text-muted, #9a9aa3);
 }
 .doc-download-saved {
-  font-size: 11px;
+  font-size: var(--fs-12);
   color: var(--success, #4ec07a);
   white-space: nowrap;
 }
 .doc-download-error {
-  font-size: 11px;
+  font-size: var(--fs-12);
   color: var(--danger, #e06c75);
   white-space: nowrap;
   cursor: help;
@@ -132,7 +132,7 @@ function buttonLabel(file) {
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: var(--fs-12);
   color: var(--text, #e7e7ea);
   background: var(--surface, #1c1c22);
   border: 1px solid var(--border, #33333d);

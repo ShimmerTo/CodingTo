@@ -207,6 +207,21 @@ export async function startPrompt(request) {
   clearMockPromptTimers(sessionId)
   const emitSessionEvent = payload => emitMock('agent:event', { ...payload, codingToSessionId: sessionId })
   emitMock('agent:state', { running: true, processRunning: true, codingToSessionId: sessionId })
+  // TEMP-REPRO: 模拟 plan_present 完整链路（setWidget plan-todos + confirm 弹窗）
+  if (true) {  // TEMP-REPRO unconditional
+    // TEMP-REPRO 乱序：confirm 先到，setWidget 后到
+    scheduleMockPromptEvent(sessionId, () => emitSessionEvent({
+      type: 'extension_ui_request', id: 'repro-plan-confirm', method: 'confirm',
+      title: '__CODINGTO_PLAN_CONFIRM__:确认执行以上计划？',
+      message: '计划：复现测试 共 6 步，请于底部计划面板核对后确认。',
+    }), 200)
+    scheduleMockPromptEvent(sessionId, () => emitSessionEvent({
+      type: 'extension_ui_request', id: 'repro-plan-todos', method: 'setWidget',
+      widgetKey: 'plan-todos', widgetPlacement: 'aboveEditor',
+      widgetLines: ['☐ 步骤一：检查现状', '☐ 步骤二：实施改动', '☐ 步骤三：验证', '☐ 步骤四：运行测试', '☐ 步骤五：更新文档', '☐ 步骤六：归档总结'],
+    }), 400)
+    return
+  }
   const text = request.mode === 'plan'
     ? 'Plan:\n1. Inspect the current implementation\n2. Apply the required changes\n3. Run verification'
     : 'Browser preview is ready. Connect the Wails backend to run the agent.'
@@ -424,7 +439,7 @@ const mockBuiltinCatalog = [
   { key: 'document', name: 'Document', description: 'Inspect, search, create, and distribute local documents.', required: false, currentVersion: '1.0.0' },
   { key: 'plan', name: 'Plan Mode', description: 'Present and track an execution plan before making changes.', required: false, currentVersion: '1.0.1' },
   { key: 'skills-list', name: 'Skills List', description: 'List every skill available to the current isolated agent.', required: true, currentVersion: '1.0.0' },
-  { key: 'subagent', name: 'Subagent', description: 'Delegate bounded tasks to authorized CodingTo agents.', required: false, currentVersion: '1.0.0' },
+  { key: 'subagent', name: 'Subagent', description: 'Run authorized CodingTo agents in the background and receive their results automatically.', required: false, currentVersion: '1.1.0' },
 ]
 
 const mockExtensions = {
@@ -460,7 +475,7 @@ function mockPiPluginsStatus(agentId) {
 
 export async function getSubagentTranscript(sessionId, runId) {
   if (isWails()) return App.GetSubagentTranscript(sessionId, runId)
-  return { messages: [], tokenStats: {}, contextUsage: {}, subagentUi: { widgets: {} } }
+  return { messages: [], tokenStats: {}, contextUsage: {}, subagentUi: { widgets: {} }, subagent: null }
 }
 
 export async function respondSubagentUI(sessionId, runId, response) {
@@ -473,6 +488,9 @@ export async function ackSubagentUI(sessionId, runId, requestId) {
 
 export async function abortSubagent(sessionId, runId) {
   if (isWails()) return App.AbortSubagent(sessionId, runId)
+  // Keep the browser preview contract aligned with the real backend: a
+  // successful abort is a request and does not claim a terminal run status.
+  return { runId, status: 'running', abortRequested: true }
 }
 
 export async function getExtensions() {

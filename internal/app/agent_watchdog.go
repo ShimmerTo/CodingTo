@@ -137,6 +137,98 @@ func (s *AgentService) fireUIWatchdog(sessionID int64, sessionDir, requestID str
 	log.Printf("[session %d] interactive UI request %s timed out; auto-cancelled", sessionID, requestID)
 }
 
+// toolWatchdogToolNames 是启用执行超时看门狗的工具。目前仅 bash 工具可能
+// 无限挂起（无界扫描、阻塞子进程）；read/write/edit 等 pi 内置工具耗时有限，
+// 浏览器与会话类工具已有各自的服务层超时，无需看门狗干预。
+var toolWatchdogToolNames = map[string]bool{"bash": true}
+
+// armToolWatchdogLocked (re)arms the tool-execution watchdog for the given
+// tool call. Only tools registered in toolWatchdogToolNames are bounded; other
+// tools are left unmonitored. Caller must hold s.mu.
+func (s *AgentService) armToolWatchdogLocked(sessionID int64, toolName, toolCallID string) {
+	s.disarmToolWatchdogLocked()
+	if !toolWatchdogToolNames[toolName] {
+		return
+	}
+	timeout := s.toolExecutionTimeout
+	if timeout <= 0 {
+		timeout = defaultToolExecutionTimeout
+	}
+	s.toolWatchdogToken++
+	token := s.toolWatchdogToken
+	s.toolWatchdogName = toolName
+	s.toolWatchdogToolID = toolCallID
+	s.toolWatchdogTimer = time.AfterFunc(timeout, func() {
+		s.fireToolWatchdog(token, sessionID, toolName, toolCallID, timeout)
+	})
+}
+
+// disarmToolWatchdogLocked stops the tool-execution watchdog. Caller must hold
+// s.mu.
+func (s *AgentService) disarmToolWatchdogLocked() {
+	if s.toolWatchdogTimer != nil {
+		s.toolWatchdogTimer.Stop()
+		s.toolWatchdogTimer = nil
+	}
+	s.toolWatchdogName = ""
+	s.toolWatchdogToolID = ""
+	s.toolWatchdogToken++
+}
+
+// fireToolWatchdog aborts a tool call that exceeded its execution budget. For
+// the bash tool it sends Pi's abort_bash RPC, which cancels the running
+// command (the tool result comes back cancelled and the agent can continue
+// with an alternative approach) instead of killing the whole turn. A
+// tool_execution_timeout event is recorded so the UI can surface the reason.
+func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName, toolCallID string, timeout time.Duration) {
+	s.mu.Lock()
+	if token != s.toolWatchdogToken ||
+		s.toolWatchdogName != toolName ||
+		s.activeSessionID != sessionID ||
+		s.execTurnStart.IsZero() {
+		s.mu.Unlock()
+		return
+	}
+	s.toolWatchdogTimer = nil
+	s.toolWatchdogToken++
+	s.toolWatchdogName = ""
+	s.toolWatchdogToolID = ""
+	sessionDir := s.activeSessionDir
+	s.mu.Unlock()
+
+	// abort_bash cancels the currently running bash command in Pi. It is
+	// idempotent and safe even when the command already finished between the
+	// timer firing and the RPC arriving.
+	if toolName == "bash" {
+		if err := s.sendAdapterCommand(mustJSON(map[string]string{
+			"id": "codingto-tool-timeout", "type": "abort_bash",
+		})); err != nil {
+			log.Printf("[session %d] tool timeout: send abort_bash: %v", sessionID, err)
+		}
+	}
+
+	seconds := int(timeout.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	message := fmt.Sprintf(
+		"Tool %s exceeded the %d second execution limit and was aborted automatically.",
+		toolName, seconds,
+	)
+	event := map[string]any{
+		"type": "tool_execution_timeout", "toolName": toolName, "toolCallId": toolCallID,
+		"message": message, "timeoutSeconds": seconds,
+		"codingToSessionId": sessionID, "_recordedAt": time.Now().UnixMilli(),
+	}
+	if sessionDir != "" {
+		if err := s.appendEvent(sessionDir, event); err != nil {
+			log.Printf("[session %d] append tool timeout event: %v", sessionID, err)
+		}
+	}
+	s.emitEvent("agent:event", event)
+	log.Printf("[session %d] tool %s exceeded %s execution limit; aborted bash command", sessionID, toolName, timeout)
+}
+
 func firstResponseObserved(event map[string]any) bool {
 	switch stringValue(event["type"]) {
 	case "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end",

@@ -8,23 +8,41 @@
 .question-nav__item:hover .question-nav__bar,
 .question-nav__item:focus-visible .question-nav__bar { width: 16px; background: var(--faint); }
 .question-nav__item.is-active .question-nav__bar { width: 20px; height: 3px; background: color-mix(in srgb, var(--text) 82%, var(--surface)); }
-.question-nav__tooltip { position: absolute; top: 50%; right: calc(100% + 7px); width: max-content; max-width: min(320px, 48vw); max-height: 96px; display: -webkit-box; padding: 7px 9px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface); box-shadow: 0 7px 22px rgba(20,20,18,.14); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; text-align: left; transform: translate(4px, -50%); opacity: 0; visibility: hidden; transition: opacity .14s ease, transform .14s ease, visibility .14s; pointer-events: none; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.question-nav__tooltip { position: absolute; top: 50%; right: calc(100% + 7px); width: max-content; max-width: min(320px, 48vw); max-height: 96px; display: -webkit-box; padding: 7px 9px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface); box-shadow: 0 7px 22px rgba(20,20,18,.14); font-size: var(--fs-12); line-height: 1.45; overflow-wrap: anywhere; text-align: left; transform: translate(4px, -50%); opacity: 0; visibility: hidden; transition: opacity .14s ease, transform .14s ease, visibility .14s; pointer-events: none; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; }
 .question-nav__item:hover .question-nav__tooltip,
 .question-nav__item:focus-visible .question-nav__tooltip { transform: translate(0, -50%); opacity: 1; visibility: visible; }
 .question-nav__item:focus-visible .question-nav__bar { outline: 2px solid color-mix(in srgb, var(--text) 28%, transparent); outline-offset: 3px; }
+/* 子 Agent 快捷导航横杠：运行中高亮渐变 + 呼吸动画，结束后回落纯色。 */
+.question-nav__item--subagent .question-nav__bar { width: 16px; background: var(--faint); }
+.question-nav__item--subagent:hover .question-nav__bar,
+.question-nav__item--subagent:focus-visible .question-nav__bar { width: 20px; }
+.question-nav__item--subagent.is-live .question-nav__bar { background: linear-gradient(90deg, var(--amber), color-mix(in srgb, var(--amber) 22%, transparent)); animation: question-nav-live-pulse 2.2s ease-in-out infinite; box-shadow: 0 0 6px color-mix(in srgb, var(--amber) 45%, transparent); }
+@keyframes question-nav-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .5; }
+}
+.question-nav__tooltip--subagent { display: flex; flex-direction: column; gap: 3px; max-height: 150px; -webkit-line-clamp: unset; line-clamp: unset; }
+/* 子 Agent 导航 tooltip 头部：头像 + agent 名称同行展示。 */
+.question-nav__agent { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.question-nav__agent-avatar { flex: 0 0 22px; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: #546fa5; background: var(--surface-2); font-size: var(--fs-13); line-height: 1; user-select: none; position: relative; overflow: hidden; }
+.question-nav__agent-emoji { font-size: var(--fs-14); }
+.question-nav__agent-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+.question-nav__tooltip--subagent strong { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--fs-12); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.question-nav__tooltip--subagent .question-nav__meta { color: var(--muted); font-size: var(--fs-12); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.question-nav__tooltip--subagent small { color: var(--faint); font-size: var(--fs-12); line-height: 1.4; overflow-wrap: anywhere; }
 .scroll-to-bottom { position: absolute; right: 22px; bottom: 18px; z-index: 8; width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--muted); background: var(--surface); box-shadow: 0 6px 18px rgba(20,20,18,.16); cursor: pointer; transition: transform .15s, border-color .15s, color .15s; }
 .scroll-to-bottom:hover { color: var(--text); border-color: var(--faint); transform: translateY(-1px); }
 .chat-empty { width: calc(100% - 32px); height: 100%; min-height: 360px; margin: auto; display: flex; align-items: center; flex-direction: column; justify-content: center; text-align: center; }
 .chat-empty__icon { width: 54px; height: 54px; display: grid; place-items: center; margin-bottom: 20px; border: 1px solid var(--border); border-radius: 15px; background: var(--surface-2); box-shadow: 0 5px 15px rgba(0,0,0,.05); }
-.chat-empty h2 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 26px; font-weight: 500; letter-spacing: -.02em; }
+.chat-empty h2 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: var(--fs-14); font-weight: 500; letter-spacing: -.02em; }
 .chat-empty > p { max-width: 480px; margin: 10px 0 0; color: var(--muted); line-height: 1.7; white-space: pre-line; }
 .chat-loading { position: absolute; inset: 0; z-index: 2; background: var(--surface); display: flex; align-items: center; flex-direction: column; justify-content: center; gap: 14px; color: var(--muted); }
-.chat-loading span { font-size: 13px; }
+.chat-loading span { font-size: var(--fs-13); }
 .message-list { width: calc(100% - 32px); margin: 0 auto; padding: 34px 0 28px; }
 .message-node { margin-bottom: 22px; }
 .message-node:last-child { margin-bottom: 0; }
 .message-node__header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.message-node__avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: 15px; line-height: 1; user-select: none; position: relative; overflow: hidden; }
-.message-node__emoji { font-size: 16px; }
+.message-node__avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; background: transparent; color: #546fa5; font-size: var(--fs-14); line-height: 1; user-select: none; position: relative; overflow: hidden; }
+.message-node__emoji { font-size: var(--fs-14); }
 .message-node__img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
-.message-node__name { color: var(--text); font-size: 14px; font-weight: 650; }
+.message-node__name { color: var(--text); font-size: var(--fs-14); font-weight: 650; }

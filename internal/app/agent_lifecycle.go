@@ -58,13 +58,36 @@ func (s *AgentService) abortPromptSingle() error {
 	// the marker and kills the subagent Pi process directly, so a wedged parent
 	// Pi (which cannot process the abort command below) still cannot leave
 	// subagents running.
-	s.abortRunningSubagentsLocked()
+	s.handleAbortCommandLocked()
 	// Pi can remain busy after a low-level agent_end event while it retries,
 	// compacts, or processes a queued continuation. The UI correctly keeps the
 	// stop button visible in those phases, so never discard its abort merely
 	// because the execution timer has already been settled by an event.
 	raw, _ := json.Marshal(map[string]string{"id": "codingto-abort", "type": "abort"})
 	return s.adapter.SendCommand(raw)
+}
+
+// handleAbortCommandLocked 执行终止命令的后端部分：给所有运行中的子 agent 写
+// .abort 标记（bridge 轮询后杀进程并写终态 run.json），并强制收尾"等待子
+// agent"状态的会话。调用者必须持有 s.mu。
+func (s *AgentService) handleAbortCommandLocked() {
+	s.abortRunningSubagentsLocked()
+	s.forceSettleWaitingLocked()
+}
+
+// forceSettleWaitingLocked 在用户终止时强制收尾"等待子 agent"状态的会话。
+// 等待期间主 agent 回合早已结束（agent_settled 保留 execTurnStart 维持忙碌），
+// abort 命令只会被 Pi 应答，不会再有 agent_settled 触发收尾；若不强制收尾，
+// 会话会永久卡在运行中且无法开启新回合（isBusy() 恒真）。调用者必须持有 s.mu。
+func (s *AgentService) forceSettleWaitingLocked() {
+	if !s.waitingSubagents {
+		return
+	}
+	s.waitingSubagents = false
+	s.finishExecutionLocked("active")
+	s.emitEvent("agent:state", map[string]any{
+		"running": false, "processRunning": true, "codingToSessionId": s.activeSessionID,
+	})
 }
 
 // abortRunningSubagentsLocked scans the active conversation's subagents
@@ -314,11 +337,20 @@ func (s *AgentService) closeSingle() error {
 // cumulative value. The caller must hold s.mu.
 func (s *AgentService) finishExecutionLocked(status string) {
 	s.disarmFirstResponseWatchdogLocked()
+	s.disarmToolWatchdogLocked()
+	// Follow-up suppression is scoped to one failed model turn. Every path that
+	// finishes, stops, restarts, or observes an exited adapter funnels through
+	// this method, so clearing it here prevents a missing agent_settled event
+	// from suppressing the next ordinary user turn.
+	s.abortFollowUp = false
+	// 任何结束/收尾路径都退出"等待子 agent"状态，避免状态残留导致后续
+	// 终止路径误判或新回合进入等待态。
+	s.waitingSubagents = false
 	if !s.execTurnStart.IsZero() {
 		s.execAccumulatedMs += time.Since(s.execTurnStart).Milliseconds()
 		s.execTurnStart = time.Time{}
 	}
-	if s.activeSessionID > 0 {
+	if s.activeSessionID > 0 && s.store != nil {
 		_ = s.store.Store().UpdateSession(s.activeSessionID, map[string]any{
 			"status": status, "exec_duration_ms": s.execAccumulatedMs,
 		})

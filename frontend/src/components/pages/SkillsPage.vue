@@ -173,7 +173,6 @@ async function confirmRemove() {
   <section class="content-page skills-page">
     <div class="page-heading">
       <div><h2>{{ t.skillsTitle }}</h2><p>{{ t.skillsIntro }}</p></div>
-      <Sparkles :size="28" />
     </div>
 
     <div class="agent-filter-bar">
