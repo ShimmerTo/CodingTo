@@ -30,6 +30,10 @@ let backfillPending = false
 const chatLayout = computed(() => (config.preferences && config.preferences.chatLayout) || 'left')
 
 function resultStatus(message) {
+  // message 缺失时（极端情况下 details.message 未传）直接跳过，避免
+  // toolOutput(undefined) 抛 TypeError；弹窗渲染崩溃会让 is-dialog-open 已
+  // 激活而弹窗不可见，底层对话区被永久冻结，因此任何渲染路径都要防御。
+  if (!message) return ''
   const queue = [toolOutput(message)]
   const seen = new Set()
   while (queue.length && seen.size < 128) {
@@ -81,11 +85,17 @@ const displayMessages = computed(() => (
 ))
 const displayVersion = computed(() => {
   const messages = displayMessages.value
-  const indexes = [0, Math.floor(messages.length / 2), messages.length - 1]
-    .filter((index, position, all) => index >= 0 && all.indexOf(index) === position)
+  // 空 timeline（子 agent 任务刚派发、尚无任何事件，或启动即失败）时 indexes
+  // 必须为空数组，否则 messages[0] 为 undefined，message.id 抛 TypeError 导致
+  // 整个弹窗渲染崩溃（崩溃后 ChatMessages 的 is-dialog-open 已激活但弹窗不可见，
+  // 底层对话区的点击/滚动/动画会被永久冻结）。与 SubAgentCard 的防御写法保持一致。
+  const indexes = messages.length
+    ? [0, Math.floor(messages.length / 2), messages.length - 1]
+      .filter((index, position, all) => index >= 0 && all.indexOf(index) === position)
+    : []
   return `${messages.length}:${indexes.map(index => {
     const message = messages[index]
-    return `${message.id}:${message.content?.length || 0}:${message.thinkingContent?.length || 0}:${message.detail?.status || ''}:${message.detail?.output == null ? 0 : String(message.detail.output).length}`
+    return `${message?.id ?? ''}:${message?.content?.length || 0}:${message?.thinkingContent?.length || 0}:${message?.detail?.status || ''}:${message?.detail?.output == null ? 0 : String(message.detail.output).length}`
   }).join(';')}`
 })
 const uiState = computed(() => subagentUIState(props.details?.message?.detail))

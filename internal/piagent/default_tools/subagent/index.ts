@@ -315,6 +315,30 @@ function logDiagnostic(message: string, runId?: string, eventType?: string) {
 }
 
 function notifyCompletion(api: ExtensionAPI, result: RunResult) {
+  // 先把终态以 entry 形式立即推给前端（appendEntry 不进 LLM 上下文、不排队），
+  // 让子 agent 卡片 / 右侧导航在运行中也能及时显示 completed/failed。
+  // 不能只依赖下方 followUp：deliverAs: 'followUp' 仅在主 agent 空闲（无更多
+  // 工具调用）时投递，主 agent 持续执行独立工作时可能长时间不送达，卡片会
+  // 一直停留在 running，主 agent 也只能靠 status 查询才感知到子 agent 已结束。
+  try {
+    api.appendEntry('codingto-subagent-event', {
+      kind: 'subagent_event',
+      runId: result.runId,
+      agentKey: result.agentKey,
+      parentNodeId: result.parentNodeId,
+      toolCallId: result.toolCallId,
+      status: result.status,
+      detached: true,
+      event: {
+        type: 'subagent_run_ended',
+        status: result.status,
+        error: result.error || '',
+        _recordedAt: Date.now(),
+      },
+    });
+  } catch {
+    logDiagnostic('terminal entry delivery failed', result.runId);
+  }
   const attempt = (retry: boolean) => {
     try {
       api.sendMessage({
