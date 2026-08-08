@@ -159,6 +159,92 @@ func (a *App) GetSessionGitSnapshot(id int64, baseBranch string) (GitSnapshot, e
 	return readGitSnapshot(workspace, strings.TrimSpace(baseBranch)), nil
 }
 
+// GitFileOperationRequest describes a file-level Git action applied to the
+// session worktree. Op is one of:
+//   - track/stage: git add the file (track an untracked file or stage worktree changes)
+//   - unstage:     git restore --staged the file (drop the staged entry)
+//   - discard:     delete an untracked file from disk, or restore a tracked
+//     file to HEAD (drop worktree modifications)
+//   - restore:     git restore the file (recover a deleted file from HEAD)
+type GitFileOperationRequest struct {
+	SessionID int64  `json:"sessionId"`
+	Op        string `json:"op"`
+	Path      string `json:"path"`
+}
+
+func (a *App) ApplyGitFileOperation(req GitFileOperationRequest) error {
+	workspace, err := a.sessionGitWorkspace(req.SessionID)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+
+	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return errors.New("workspace is not a Git repository")
+	}
+	root := filepath.Clean(strings.TrimSpace(rootText))
+	path := filepath.ToSlash(strings.TrimSpace(req.Path))
+	if path == "" || path == "." || path == ".." {
+		return errors.New("invalid Git file path")
+	}
+
+	switch strings.TrimSpace(req.Op) {
+	case "track", "stage":
+		// git add stages everything for the path, including deletions and new files.
+		if _, err := runGit(ctx, root, "add", "--", path); err != nil {
+			return err
+		}
+	case "unstage":
+		// git reset 在旧版本 Git 上同样可用（git restore --staged 需要 2.23+）。
+		if _, err := runGit(ctx, root, "reset", "-q", "HEAD", "--", path); err != nil {
+			return err
+		}
+	case "discard":
+		untracked, statusErr := isGitUntracked(ctx, root, path)
+		if statusErr != nil {
+			return statusErr
+		}
+		if untracked {
+			absolute, pathErr := safeGitWorktreePath(root, path)
+			if pathErr != nil {
+				return pathErr
+			}
+			if err := os.Remove(absolute); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		if _, err := runGit(ctx, root, "restore", "--", path); err != nil {
+			return err
+		}
+	case "restore":
+		if _, err := runGit(ctx, root, "restore", "--", path); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported Git file operation: %s", req.Op)
+	}
+	return nil
+}
+
+// isGitUntracked reports whether the porcelain status marks path as untracked,
+// which decides whether discard should remove the file from disk instead of
+// restoring it from Git.
+func isGitUntracked(ctx context.Context, root, path string) (bool, error) {
+	status, err := runGit(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return false, err
+	}
+	for _, file := range parseGitStatus(status) {
+		if file.Path == path {
+			return file.Untracked, nil
+		}
+	}
+	return false, nil
+}
+
 func (a *App) GetSessionGitFileDetail(id int64, scope, path, baseBranch string) (GitFileDetail, error) {
 	workspace, err := a.sessionGitWorkspace(id)
 	if err != nil {

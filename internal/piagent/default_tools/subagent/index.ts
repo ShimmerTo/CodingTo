@@ -84,6 +84,15 @@ const authorizedKeys = new Set(
     .map((value) => value.trim())
     .filter(Boolean),
 );
+const placeholderAgentKeys = new Set([
+  '?', '??', 'placeholder', 'place-holder', 'place_holder',
+  '<key>', 'agent-key', 'agent_key', 'your-key', 'your_key',
+]);
+
+export function isPlaceholderAgentKey(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return placeholderAgentKeys.has(normalized) || /^\?+$/.test(normalized);
+}
 const backgroundRuns = new Map<string, BackgroundRun>();
 const terminalRuns = new Map<string, TerminalRunEntry>();
 const detachedEventTypes = new Set([
@@ -333,8 +342,18 @@ function notifyCompletion(api: ExtensionAPI, result: RunResult) {
         type: 'subagent_run_ended',
         status: result.status,
         error: result.error || '',
+        files: result.files || [],
+        endedAt: result.endedAt || Date.now(),
+        transcript: result.transcript || path.join(sessionDir, 'subagents', result.runId),
         _recordedAt: Date.now(),
       },
+      // Keep terminal metadata at the top level too. The frontend can then
+      // render a useful failure reason immediately, even when the follow-up
+      // result is delayed because the parent agent is still busy.
+      error: result.error || '',
+      files: result.files || [],
+      endedAt: result.endedAt || Date.now(),
+      transcript: result.transcript || path.join(sessionDir, 'subagents', result.runId),
     });
   } catch {
     logDiagnostic('terminal entry delivery failed', result.runId);
@@ -634,6 +653,7 @@ export default function registerSubagent(api: ExtensionAPI) {
     description: [
       '调用当前 Agent 已授权的其他 CodingTo Agent 完成一个边界清晰的子任务。',
       '先用 action=list 查看可用 key；再用 action=run、key 和 task 执行。',
+      'key 必须是 action=list 返回的完整值；未知 key 或占位值（如 ?、PLACEHOLDER）不能用于 run。',
       `run 只负责后台启动并立即返回；互相独立的任务可在同一轮并行启动，当前主对话最多同时运行 ${maxConcurrency} 个。`,
       '启动后主 Agent 必须继续自己的独立工作，不要原地等待或反复调用 status；子 Agent 完成后会自动发送 follow-up 结果并触发主 Agent 继续。',
       '仅在恢复会话、核对指定 run 或自动通知疑似丢失时使用 action=status 和 runId 查询持久化状态。',
@@ -641,6 +661,7 @@ export default function registerSubagent(api: ExtensionAPI) {
     promptSnippet: '在后台委派独立子任务，并在完成时自动接收 follow-up 结果。',
     promptGuidelines: [
       '调用 codingto_subagent 的 run 后，立即继续主 Agent 可独立完成的代码检查、实现或验证；不要因为子 Agent 正在运行而停止工作。',
+      '如果还不知道合法 key，先调用 action=list；不要猜测或使用 ?、PLACEHOLDER 等占位值。',
       '不要轮询 codingto_subagent status。只有当前已无任何独立工作且结果尚未自动送达，或需要恢复历史 run 时才查询一次 status。',
       '收到某个子 Agent 的 follow-up 结果后立即处理它，并继续其他可推进工作；不要默认等待全部子 Agent 都完成。',
       '如果子 Agent 结果是完成用户任务所必需的，在结果尚未送达时不要宣称任务已完成；独立工作做完后只报告阶段进展，等待自动 follow-up 继续。',
@@ -687,6 +708,9 @@ export default function registerSubagent(api: ExtensionAPI) {
       const key = String(params?.key || '').trim();
       const task = String(params?.task || '').trim();
       if (!key || !task) throw bridgeFailure('bad_request', 'run 需要 key 和 task。');
+      if (isPlaceholderAgentKey(key)) {
+        throw bridgeFailure('bad_request', `run 的 key 是占位值“${key}”；请先调用 action=list，再使用返回的完整 key。`);
+      }
       if (!authorizedKeys.has(key)) throw bridgeFailure('not_authorized', `未授权的子 Agent：${key}`);
       if (signal?.aborted) throw bridgeFailure('canceled', 'subagent run 已取消。');
       const id = runID();

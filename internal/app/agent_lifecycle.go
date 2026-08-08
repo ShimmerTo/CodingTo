@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
 
+	"codingto/internal/applog"
 	"codingto/internal/subagentbridge"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -116,7 +116,7 @@ func (s *AgentService) abortRunningSubagentsLocked() {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(runDir, ".abort"), []byte("1"), 0o600); err != nil {
-			log.Printf("[session %d] mark subagent %s aborted: %v", s.activeSessionID, entry.Name(), err)
+			applog.Infof("[session %d] mark subagent %s aborted: %v", s.activeSessionID, entry.Name(), err)
 		}
 	}
 }

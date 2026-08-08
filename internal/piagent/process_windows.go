@@ -36,6 +36,10 @@ func killProcessTree(p *os.Process) {
 		return
 	}
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid))
+	// taskkill is a console executable; without a hidden window it flashes a
+	// cmd window on every shutdown/session stop. Reuse the same background
+	// process attributes the Pi adapter itself is launched with.
+	configureBackgroundProcess(kill)
 	_ = kill.Run()
 	_ = p.Kill() // best-effort fallback in case taskkill is unavailable
 }

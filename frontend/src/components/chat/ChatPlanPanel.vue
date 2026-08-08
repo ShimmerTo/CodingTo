@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { CheckCircle2, ChevronDown, ChevronUp, KeyRound, ListTodo } from 'lucide-vue-next'
-import { extensionDialogTitle } from './extensionDialog.js'
+import { extensionDialogTitle, isPlanConfirmationDialog } from './extensionDialog.js'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -19,6 +19,8 @@ const browserProfile = ref({
 })
 const isSecureBrowserProfile = computed(() => props.dialog?.title === '__CODINGTO_SECURE_BROWSER_PROFILE__')
 const visibleDialogTitle = computed(() => extensionDialogTitle(props.dialog))
+// 计划确认弹窗：用于在 plan-todos 未就绪时展示缺失提示区，并禁用批准按钮。
+const isPlanDialog = computed(() => isPlanConfirmationDialog(props.dialog))
 
 watch(() => props.dialog?.id, () => {
   responseValue.value = props.dialog?.prefill || ''
@@ -105,6 +107,15 @@ function isPrimaryOption(option) {
         </li>
       </ol>
     </div>
+    <!-- 计划数据未就绪：确认弹窗先于 plan-todos 到达且已等待超时，禁用批准，
+         避免用户在看不到完整计划时盲目确认；取消仍可用。 -->
+    <div v-else-if="isPlanDialog && dialog.planMissing" class="plan-proposal plan-proposal--missing">
+      <div class="plan-proposal__head">
+        <ListTodo :size="14" />
+        <span>{{ t.planProposalTitle || '执行计划' }}</span>
+      </div>
+      <p class="plan-proposal__missing">{{ t.planMissing || '计划数据未就绪，请取消后重试' }}</p>
+    </div>
     <div v-if="dialog" ref="dialogEl" class="extension-prompt" :class="{ 'extension-prompt--credential': isSecureBrowserProfile }">
       <template v-if="isSecureBrowserProfile">
         <strong><KeyRound :size="14" />{{ t.browserProfileCreateTitle }}</strong>
@@ -132,7 +143,7 @@ function isPrimaryOption(option) {
         <button @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
       </div>
       <div v-else-if="dialog.method === 'confirm'" class="extension-prompt__actions">
-        <button class="primary" @click="emit('respond', { confirmed: true })">{{ t.confirm || 'Confirm' }}</button>
+        <button class="primary" :disabled="dialog.planMissing" @click="emit('respond', { confirmed: true })">{{ t.confirm || 'Confirm' }}</button>
         <button @click="emit('respond', { confirmed: false })">{{ t.cancel }}</button>
       </div>
       <template v-else>

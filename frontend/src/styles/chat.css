@@ -61,3 +61,7 @@
 .send-button.stop { color: var(--danger); background: transparent; }
 .error-banner { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 8px 11px; border: 1px solid rgba(209,75,66,.3); border-radius: 8px; color: var(--danger); background: rgba(209,75,66,.07); font-size: var(--fs-13); }
 .error-banner button { border: 0; background: transparent; color: inherit; cursor: pointer; }
+
+/* 图片预览弹窗淡入淡出：主对话 / 子代理卡片 / 子代理详情弹窗共用（scoped view.css 中的同名规则已上移至此） */
+.preview-fade-enter-active, .preview-fade-leave-active { transition: opacity 0.18s ease; }
+.preview-fade-enter-from, .preview-fade-leave-to { opacity: 0; }

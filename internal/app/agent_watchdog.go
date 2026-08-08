@@ -3,10 +3,11 @@ package app
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
+
+	"codingto/internal/applog"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -130,17 +131,23 @@ func (s *AgentService) fireUIWatchdog(sessionID int64, sessionDir, requestID str
 	}
 	if sessionDir != "" {
 		if err := s.appendEvent(sessionDir, event); err != nil {
-			log.Printf("[session %d] append ui-timeout event: %v", sessionID, err)
+			applog.Infof("[session %d] append ui-timeout event: %v", sessionID, err)
 		}
 	}
 	application.Get().Event.Emit("agent:event", event)
-	log.Printf("[session %d] interactive UI request %s timed out; auto-cancelled", sessionID, requestID)
+	applog.Infof("[session %d] interactive UI request %s timed out; auto-cancelled", sessionID, requestID)
 }
 
 // toolWatchdogToolNames 是启用执行超时看门狗的工具。目前仅 bash 工具可能
 // 无限挂起（无界扫描、阻塞子进程）；read/write/edit 等 pi 内置工具耗时有限，
 // 浏览器与会话类工具已有各自的服务层超时，无需看门狗干预。
 var toolWatchdogToolNames = map[string]bool{"bash": true}
+
+// toolWatchdogAbortGrace gives Pi a brief opportunity to finish a normal
+// abort_bash before the stronger process-tree fallback is used. The fallback
+// is needed on Windows when a shell/descendant keeps stdio handles open after
+// taskkill, which otherwise delays tool_execution_end indefinitely.
+const toolWatchdogAbortGrace = 5 * time.Second
 
 // armToolWatchdogLocked (re)arms the tool-execution watchdog for the given
 // tool call. Only tools registered in toolWatchdogToolNames are bounded; other
@@ -184,6 +191,7 @@ func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName,
 	s.mu.Lock()
 	if token != s.toolWatchdogToken ||
 		s.toolWatchdogName != toolName ||
+		s.toolWatchdogToolID != toolCallID ||
 		s.activeSessionID != sessionID ||
 		s.execTurnStart.IsZero() {
 		s.mu.Unlock()
@@ -203,7 +211,7 @@ func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName,
 		if err := s.sendAdapterCommand(mustJSON(map[string]string{
 			"id": "codingto-tool-timeout", "type": "abort_bash",
 		})); err != nil {
-			log.Printf("[session %d] tool timeout: send abort_bash: %v", sessionID, err)
+			applog.Infof("[session %d] tool timeout: send abort_bash: %v", sessionID, err)
 		}
 	}
 
@@ -222,11 +230,43 @@ func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName,
 	}
 	if sessionDir != "" {
 		if err := s.appendEvent(sessionDir, event); err != nil {
-			log.Printf("[session %d] append tool timeout event: %v", sessionID, err)
+			applog.Infof("[session %d] append tool timeout event: %v", sessionID, err)
 		}
 	}
 	s.emitEvent("agent:event", event)
-	log.Printf("[session %d] tool %s exceeded %s execution limit; aborted bash command", sessionID, toolName, timeout)
+	go s.escalateToolWatchdog(token, sessionID, toolName, toolCallID)
+	applog.Infof("[session %d] tool %s exceeded %s execution limit; aborted bash command", sessionID, toolName, timeout)
+}
+
+// escalateToolWatchdog kills the Pi process tree only when abort_bash did not
+// produce a tool end within the grace period. A later tool end, turn end, or
+// new tool increments toolWatchdogToken and makes this stale callback harmless.
+func (s *AgentService) escalateToolWatchdog(token uint64, sessionID int64, toolName, toolCallID string) {
+	grace := s.toolWatchdogAbortGrace
+	if grace <= 0 {
+		grace = toolWatchdogAbortGrace
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	<-timer.C
+
+	s.mu.Lock()
+	// fireToolWatchdog disarms the current timer and increments the generation
+	// once. Any subsequent lifecycle event increments it again; unchanged state
+	// therefore means the same timed-out tool is still blocking the runtime.
+	if s.activeSessionID != sessionID || s.execTurnStart.IsZero() ||
+		s.toolWatchdogToken != token+1 {
+		s.mu.Unlock()
+		return
+	}
+	killTree := s.killTreeOverride
+	if killTree == nil {
+		killTree = s.adapter.KillTree
+	}
+	s.mu.Unlock()
+
+	killTree()
+	applog.Infof("[session %d] tool %s (%s) did not finish after abort; killed Pi process tree", sessionID, toolName, toolCallID)
 }
 
 func firstResponseObserved(event map[string]any) bool {
@@ -305,7 +345,7 @@ func (s *AgentService) handleFirstResponseTimeout(sessionID int64, nodeID string
 	}
 	for _, event := range events {
 		if err := s.appendEvent(sessionDir, event); err != nil {
-			log.Printf("[session %d] append first-response timeout event: %v", sessionID, err)
+			applog.Infof("[session %d] append first-response timeout event: %v", sessionID, err)
 		}
 		application.Get().Event.Emit("agent:event", event)
 	}
@@ -313,5 +353,5 @@ func (s *AgentService) handleFirstResponseTimeout(sessionID int64, nodeID string
 		"running": false, "processRunning": false,
 		"codingToSessionId": sessionID, "error": message,
 	})
-	log.Printf("[session %d] model first-response timeout after %s; stopped stalled Pi process", sessionID, timeout)
+	applog.Infof("[session %d] model first-response timeout after %s; stopped stalled Pi process", sessionID, timeout)
 }

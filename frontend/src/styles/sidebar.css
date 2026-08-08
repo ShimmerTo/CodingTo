@@ -19,9 +19,13 @@
 .recent-list button { width: 100%; padding: 7px 9px; overflow: hidden; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; font-size: var(--fs-13); }
 .recent-list button:hover { color: var(--text); background: var(--hover); }
 .recent-list p { margin: 8px 9px; color: var(--faint); font-size: var(--fs-13); }
-.sidebar__bottom { display: flex; border-top: 1px solid var(--border-soft); padding-top: 8px; }
+.sidebar__bottom { display: flex; align-items: center; border-top: 1px solid var(--border-soft); padding-top: 8px; gap: 6px; }
 .sidebar__bottom button { width: 100%; display: flex; justify-content: flex-start; align-items: center; gap: 10px; padding: 0 9px; }
 .sidebar__bottom button.active { color: var(--text); background: var(--surface); }
+/* 管家入口：占据设置行最右侧，固定宽度、靠右对齐，按连接状态着色 */
+.sidebar__steward-btn { width: 32px !important; flex: 0 0 auto; justify-content: center !important; padding: 0 !important; margin-left: auto; color: var(--faint); }
+.sidebar__steward-btn.is-connected { color: #22c55e; }
+.sidebar__steward-btn.is-connected:hover { color: #16a34a; }
 /* 设置菜单新版本红点：包裹齿轮图标，红点绝对定位于右上角 */
 .sidebar__icon-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
 .sidebar__badge { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 2px var(--sidebar, #fff); }

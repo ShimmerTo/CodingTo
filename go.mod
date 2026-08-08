@@ -4,7 +4,9 @@ go 1.26.1
 
 require (
 	github.com/coder/websocket v1.8.14
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.10
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
+	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/pressly/goose/v3 v3.27.2
 	github.com/w896736588/go-tool v1.1.3
@@ -25,7 +27,9 @@ require (
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-sql-driver/mysql v1.10.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/h2non/filetype v1.1.3 // indirect
 	github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1 // indirect
 	github.com/kr/fs v0.1.0 // indirect

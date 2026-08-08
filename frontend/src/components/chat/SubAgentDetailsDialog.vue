@@ -10,6 +10,7 @@ import {
 } from './subagentRuntime.js'
 import { useAppContext } from '../../composables/appContext.js'
 import ChatMessageItem from './ChatMessageItem.vue'
+import ChatImagePreview from './ChatImagePreview.vue'
 import SubAgentInteraction from './SubAgentInteraction.vue'
 
 const props = defineProps({
@@ -24,6 +25,7 @@ const emit = defineEmits(['close', 'artifact-error'])
 const { config } = useAppContext()
 const conversationEl = ref(null)
 const thinkingOpenByID = ref({})
+const previewImage = ref(null)
 let backfillPending = false
 
 // 与主对话一致的对话方向（左侧/左右布局），用于用户问题气泡的对齐。
@@ -99,6 +101,15 @@ const displayVersion = computed(() => {
   }).join(';')}`
 })
 const uiState = computed(() => subagentUIState(props.details?.message?.detail))
+const runtimeError = computed(() => {
+  const subagent = props.details?.message?.detail?.subagent
+  if (subagent?.error) return String(subagent.error)
+  const events = props.details?.message?.detail?.subagentEvents
+  const terminal = Array.isArray(events)
+    ? [...events].reverse().find(item => item?.event?.type === 'subagent_run_ended' && item.event.error)
+    : null
+  return terminal?.event?.error ? String(terminal.event.error) : ''
+})
 
 // 一次性拉取 transcript 回填进共享 detail（幂等，仅执行一次；有意改写共享的
 // message.detail，与卡片依赖同一引用同步刷新）。实时事件可能先到达，由
@@ -201,7 +212,9 @@ onBeforeUnmount(() => {
         </header>
 
         <div ref="conversationEl" class="subagent-dialog__conversation" @scroll.passive="onConversationScroll">
-          <p v-if="!displayMessages.length" class="subagent-dialog__notice">{{ t.subagentTranscriptEmpty }}</p>
+          <p v-if="!displayMessages.length" class="subagent-dialog__notice" :class="{ 'subagent-dialog__notice--error': runtimeError }">
+            {{ runtimeError || t.subagentTranscriptEmpty }}
+          </p>
           <div v-else class="subagent-dialog__messages">
             <ChatMessageItem
               v-for="message in displayMessages"
@@ -216,6 +229,7 @@ onBeforeUnmount(() => {
               collapse-tools-by-default
               @update-thinking-open="setThinkingOpen(message.id, $event)"
               @artifact-error="emit('artifact-error', $event)"
+              @preview-image="previewImage = $event"
             />
           </div>
         </div>
@@ -231,6 +245,9 @@ onBeforeUnmount(() => {
         />
       </section>
     </div>
+    <transition name="preview-fade">
+      <ChatImagePreview v-if="previewImage" :image="previewImage" :close-title="t.close" :z-index="1300" @close="previewImage = null" />
+    </transition>
   </teleport>
 </template>
 
@@ -254,6 +271,7 @@ onBeforeUnmount(() => {
 .subagent-dialog__messages :deep(.message-body) { width: 100%; max-width: 100%; }
 .subagent-dialog__messages :deep(.tool-call),.subagent-dialog__messages :deep(.change-message) { width: 100%; max-width: 100%; }
 .subagent-dialog__notice { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 120px; color: var(--muted); }
+.subagent-dialog__notice--error { color: var(--danger); white-space: pre-wrap; text-align: center; }
 .subagent-dialog > :deep(.subagent-interaction) { flex: 0 0 auto; padding: 10px 14px 14px; border-top: 1px solid var(--border); background: var(--surface); }
 @media (max-width: 700px) {
   .subagent-dialog-backdrop { padding: 0; }

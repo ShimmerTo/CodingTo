@@ -37,16 +37,16 @@ const maxWedgeSilence = time.Duration(math.MaxInt64)
 
 func defaultWedgeParams() wedgeParams {
 	return wedgeParams{
-		Tick:       5 * time.Second,
-		SilenceMax: 5 * time.Minute,
+		Tick:       10 * time.Second,
+		SilenceMax: 30 * time.Minute,
 	}
 }
 
-// loadWedgeParams applies the optional environment override. The default 5
-// minutes is deliberately short: it is the longest a healthy subagent can go
-// without emitting a single event, and a tight bound keeps the freeze window
-// small. Operators may raise it per deployment (e.g. 0 does not disable it;
-// a value at or above the duration limit is clamped to effectively disable it).
+// loadWedgeParams applies the optional environment override. The default 20
+// minutes allows legitimate long-running tools (for example, asset generation)
+// to remain silent while still bounding a genuinely wedged child process.
+// Operators may raise it per deployment (e.g. a value at or above the duration
+// limit is clamped to effectively disable it).
 func loadWedgeParams() wedgeParams {
 	p := defaultWedgeParams()
 	if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("CODINGTO_SUBAGENT_SILENT_KILL_MS")), 64); err == nil && v > 0 {

@@ -52,6 +52,13 @@
 .git-section__total { flex: 0 0 auto; min-width: 22px; height: 22px; display: grid; place-items: center; padding: 0 6px; border-radius: 999px; color: var(--muted); background: var(--hover); font-size: var(--fs-12); font-weight: 600; }
 .git-section__summary { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 5px 11px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); color: var(--faint); background: var(--surface-2); font-size: var(--fs-12); }
 .git-section__summary > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 工作区变更文件搜索框 */
+.git-file-search { min-height: 34px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border-bottom: 1px solid var(--border-soft); background: var(--surface-2); color: var(--faint); }
+.git-file-search input { flex: 1 1 auto; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; }
+.git-file-search input::placeholder { color: var(--faint); }
+.git-file-search button { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--faint); cursor: pointer; }
+.git-file-search button:hover { color: var(--text); background: var(--hover); }
+.git-section__error { margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--border-soft); color: #d14b42; background: rgba(209,75,66,.08); font-size: var(--fs-12); line-height: 1.5; }
 .git-file-list { display: flex; flex-direction: column; }
 .git-file { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--border-soft); outline: 0; cursor: default; }
 .git-file:last-child { border-bottom: 0; }
@@ -65,7 +72,17 @@
 .git-file__path strong { overflow: hidden; color: var(--text); font: var(--fs-12)/1.4 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
 .git-file__path small { overflow: hidden; color: var(--faint); font: var(--fs-12)/1.35 Consolas, "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .git-file__path .git-file__state { color: var(--muted); direction: ltr; }
+/* 状态文字（未暂存/已暂存等）与操作按钮同一行：按钮紧贴状态文字右侧，不顶到行尾 */
+.git-file__meta { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.git-file__meta .git-file__state { flex: 0 1 auto; min-width: 0; }
 .git-file__numbers { flex: 0 0 auto; display: flex; gap: 6px; }
+/* 单文件操作按钮：紧凑图标钮，位于状态文字行右侧；默认隐藏，鼠标悬停/键盘聚焦该行时显示 */
+.git-file__actions { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity .12s ease; }
+.git-file:hover .git-file__actions, .git-file:focus-within .git-file__actions { opacity: 1; }
+.git-file__action { width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.git-file__action:hover:not(:disabled) { color: var(--accent-fg); background: var(--accent); }
+.git-file__action.is-danger:hover:not(:disabled) { color: #fff; background: #d14b42; }
+.git-file__action:disabled { opacity: .55; cursor: wait; }
 .git-section__empty { margin: 0; padding: 20px 12px; color: var(--faint); font-size: var(--fs-12); line-height: 1.55; text-align: center; }
 .git-base-picker { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: var(--muted); font-size: var(--fs-12); font-weight: 400; }
 .git-base-picker__label { flex: none; white-space: nowrap; }

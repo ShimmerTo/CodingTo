@@ -6,9 +6,12 @@ import (
 	"runtime"
 	"sync"
 
+	"codingto/internal/applog"
 	"codingto/internal/browserworkflow"
 	"codingto/internal/extensions"
 	"codingto/internal/piagent"
+	"codingto/internal/steward"
+	"codingto/internal/steward/connectors"
 	"codingto/internal/subagentbridge"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -23,6 +26,25 @@ type App struct {
 	piInstall  sync.Mutex
 	moduleMu   sync.Mutex
 	modules    []RuntimeModule
+	// steward is the always-on bot-relay service (nil when construction fails
+	// so the desktop app keeps working without it).
+	steward        *steward.Service
+	stewardSecrets *steward.SecretStore
+	// windowCloseHook wires the frameless window's close button to the
+	// application-level shutdown flow owned by cmd/codingto (see WindowClose).
+	windowCloseHook func()
+	// shutdownOnce makes ServiceShutdown idempotent: it can be reached from
+	// wails' own shutdownServices (when the message loop exits) and from the
+	// background shutdown goroutine started by cmd/codingto, but the real
+	// cleanup must only run once.
+	shutdownOnce sync.Once
+}
+
+// SetWindowCloseHook registers the shutdown entry point used by WindowClose.
+// cmd/codingto injects a handler that shows the "正在关闭中" overlay and runs
+// ServiceShutdown off the UI main thread.
+func (a *App) SetWindowCloseHook(fn func()) {
+	a.windowCloseHook = fn
 }
 
 type Bootstrap struct {
@@ -86,7 +108,7 @@ func NewApp(modules ...RuntimeModule) (*App, error) {
 	if _, err := store.EnsureDefaultAgent(); err != nil {
 		return nil, fmt.Errorf("initialize default agent: %w", err)
 	}
-	extensions := extensions.NewManager(store.Dir())
+	extensions := extensions.NewManager()
 	result := &App{
 		store:      store,
 		extensions: extensions,
@@ -96,7 +118,52 @@ func NewApp(modules ...RuntimeModule) (*App, error) {
 	for _, module := range modules {
 		result.registerRuntimeModule(module)
 	}
+	result.initSteward()
+	if err := result.sanitizeStewardToolset(); err != nil {
+		applog.Errorf("sanitize steward toolset: %v", err)
+	}
 	return result, nil
+}
+
+// initSteward builds the steward service, registers it as a runtime module and
+// wires its hooks into AgentService. Failures are logged but never abort app
+// startup.
+func (a *App) initSteward() {
+	secrets, err := steward.NewSecretStore(a.store.Dir())
+	if err != nil {
+		applog.Errorf("steward: init secret store: %v", err)
+		return
+	}
+	control := &stewardControl{app: a}
+	service := steward.NewService(a.store.Store(), secrets, control, connectors.Factories(), emitStewardEvent)
+	a.steward = service
+	a.stewardSecrets = secrets
+	a.registerRuntimeModule(service)
+	service.ResolveStewardAgent()
+	a.agent.SetStewardHooks(&stewardHooks{
+		isBotManaged:            service.IsBotManaged,
+		relayPermission:         service.RelayPermission,
+		relaySubagentPermission: service.RelaySubagentPermission,
+		onAgentEvent:            service.OnAgentEvent,
+		onTaskSettled:           a.stewardsOnTaskSettled,
+	})
+}
+
+// stewardsOnTaskSettled reports a settled bot-managed task. The resident
+// steward conversation is always resident and is never idle-reclaimed, so no
+// reclaim timer is armed here.
+func (a *App) stewardsOnTaskSettled(sessionID int64, event map[string]any) {
+	if a.steward == nil {
+		return
+	}
+	a.steward.OnTaskSettled(sessionID, event)
+}
+
+// emitStewardEvent forwards steward events to the frontend through Wails.
+func emitStewardEvent(name string, value any) {
+	if app := application.Get(); app != nil && app.Event != nil {
+		app.Event.Emit(name, value)
+	}
 }
 
 func (a *App) SetWindow(window *application.WebviewWindow) { a.window = window }
@@ -123,7 +190,7 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	rtkSource := ""
 	for _, agent := range cfg.Agents {
 		if err := piagent.MaterializeBuiltinTools(agent.DataDir, agent.Builtin); err != nil {
-			fmt.Printf("materialize built-in tools for %s: %v\n", agent.Name, err)
+			applog.Errorf("materialize built-in tools for %s: %v", agent.Name, err)
 		}
 		// Keep each agent's RTK copy in sync with its recommended flag on launch.
 		if agent.Recommended["rtk"] {
@@ -137,10 +204,11 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 			_ = piagent.RemoveRTKExtension(agent.DataDir)
 		}
 		if err := piagent.SyncFigmaMCPConfig(agent.DataDir, agent.Recommended["figma"]); err != nil {
-			fmt.Printf("sync Pi Figma for %s: %v\n", agent.Name, err)
+			applog.Errorf("sync Pi Figma for %s: %v", agent.Name, err)
 		}
 	}
 	a.reconcileOrphanedSubagents()
+	applog.Infof("CodingTo %s started", appVersion)
 	return nil
 }
 
@@ -153,7 +221,7 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 func (a *App) reconcileOrphanedSubagents() {
 	sessions, err := a.store.Store().ListSessions()
 	if err != nil {
-		fmt.Printf("reconcile orphaned subagents: list sessions: %v\n", err)
+		applog.Errorf("reconcile orphaned subagents: list sessions: %v", err)
 		return
 	}
 	for _, session := range sessions {
@@ -162,16 +230,27 @@ func (a *App) reconcileOrphanedSubagents() {
 		}
 		count, err := subagentbridge.ReconcileOrphanedRuns(session.SessionDir)
 		if err != nil {
-			fmt.Printf("reconcile orphaned subagents for session %d (%s): %v\n", session.ID, session.SessionDir, err)
+			applog.Errorf("reconcile orphaned subagents for session %d (%s): %v", session.ID, session.SessionDir, err)
 			continue
 		}
 		if count > 0 {
-			fmt.Printf("reconcile: session %d: marked %d orphaned subagent run(s) aborted\n", session.ID, count)
+			applog.Infof("reconcile: session %d: marked %d orphaned subagent run(s) aborted", session.ID, count)
 		}
 	}
 }
 
 func (a *App) ServiceShutdown() error {
+	// Guard against concurrent/repeated invocation: wails' deferred
+	// shutdownServices and the background shutdown goroutine started by
+	// cmd/codingto can both reach this. Only the first call performs the real
+	// cleanup; later calls return its error, so agent processes are killed
+	// exactly once (no duplicate taskkill, no double log close).
+	var err error
+	a.shutdownOnce.Do(func() { err = a.shutdown() })
+	return err
+}
+
+func (a *App) shutdown() error {
 	agentErr := a.agent.Close()
 	a.moduleMu.Lock()
 	modules := append([]RuntimeModule(nil), a.modules...)
@@ -183,6 +262,10 @@ func (a *App) ServiceShutdown() error {
 		}
 	}
 	extensionErr := a.extensions.Close()
+	applog.Infof("CodingTo %s shutting down", appVersion)
+	// Flush and close the daily log file last so shutdown diagnostics are
+	// persisted before the process exits.
+	applog.Close()
 	if agentErr != nil {
 		return agentErr
 	}
@@ -225,7 +308,15 @@ func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 	// Validate and materialize the runtime configuration before committing the
 	// application configuration, so a failed Pi write does not persist a config
 	// that cannot be used by the next prompt.
-	for _, agent := range cfg.Agents {
+	// The steward toolset is reserved for the resident steward agent only: it is
+	// force-enabled (and persisted) on that agent, and stripped from every other
+	// agent so a plain config save cannot re-enable or resurrect it elsewhere.
+	stewardAgentID := ""
+	if a.steward != nil {
+		stewardAgentID = a.steward.ResolvedAgentID()
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
 		if err := piagent.WriteModels(agent.DataDir, cfg.Providers); err != nil {
 			return AppConfig{}, fmt.Errorf("write models for %s: %w", agent.Name, err)
 		}
@@ -234,6 +325,13 @@ func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 		// auto-discovers extensions/, so a disabled tool must be removed to turn
 		// it off). Doing this here means toggling a tool in the agent settings
 		// page writes the files immediately instead of only at session start.
+		// The steward toolset persists as enabled only on the steward agent; on
+		// every other agent it is deleted from Builtin (and thus from disk).
+		if agent.ID == stewardAgentID {
+			agent.Builtin[steward.ToolKey] = true
+		} else {
+			delete(agent.Builtin, steward.ToolKey)
+		}
 		if err := piagent.MaterializeBuiltinTools(agent.DataDir, agent.Builtin); err != nil {
 			return AppConfig{}, fmt.Errorf("materialize built-in tools for %s: %w", agent.Name, err)
 		}
@@ -245,6 +343,48 @@ func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 		return AppConfig{}, err
 	}
 	return a.store.Get(), nil
+}
+
+// sanitizeStewardToolset enforces that the steward toolset is enabled on the
+// resident steward agent only. It strips steward from every other agent's
+// persisted Builtin set and physically removes extensions/steward so Pi
+// auto-discovery never loads the codingto_steward_* tools there; the steward
+// agent itself is force-enabled and materialized. Running once at startup
+// migrates existing configurations created while steward was enabled by
+// default on every agent.
+func (a *App) sanitizeStewardToolset() error {
+	cfg := a.store.Get()
+	a.store.EnsureAgentDataDirs(&cfg)
+	stewardAgentID := ""
+	if a.steward != nil {
+		stewardAgentID = a.steward.ResolvedAgentID()
+	}
+	changed := false
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.ID == stewardAgentID {
+			if !agent.Builtin[steward.ToolKey] {
+				agent.Builtin[steward.ToolKey] = true
+				changed = true
+			}
+		} else if _, ok := agent.Builtin[steward.ToolKey]; ok {
+			delete(agent.Builtin, steward.ToolKey)
+			changed = true
+		}
+		if err := piagent.MaterializeBuiltinTools(agent.DataDir, agent.Builtin); err != nil {
+			return fmt.Errorf("materialize built-in tools for %s: %w", agent.Name, err)
+		}
+		if err := piagent.RemoveBuiltinTools(agent.DataDir, agent.Builtin); err != nil {
+			return fmt.Errorf("remove disabled built-in tools for %s: %w", agent.Name, err)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := a.store.Save(cfg); err != nil {
+		return fmt.Errorf("persist steward toolset sanitization: %w", err)
+	}
+	return nil
 }
 
 // DeleteAgent explicitly deletes one non-default agent and returns the updated
@@ -275,7 +415,17 @@ func (a *App) WindowToggleMaximise() {
 }
 
 func (a *App) WindowClose() {
-	if a.window != nil {
-		a.window.Close()
+	// 前端 frameless 窗口的关闭按钮走这里。旧实现直接 application.Quit()，
+	// 但 wails v3 在 Windows 上会"先同步执行 OnShutdown/ServiceShutdown，
+	// 再销毁窗口"：清理逻辑（steward 渠道关闭等最多可阻塞 3 秒）跑在主线程
+	// 上，导致点关闭后界面卡住 3 秒没反应。cmd/codingto 现在注入
+	// windowCloseHook，走"立即显示正在关闭蒙层 + 后台异步清理"的退出流程，
+	// 界面即时反馈、清理不阻塞 UI。未注入时（理论上不会发生）回退到 Quit。
+	if a.windowCloseHook != nil {
+		a.windowCloseHook()
+		return
+	}
+	if app := application.Get(); app != nil {
+		app.Quit()
 	}
 }

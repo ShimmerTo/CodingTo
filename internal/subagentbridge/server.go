@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"codingto/internal/applog"
 	"codingto/internal/piagent"
 )
 
@@ -325,7 +325,7 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 		}
 	}()
 	if len(s.sem) >= cap(s.sem) {
-		log.Printf("[subagent %s] queued: queue length=%d", params.RunID, queueLength)
+		applog.Infof("[subagent %s] queued: queue length=%d", params.RunID, queueLength)
 	}
 	queueTicker := time.NewTicker(500 * time.Millisecond)
 	defer queueTicker.Stop()
@@ -341,7 +341,7 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 			s.queueMu.Unlock()
 			waiting = false
 			if waited := time.Since(queueStartedAt); waited >= 500*time.Millisecond {
-				log.Printf("[subagent %s] acquired run slot after %s; queue length=%d", params.RunID, waited.Round(time.Millisecond), remaining)
+				applog.Infof("[subagent %s] acquired run slot after %s; queue length=%d", params.RunID, waited.Round(time.Millisecond), remaining)
 			}
 			defer func() { <-s.sem }()
 			goto slotAcquired
@@ -436,7 +436,7 @@ slotAcquired:
 	flushWidgets := func() {
 		widgetQueue.flush(func(event json.RawMessage) {
 			if err := appendRawEvent(runDir, event); err != nil {
-				log.Printf("[subagent %s] persist widget snapshot: %v", params.RunID, err)
+				applog.Infof("[subagent %s] persist widget snapshot: %v", params.RunID, err)
 			}
 			s.writeNotification(Notification{
 				Version: ProtocolVersion, Type: "event", RunID: params.RunID,
@@ -472,7 +472,7 @@ slotAcquired:
 		case <-wedgeTicker.C:
 			if reason := s.wedge.decide(time.Now(), lastEventAt); reason != "" {
 				wedgeReason = reason
-				log.Printf("[subagent %s] wedge watchdog triggered: %s", params.RunID, reason)
+				applog.Infof("[subagent %s] wedge watchdog triggered: %s", params.RunID, reason)
 				adapter.KillTree()
 				runCancel()
 				status, errorText = "failed", wedgeReason
@@ -568,7 +568,7 @@ slotAcquired:
 								completed = true
 								break
 							}
-							log.Printf("[subagent %s] interactive UI request %s timed out; auto-cancelled", params.RunID, requestID)
+							applog.Infof("[subagent %s] interactive UI request %s timed out; auto-cancelled", params.RunID, requestID)
 							continue
 						}
 						// The run was aborted or timed out while the frontend had the
@@ -633,16 +633,16 @@ slotAcquired:
 
 	endedAt := time.Now().UnixMilli()
 	if err := finishChildNode(runDir, nodeID, status, endedAt); err != nil {
-		log.Printf("[subagent %s] finish child change node: %v", params.RunID, err)
+		applog.Infof("[subagent %s] finish child change node: %v", params.RunID, err)
 	}
 	if err := cleanupRunMarkers(runDir); err != nil {
-		log.Printf("[subagent %s] clean run markers: %v", params.RunID, err)
+		applog.Infof("[subagent %s] clean run markers: %v", params.RunID, err)
 	}
 	files := collectRunFiles(runDir, s.snapshot.WorkDir)
 	record.Status, record.Text, record.Error = status, strings.TrimSpace(text.String()), errorText
 	record.EndedAt, record.Files = endedAt, files
 	if err := writeRunRecord(runDir, record); err != nil {
-		log.Printf("[subagent %s] persist terminal run record: %v", params.RunID, err)
+		applog.Infof("[subagent %s] persist terminal run record: %v", params.RunID, err)
 	}
 	result := RunResult{
 		RunID: params.RunID, AgentKey: agent.Key, ParentNodeID: params.ParentNodeID,
@@ -771,7 +771,7 @@ func (s *Server) tryAcquireAdmission() bool {
 	case s.admission <- struct{}{}:
 		return true
 	default:
-		log.Printf("[subagent] detached run queue full: capacity=%d", cap(s.admission))
+		applog.Infof("[subagent] detached run queue full: capacity=%d", cap(s.admission))
 		return false
 	}
 }
@@ -823,7 +823,7 @@ func (s *Server) requestAbort(runID string) bool {
 	if err := writeJSONAtomic(filepath.Join(runDir, ".abort"), map[string]any{
 		"requestedAt": time.Now().UnixMilli(),
 	}); err != nil {
-		log.Printf("[subagent %s] write abort marker: %v", runID, err)
+		applog.Infof("[subagent %s] write abort marker: %v", runID, err)
 		return false
 	}
 	return true
@@ -969,11 +969,11 @@ func (s *Server) finishFailed(runDir string, record RunRecord, status string, ca
 	endedAt := time.Now().UnixMilli()
 	if len(record.ChildNodeIDs) > 0 {
 		if err := finishChildNode(runDir, record.ChildNodeIDs[0], status, endedAt); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("[subagent %s] finish failed child change node: %v", record.RunID, err)
+			applog.Infof("[subagent %s] finish failed child change node: %v", record.RunID, err)
 		}
 	}
 	if err := cleanupRunMarkers(runDir); err != nil {
-		log.Printf("[subagent %s] clean failed run markers: %v", record.RunID, err)
+		applog.Infof("[subagent %s] clean failed run markers: %v", record.RunID, err)
 	}
 	causeText := "subagent run failed"
 	if cause != nil {
@@ -982,7 +982,7 @@ func (s *Server) finishFailed(runDir string, record RunRecord, status string, ca
 	record.Status, record.Error, record.EndedAt = status, causeText, endedAt
 	record.Files = collectRunFiles(runDir, s.snapshot.WorkDir)
 	if err := writeRunRecord(runDir, record); err != nil {
-		log.Printf("[subagent %s] persist failed run record: %v", record.RunID, err)
+		applog.Infof("[subagent %s] persist failed run record: %v", record.RunID, err)
 	}
 	return RunResult{
 		RunID: record.RunID, AgentKey: record.AgentKey, ParentNodeID: record.ParentNodeID,

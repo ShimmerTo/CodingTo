@@ -17,6 +17,10 @@
 .extension-prompt__actions button.primary { border-color: var(--accent); color: var(--accent-fg); background: var(--accent); }
 .extension-prompt__actions button:disabled { opacity: .4; cursor: default; }
 .plan-proposal { min-height: 0; padding: 12px 14px 6px; display: flex; flex-direction: column; overflow: hidden; }
+/* 计划数据未就绪（确认弹窗先于 plan-todos 到达且等待超时）的提示区 */
+.plan-proposal--missing { padding-bottom: 12px; }
+.plan-proposal--missing .plan-proposal__head { margin-bottom: 6px; }
+.plan-proposal__missing { margin: 0; padding: 8px 10px; border-radius: 7px; color: var(--muted); font-size: var(--fs-12); line-height: 1.5; background: rgba(120,120,110,.08); }
 .plan-proposal__head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; color: var(--text); font-size: var(--fs-13); font-weight: 650; }
 .plan-proposal__head small { margin-left: auto; color: var(--faint); font-size: var(--fs-12); font-weight: 500; }
 /* 计划列表折叠按钮：右侧顶部，点击收起/展开列表。 */

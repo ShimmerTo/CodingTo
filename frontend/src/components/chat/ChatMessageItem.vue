@@ -36,7 +36,7 @@ const props = defineProps({
   showIdentity: { type: Boolean, default: true }
 })
 
-const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'open-subagent-details'])
+const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'open-subagent-details', 'preview-image'])
 const messageItemComponent = getCurrentInstance()?.type
 
 function attachmentKindIcon(kind) {
@@ -286,6 +286,10 @@ watch(() => props.message.thinkingContent, async () => {
       <div v-if="message.role !== 'compaction' && message.role !== 'tool' && message.content" class="message-bubble">
         <div class="message-markdown" v-html="renderedContent"></div>
       </div>
+      <div v-else-if="message.role === 'assistant' && message.live && message.preparing" class="message-bubble message-bubble--pending">
+        <LoaderCircle class="spin" :size="14" />
+        <span>{{ t.preparingSession }}</span>
+      </div>
       <div v-else-if="message.role === 'assistant' && message.live" class="message-bubble message-bubble--pending">
         <LoaderCircle class="spin" :size="14" />
         <span>{{ t.statusRunning }}</span>
@@ -425,6 +429,11 @@ watch(() => props.message.thinkingContent, async () => {
               class="tool-call__read-img"
               :src="`data:${block.mimeType};base64,${block.data}`"
               alt="read image"
+              role="button"
+              tabindex="0"
+              :title="t.zoomImage"
+              @click="emit('preview-image', block)"
+              @keyup.enter="emit('preview-image', block)"
             />
           </template>
         </div>

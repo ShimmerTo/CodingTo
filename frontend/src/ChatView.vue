@@ -216,6 +216,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @artifact-error="emit('artifact-error', $event)"
         @open-change-file="openChangedFile"
         @open-git-diff="openFileDiff"
+        @preview-image="previewImage = $event"
       />
 
       <ChatComposer

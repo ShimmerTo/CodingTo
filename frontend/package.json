@@ -1,10 +1,10 @@
 {
   "name": "codingto-desktop",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
-    "test": "node --test src/**/*.test.js",
+    "test": "node --test src/**/*.test.js src/**/*.spec.js",
     "dev": "vite",
     "build:dev": "vite build --minify false --mode development",
     "build": "vite build",

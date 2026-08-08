@@ -1,0 +1,16 @@
+{
+  "name": "Steward",
+  "version": "0.1.0",
+  "tool_name": "codingto_steward",
+  "description": "管家专用：管理环境、会话、权限确认，并通过机器人渠道回复用户。工具调用通过本地 RPC 直达 CodingTo 管家服务。",
+  "tool_description": "Steward tools for the always-on 管家 agent: manage environments, conversations, permissions, and reply to IM users.",
+  "parameters": [
+    {"name": "text", "type": "string", "description": "要发送给用户的回复文本", "required": false},
+    {"name": "task", "type": "string", "description": "任务描述", "required": false},
+    {"name": "envId", "type": "string", "description": "环境 ID", "required": false},
+    {"name": "sessionId", "type": "string", "description": "会话 ID", "required": false},
+    {"name": "title", "type": "string", "description": "标题", "required": false},
+    {"name": "body", "type": "string", "description": "正文", "required": false},
+    {"name": "options", "type": "array", "description": "选项", "required": false}
+  ]
+}

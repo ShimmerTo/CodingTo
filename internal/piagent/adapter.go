@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"runtime"
 	"sync"
+
+	"codingto/internal/applog"
 )
 
 type Event struct {
@@ -110,7 +111,7 @@ func (a *Adapter) Start(ctx context.Context, cfg StartConfig) error {
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			log.Printf("[pi] %s", scanner.Text())
+			applog.Infof("[pi] %s", scanner.Text())
 		}
 	}()
 	go readJSONL(stdout, events, done)
@@ -147,11 +148,19 @@ func (a *Adapter) Stop() error {
 		return nil
 	}
 	cmd, done, doneOnce := a.cmd, a.done, a.doneOnce
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
 	a.running = false
 	a.mu.Unlock()
+	// Kill the whole process tree, not just the direct child. On Windows the
+	// direct child of the bridge is the pi.cmd cmd.exe shim with the real node
+	// process underneath; a plain Kill only kills the shim and leaves the node
+	// orphaned (it keeps running and keeps CodingTo's resources locked) — the
+	// exact exe that escapes on shutdown. killProcessTree walks the tree
+	// (taskkill /T /F on Windows, plain Kill on Unix where the launcher execs
+	// node directly), so every caller of Stop (session stop, restart, close,
+	// shutdown) now reliably terminates the node too.
+	if cmd != nil && cmd.Process != nil {
+		killProcessTree(cmd.Process)
+	}
 	if done != nil && doneOnce != nil {
 		doneOnce.Do(func() { close(done) })
 	}

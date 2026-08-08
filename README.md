@@ -2,15 +2,21 @@
 
 > 一个本地优先、轻量流畅的多 Agent 桌面工作台。
 >
-> 多 Agent 隔离 · 使用简单 · 界面清爽 · 高度自定义 · 低内存占用
+> 多 Agent 隔离 · 使用简单 · IM远程操控 · 界面清爽 · 高度自定义 · 低内存占用
 
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Built with](https://img.shields.io/badge/built%20with-Wails%203%20%2B%20Vue-9cf)](https://wails.io)
 
-CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。它希望在保留专业 Agent 能力和高度可定制性的同时，让日常使用保持简单、清晰和顺畅。
+<center>
+    <img src="/assets/covers/header.png" alt="example">
+</center>
+
+CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。希望在保留专业 Agent 能力和高度可定制性的同时，让日常使用保持简单、清晰和顺畅。
 
 每个 Agent 都拥有独立的数据目录、模型配置、Skills、扩展和运行环境。会话与配置默认保存在本机，不绑定特定模型服务商，可按需接入云端模型、本地模型或兼容接口。
+
+通过手机IM可以远程操控CodingTo执行不同种类任务！
 
 ![CodingTo 主界面](./assets/imgs/img1.png)
 
@@ -45,6 +51,10 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 
 ## 📝 更新日志
 
+# 2026-08-08
+- feat 新增支持飞书/钉钉远程操作CodingTo!
+- fix 优化各类小bug/交互体验
+
 # 2026-08-03
 - feat 优化agent执行，支持子agent并发执行
 - feat 增加系统通知
@@ -55,9 +65,6 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 - feat 增加支持mcp和扩展安装
 - feat 优化聊天框样式，增加更多配置
 
-#### 2026-07-28
-- feat 增加支持skills，三种安装方式
-- feat 右侧栏增加当前工作区改动以及改动对比
 
 #### ...[查看更多](./internal/app/update.md)
 
@@ -106,6 +113,16 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 - **长任务不中断**：支持后台对话、待发送问题队列和多会话运行状态管理。
 - **Wails 3 基础能力**：Service、Event Manager、Dialog Manager 与多窗口 API。
 - **原生窗口体验**：Windows 无边框窗口、macOS hidden-inset 标题栏。
+
+### 📡 远程操控
+
+- **多平台接入**：支持钉钉、飞书、企业微信的机器人渠道，将 CodingTo「管家」接入你的 IM 应用，随时随地远程下发任务。
+- **不用坐在电脑前**：通过手机上的钉钉 / 飞书，直接发消息让 CodingTo 执行编码、查改、测试等任务，并实时回传执行进度与结果。
+- **管家常驻在线**：管家会话常驻运行，随时接收指令并在本机调度对应 Agent 完成工作，重启后也能按上次会话继续。
+- **权限远程确认**：当任务需要授权时，可通过 IM 直接回复「确认 / 拒绝」，无需回到桌面端操作。
+- **本地测试渠道**：内置本地回环（loopback）渠道，无需配置机器人即可在桌面端先行验证整套远程操控流程。
+
+![渠道](./assets/imgs/img9.png)
 
 ### 🎨 本地优先与个性化
 

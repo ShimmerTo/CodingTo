@@ -198,7 +198,14 @@ func (s *Service) Shutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	err := server.Shutdown(ctx)
-	<-done
+	// The shutdown chain runs on the application's main thread, so an unbounded
+	// wait must be avoided. reapIdleLeases closes done via defer, but if it ever
+	// panics before defer runs, an unbuffered wait would hang the whole process
+	// (CodingTo.exe stuck in the task list). Bound it to match server.Shutdown.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+	}
 	return err
 }
 

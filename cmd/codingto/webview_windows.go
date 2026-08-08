@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -143,5 +144,10 @@ func showWebViewMissingDialog() {
 
 func openInBrowser(url string) {
 	cmd := exec.Command("cmd", "/c", "start", "", url)
+	// 隐藏 cmd 控制台窗口：直接执行 cmd /c start 会闪一个黑框。
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NO_WINDOW,
+	}
 	_ = cmd.Start()
 }

@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"codingto/internal/applog"
 	"codingto/internal/piagent"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -98,20 +98,39 @@ type AgentService struct {
 	// is armed when a tool_execution_start event arrives and disarmed as soon as
 	// the tool finishes (tool_execution_end) or the turn ends. If it fires, the
 	// still-running bash command is aborted via Pi's abort_bash RPC so a wedged
-	// command cannot stall the agent forever.
+	// command cannot stall the agent forever. If the runtime fails to report the
+	// tool end promptly, a short escalation grace period kills the Pi process tree.
 	toolWatchdogTimer    *time.Timer
 	toolWatchdogToken    uint64
 	toolWatchdogName     string
 	toolWatchdogToolID   string
 	toolExecutionTimeout time.Duration
-	runtimeEnv           func(agentID string, sessionID int64) map[string]string
-	runtimeRelease       func(agentID string, sessionID int64)
+	// toolWatchdogAbortGrace is injectable for tests; production uses the
+	// package default. It allows abort_bash to complete normally before the
+	// stronger process-tree fallback is used.
+	toolWatchdogAbortGrace time.Duration
+	// killTreeOverride is test-only dependency injection for watchdog escalation.
+	killTreeOverride func()
+	runtimeEnv       func(agentID string, sessionID int64) map[string]string
+	runtimeRelease   func(agentID string, sessionID int64)
 	// sendCommandOverride is test-only dependency injection for event-state
 	// tests. Production command delivery continues to use the Pi adapter.
 	sendCommandOverride func(json.RawMessage) error
 	// emitEventOverride keeps dispatchEvent tests independent of a running Wails
 	// application; production events still go through application.Get().Event.
 	emitEventOverride func(name string, value any)
+	// stewardHooks wires the steward service into event dispatch: permission
+	// relay and task-settled reporting. Nil when the steward is disabled.
+	stewardHooks *stewardHooks
+	// pinnedSessions marks sessions whose runtimes must never be evicted when
+	// the runtime pool is full (the resident steward conversation).
+	pinnedSessions map[int64]bool
+	// idle reclaim for the pinned steward session: armed after a turn settles
+	// and disarmed on the next prompt, so the resident Pi process is stopped
+	// (session file preserved) when idle for too long.
+	idleTimer   *time.Timer
+	idleSession int64
+	idleTimeout time.Duration
 }
 
 func NewAgentService(store *ConfigStore, environment ...func(agentID string, sessionID int64) map[string]string) *AgentService {
@@ -121,6 +140,7 @@ func NewAgentService(store *ConfigStore, environment ...func(agentID string, ses
 		runtimes: map[int64]*AgentService{}, sharedPrepareMu: sharedPrepareMu,
 		firstResponseTimeout: defaultModelFirstResponseTimeout,
 		toolExecutionTimeout: defaultToolExecutionTimeout,
+		pinnedSessions:       map[int64]bool{},
 	}
 	if len(environment) > 0 {
 		service.runtimeEnv = environment[0]
@@ -129,6 +149,11 @@ func NewAgentService(store *ConfigStore, environment ...func(agentID string, ses
 }
 
 func (s *AgentService) StartPrompt(req PromptRequest) error {
+	// Any new prompt cancels a pending idle reclaim so the steward runtime
+	// stays alive while work is arriving.
+	s.mu.Lock()
+	s.disarmIdleReclaimLocked()
+	s.mu.Unlock()
 	if s.runtimes == nil {
 		return s.startPromptSingle(req)
 	}
@@ -155,6 +180,7 @@ func (s *AgentService) newSessionRuntime() *AgentService {
 		sharedPrepareMu: s.sharedPrepareMu, runtimeEnv: s.runtimeEnv, runtimeRelease: s.runtimeRelease,
 		firstResponseTimeout: s.firstResponseTimeout, firstResponseTimeoutAction: s.firstResponseTimeoutAction,
 		toolExecutionTimeout: s.toolExecutionTimeout,
+		stewardHooks:         s.stewardHooks,
 	}
 }
 
@@ -166,11 +192,13 @@ func (s *AgentService) getOrCreateRuntime(sessionID int64) (*AgentService, error
 	}
 	if len(s.runtimes) >= maxConcurrentSessionRuntimes {
 		for id, runtime := range s.runtimes {
-			if !runtime.isBusy() {
-				delete(s.runtimes, id)
-				_ = runtime.stopSessionSingle(id)
-				break
+			// Pinned sessions (the resident steward) are never evicted.
+			if runtime.isBusy() || s.pinnedSessions[id] {
+				continue
 			}
+			delete(s.runtimes, id)
+			_ = runtime.stopSessionSingle(id)
+			break
 		}
 	}
 	if len(s.runtimes) >= maxConcurrentSessionRuntimes {
@@ -205,6 +233,71 @@ func (s *AgentService) isBusy() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.preparing || !s.execTurnStart.IsZero()
+}
+
+// sessionExecutionSnapshot is the authoritative in-memory execution state for
+// one conversation runtime. The database only freezes ExecDurationMs when a
+// turn settles, so consumers that need a live task list must merge this value
+// instead of treating the persisted duration/status as real-time state.
+type sessionExecutionSnapshot struct {
+	Running        bool
+	ExecDurationMs int64
+	StartedAt      int64
+}
+
+// sessionExecutionSnapshots returns a cheap point-in-time view of every
+// materialized conversation runtime. Copy the runtime map before locking
+// children so no runtime lock is held together with the pool lock.
+func (s *AgentService) sessionExecutionSnapshots() map[int64]sessionExecutionSnapshot {
+	result := make(map[int64]sessionExecutionSnapshot)
+	if s == nil {
+		return result
+	}
+	if s.runtimes == nil {
+		s.mu.Lock()
+		if s.activeSessionID > 0 {
+			total := s.execAccumulatedMs
+			running := s.preparing || !s.execTurnStart.IsZero()
+			startedAt := int64(0)
+			if !s.execTurnStart.IsZero() {
+				total += time.Since(s.execTurnStart).Milliseconds()
+				startedAt = s.execTurnStart.UnixMilli()
+			}
+			result[s.activeSessionID] = sessionExecutionSnapshot{
+				Running: running, ExecDurationMs: total, StartedAt: startedAt,
+			}
+		}
+		s.mu.Unlock()
+		return result
+	}
+
+	s.mu.Lock()
+	runtimes := make(map[int64]*AgentService, len(s.runtimes))
+	for sessionID, runtime := range s.runtimes {
+		runtimes[sessionID] = runtime
+	}
+	s.mu.Unlock()
+	for sessionID, runtime := range runtimes {
+		runtime.mu.Lock()
+		// A newly allocated runtime has no authoritative state until prompt
+		// preparation starts or it is bound to this conversation.
+		if runtime.activeSessionID != sessionID && !runtime.preparing {
+			runtime.mu.Unlock()
+			continue
+		}
+		total := runtime.execAccumulatedMs
+		running := runtime.preparing || !runtime.execTurnStart.IsZero()
+		startedAt := int64(0)
+		if !runtime.execTurnStart.IsZero() {
+			total += time.Since(runtime.execTurnStart).Milliseconds()
+			startedAt = runtime.execTurnStart.UnixMilli()
+		}
+		result[sessionID] = sessionExecutionSnapshot{
+			Running: running, ExecDurationMs: total, StartedAt: startedAt,
+		}
+		runtime.mu.Unlock()
+	}
+	return result
 }
 
 func (s *AgentService) startPromptSingle(req PromptRequest) error {
@@ -434,7 +527,7 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 	// Bridge for the Browser Profile extension: it reads the current change node
 	// id so it can scope browser artifacts to the prompt that triggered them.
 	if err := os.WriteFile(filepath.Join(session.SessionDir, ".active-change-node"), []byte(changeNodeID), 0o600); err != nil {
-		log.Printf("browser profile: write active change node: %v", err)
+		applog.Infof("browser profile: write active change node: %v", err)
 	}
 
 	// Archive user attachments for this turn (design §A1). Scoped to the node

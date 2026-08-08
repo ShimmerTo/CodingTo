@@ -27,7 +27,7 @@ const chatLayout = computed(() => (config.preferences && config.preferences.chat
 // 头像昵称展示：默认开启，关闭后对话详情不再显示 agent / 用户头像与昵称。
 const showIdentity = computed(() => !(config.preferences && config.preferences.showIdentity === false))
 
-const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff'])
+const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'preview-image'])
 
 const PLAN_TOOL_NAMES = ['codingto_plan_present', 'codingto_plan_update']
 const runtimeNow = ref(Date.now())
@@ -408,6 +408,7 @@ onBeforeUnmount(() => {
             @open-change-file="emit('open-change-file', $event)"
             @open-git-diff="emit('open-git-diff', $event)"
             @open-subagent-details="openSubagentDetails"
+            @preview-image="emit('preview-image', $event)"
           />
           <header v-if="node.agentMessages.length && showIdentity" class="message-node__header">
             <span class="message-node__avatar" :class="{ 'has-emoji': node.agentAvatar }">
@@ -436,6 +437,7 @@ onBeforeUnmount(() => {
             @open-change-file="emit('open-change-file', $event)"
             @open-git-diff="emit('open-git-diff', $event)"
             @open-subagent-details="openSubagentDetails"
+            @preview-image="emit('preview-image', $event)"
           />
         </section>
       </div>

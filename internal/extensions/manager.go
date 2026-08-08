@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/w896736588/go-tool/gstool"
+	"codingto/internal/applog"
 )
 
 // FigmaPackage is installed once as a global runtime dependency. Individual Pi
@@ -173,8 +173,16 @@ type ActionResult struct {
 	Output  string `json:"output"`
 }
 
+// fileLogger is the small subset of the shared application logger the
+// manager needs. The concrete type is applog's *gstool.GsSlog; an interface
+// keeps the extensions package free of the logging implementation.
+type fileLogger interface {
+	Infof(format string, args ...any)
+	Errof(format string, args ...any)
+}
+
 type Manager struct {
-	log *gstool.GsSlog
+	log fileLogger
 
 	// cached detection results so repeated Snapshot() calls don't re-run slow
 	// external commands (npx/npm/etc.) on every UI refresh.
@@ -202,12 +210,9 @@ const detectionTimeout = 8 * time.Second
 
 var npmPackageNamePattern = regexp.MustCompile(`^(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+$`)
 
-func NewManager(configDir string) *Manager {
-	logDir := filepath.Join(configDir, "logs")
-	_ = os.MkdirAll(logDir, 0o700)
-	_ = os.Chmod(logDir, 0o700)
+func NewManager() *Manager {
 	return &Manager{
-		log: gstool.NewSlog3(logDir, "codingto"),
+		log: applog.Get(),
 	}
 }
 
@@ -342,21 +347,26 @@ func ValidateNPMPackageName(packageName string) error {
 func (m *Manager) InstallGlobalPackage(packageName string, onLine func(string)) (GlobalPackage, ActionResult, error) {
 	packageName = strings.TrimSpace(packageName)
 	if err := ValidateNPMPackageName(packageName); err != nil {
+		m.errf("install global package %s: invalid name: %v", packageName, err)
 		return GlobalPackage{}, ActionResult{}, err
 	}
 	npm, err := npmExecutable()
 	if err != nil {
+		m.errf("install global package %s: npm not found", packageName)
 		return GlobalPackage{}, ActionResult{}, errors.New("npm was not found; install Node.js first")
 	}
 	commandText := "npm install -g " + packageName
 	output, err := runUnboundedWithProgress(onLine, npm, "install", "-g", packageName)
 	if err != nil {
+		m.errf("install global package %s failed: %v", packageName, err)
 		return GlobalPackage{}, ActionResult{Message: "Global package installation failed", Command: commandText, Output: output}, err
 	}
 	registration, metaErr := globalPackageRegistration(npm, packageName)
 	if metaErr != nil {
+		m.errf("install global package %s: metadata read failed: %v", packageName, metaErr)
 		return GlobalPackage{}, ActionResult{Message: "Package installed but metadata could not be read", Command: commandText, Output: output}, metaErr
 	}
+	m.infof("global package installed: %s", packageName)
 	return registration, ActionResult{Message: "Global package installed", Command: commandText, Output: output}, nil
 }
 
@@ -366,17 +376,21 @@ func (m *Manager) InstallGlobalPackage(packageName string, onLine func(string)) 
 func (m *Manager) UninstallGlobalPackage(packageName string, onLine func(string)) (ActionResult, error) {
 	packageName = strings.TrimSpace(packageName)
 	if err := ValidateNPMPackageName(packageName); err != nil {
+		m.errf("uninstall global package %s: invalid name: %v", packageName, err)
 		return ActionResult{}, err
 	}
 	npm, err := npmExecutable()
 	if err != nil {
+		m.errf("uninstall global package %s: npm not found", packageName)
 		return ActionResult{}, errors.New("npm was not found; install Node.js first")
 	}
 	commandText := "npm uninstall -g " + packageName
 	output, err := runUnboundedWithProgress(onLine, npm, "uninstall", "-g", packageName)
 	if err != nil {
+		m.errf("uninstall global package %s failed: %v", packageName, err)
 		return ActionResult{Message: "Global package uninstall failed", Command: commandText, Output: output}, err
 	}
+	m.infof("global package uninstalled: %s", packageName)
 	return ActionResult{Message: "Global package uninstalled", Command: commandText, Output: output}, nil
 }
 
@@ -667,10 +681,35 @@ func (m *Manager) Manage(req ActionRequest, cfg Config) (ActionResult, error) {
 	return m.ManageWithProgress(req, cfg, nil)
 }
 
+// infof/errf write into the shared application log file at ~/.codingto/logs.
+// The shared logger is owned by applog; it can be nil only when the desktop
+// app failed to initialize file logging, so both helpers are nil-safe.
+func (m *Manager) infof(format string, args ...any) {
+	if m.log != nil {
+		m.log.Infof(format, args...)
+	}
+}
+
+func (m *Manager) errf(format string, args ...any) {
+	if m.log != nil {
+		m.log.Errof(format, args...)
+	}
+}
+
 // ManageWithProgress performs the same action as Manage and reports command
 // output as it is produced. Global installs can take several minutes, so the
 // application uses this callback to keep the install log dialog responsive.
 func (m *Manager) ManageWithProgress(req ActionRequest, cfg Config, onLine func(string)) (ActionResult, error) {
+	result, err := m.manage(req, cfg, onLine)
+	if err != nil {
+		m.errf("extension %s/%s failed: %v", req.Key, req.Action, err)
+		return result, err
+	}
+	m.infof("extension %s/%s ok: %s", req.Key, req.Action, result.Message)
+	return result, nil
+}
+
+func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (ActionResult, error) {
 	switch req.Key {
 	case "rtk":
 		if req.Action == "install" {
@@ -785,7 +824,8 @@ func (m *Manager) installPlaywright(onLine func(string)) (string, error) {
 }
 
 func (m *Manager) Close() error {
-	return m.log.Close()
+	m.infof("extensions manager closed")
+	return nil
 }
 
 // detectFigma reports whether the globally installed Figma runtime is on PATH.

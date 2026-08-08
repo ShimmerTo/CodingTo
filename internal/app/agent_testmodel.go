@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
+	"codingto/internal/applog"
 	"codingto/internal/piagent"
 )
 
@@ -30,27 +30,27 @@ type TestModelResult struct {
 // TestModel spins up an isolated Pi process, runs a trivial prompt, and reports
 // whether the model answered. It shares no state with the interactive agent.
 func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) {
-	log.Printf("[TestModel] start: provider=%q model=%q", req.Provider, req.Model)
+	applog.Infof("[TestModel] start: provider=%q model=%q", req.Provider, req.Model)
 	cfg := s.store.Get()
 	if req.Provider == "" || req.Model == "" {
 		req.Provider, req.Model = cfg.DefaultProvider, cfg.DefaultModel
-		log.Printf("[TestModel] empty input, fell back to default: provider=%q model=%q", req.Provider, req.Model)
+		applog.Infof("[TestModel] empty input, fell back to default: provider=%q model=%q", req.Provider, req.Model)
 	}
 	if req.Provider == "" || req.Model == "" {
-		log.Printf("[TestModel] no provider or model selected")
+		applog.Infof("[TestModel] no provider or model selected")
 		return TestModelResult{OK: false, Error: "no provider or model selected"}, nil
 	}
 	if err := piagent.ValidateProviders(cfg.Providers, req.Provider, req.Model); err != nil {
-		log.Printf("[TestModel] ValidateProviders failed: %v", err)
+		applog.Infof("[TestModel] ValidateProviders failed: %v", err)
 		return TestModelResult{OK: false, Error: err.Error()}, nil
 	}
 	if err := validateProviderCredentials(cfg.Providers, req.Provider); err != nil {
-		log.Printf("[TestModel] provider credentials are unavailable: %v", err)
+		applog.Infof("[TestModel] provider credentials are unavailable: %v", err)
 		return TestModelResult{OK: false, Error: err.Error()}, nil
 	}
 	selectedModel, found := piagent.FindModel(cfg.Providers, req.Provider, req.Model)
 	if !found {
-		log.Printf("[TestModel] model not found: %s/%s", req.Provider, req.Model)
+		applog.Infof("[TestModel] model not found: %s/%s", req.Provider, req.Model)
 		return TestModelResult{OK: false, Error: fmt.Sprintf("model not found: %s/%s", req.Provider, req.Model)}, nil
 	}
 
@@ -63,7 +63,7 @@ func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) 
 	if err := piagent.WriteModels(testDir, cfg.Providers); err != nil {
 		return TestModelResult{OK: false, Error: fmt.Sprintf("write models.json: %v", err)}, nil
 	}
-	log.Printf("[TestModel] wrote models.json to %s, starting isolated Pi process", testDir)
+	applog.Infof("[TestModel] wrote models.json to %s, starting isolated Pi process", testDir)
 
 	adapter := piagent.NewAdapter()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -77,36 +77,36 @@ func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) 
 		ExtraArgs: []string{"--no-builtin-tools"},
 		Env:       map[string]string{"PI_CODING_AGENT_DIR": testDir},
 	}); err != nil {
-		log.Printf("[TestModel] adapter.Start failed after %dms: %v", time.Since(start).Milliseconds(), err)
+		applog.Infof("[TestModel] adapter.Start failed after %dms: %v", time.Since(start).Milliseconds(), err)
 		return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
 	}
 	defer adapter.Stop()
-	log.Printf("[TestModel] Pi process started after %dms, sending set_model", time.Since(start).Milliseconds())
+	applog.Infof("[TestModel] Pi process started after %dms, sending set_model", time.Since(start).Milliseconds())
 
 	if err := adapter.SendCommand(mustJSON(map[string]string{"type": "set_model", "provider": req.Provider, "modelId": req.Model})); err != nil {
-		log.Printf("[TestModel] set_model failed: %v", err)
+		applog.Infof("[TestModel] set_model failed: %v", err)
 		return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
 	}
 	if selectedModel.Reasoning {
 		if err := adapter.SendCommand(mustJSON(map[string]string{"type": "set_thinking_level", "level": "off"})); err != nil {
-			log.Printf("[TestModel] set_thinking_level failed: %v", err)
+			applog.Infof("[TestModel] set_thinking_level failed: %v", err)
 			return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
 		}
 	}
 	prompt := map[string]any{"type": "prompt", "message": "Reply with the single word OK if you can read this."}
-	log.Printf("[TestModel] sending prompt: %q", prompt["message"])
+	applog.Infof("[TestModel] sending prompt: %q", prompt["message"])
 	if err := adapter.SendCommand(mustJSON(prompt)); err != nil {
-		log.Printf("[TestModel] send prompt failed: %v", err)
+		applog.Infof("[TestModel] send prompt failed: %v", err)
 		return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
 	}
-	log.Printf("[TestModel] prompt sent, waiting for response (timeout 90s)")
+	applog.Infof("[TestModel] prompt sent, waiting for response (timeout 90s)")
 
 	output, err := waitForText(ctx, adapter)
 	if err != nil {
-		log.Printf("[TestModel] waitForText failed after %dms: %v", time.Since(start).Milliseconds(), err)
+		applog.Infof("[TestModel] waitForText failed after %dms: %v", time.Since(start).Milliseconds(), err)
 		return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
 	}
-	log.Printf("[TestModel] success after %dms, output=%q", time.Since(start).Milliseconds(), output)
+	applog.Infof("[TestModel] success after %dms, output=%q", time.Since(start).Milliseconds(), output)
 	return TestModelResult{OK: true, Output: output, Latency: time.Since(start).Milliseconds()}, nil
 }
 
@@ -117,12 +117,12 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[TestModel] waitForText: context done (timeout). buffered=%q", buf.String())
+			applog.Infof("[TestModel] waitForText: context done (timeout). buffered=%q", buf.String())
 			return buf.String(), fmt.Errorf("model test timed out")
 		case evt, ok := <-adapter.Events():
 			if !ok {
 				msg := buf.String()
-				log.Printf("[TestModel] waitForText: events channel closed. buffered=%q", msg)
+				applog.Infof("[TestModel] waitForText: events channel closed. buffered=%q", msg)
 				if msg == "" {
 					if err := adapter.ExitError(); err != nil {
 						return "", fmt.Errorf("pi exited: %v", err)
@@ -154,7 +154,7 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 			collect := func(text string) {
 				if text != "" {
 					buf.WriteString(text)
-					log.Printf("[TestModel] waitForText: text collected, total len=%d", buf.Len())
+					applog.Infof("[TestModel] waitForText: text collected, total len=%d", buf.Len())
 				}
 			}
 			switch payload.Type {
@@ -184,13 +184,13 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 				}
 			case "agent_end":
 				// 本轮对话已结束（模型已回答），不必再等 text_delta 或进程退出。
-				log.Printf("[TestModel] waitForText: agent_end received, buffered len=%d", buf.Len())
+				applog.Infof("[TestModel] waitForText: agent_end received, buffered len=%d", buf.Len())
 				if strings.TrimSpace(buf.String()) == "" {
 					// 优先返回模型/provider 返回的真实错误（如 404、鉴权失败等）。
 					if msg := agentEndErrorMessage(evt.Raw); msg != "" {
 						return "", errors.New(msg)
 					}
-					log.Printf("[TestModel] waitForText: last raw event: %s", string(evt.Raw))
+					applog.Infof("[TestModel] waitForText: last raw event: %s", string(evt.Raw))
 					return "", errors.New("model completed without a text response")
 				}
 				return buf.String(), nil
@@ -208,7 +208,7 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 					collect(payload.Content)
 				}
 			default:
-				log.Printf("[TestModel] waitForText: event type=%q", payload.Type)
+				applog.Infof("[TestModel] waitForText: event type=%q", payload.Type)
 			}
 		}
 	}

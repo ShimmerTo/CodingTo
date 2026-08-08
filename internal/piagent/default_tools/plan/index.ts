@@ -114,7 +114,13 @@ export default function (pi: ExtensionAPI) {
       });
 
       const title = `${PLAN_CONFIRM_DIALOG_PREFIX}${params.confirm_prompt || '确认执行以上计划？'}`;
-      const message = `${params.title ? `计划：${params.title}\n` : ''}共 ${plan.length} 步，请于底部计划面板核对后确认。`;
+      // 消息尾部内嵌结构化计划步骤：setWidget('plan-todos') 与确认弹窗是两条独立
+      // UI 事件，前端收到弹窗时计划 Widget 可能尚未渲染（事件队列乱序）。内嵌步骤
+      // 让确认弹窗自带完整计划，前端可直接解析渲染，彻底消除该竞态。
+      const message = [
+        `${params.title ? `计划：${params.title}\n` : ''}共 ${plan.length} 步，请于底部计划面板核对后确认。`,
+        `__CODINGTO_PLAN_STEPS__${JSON.stringify(plan.map((s) => ({ index: s.index, text: s.text, completed: s.completed })))}`,
+      ].join('');
       const userConfirmed = await ctx?.ui?.confirm(title, message);
 
       if (!userConfirmed) {

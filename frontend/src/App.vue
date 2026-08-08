@@ -2,14 +2,14 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import {
   Archive, Blocks, Bot, Brain, Folder, LoaderCircle, Maximize2,
-  Minus, Network, Plus, Settings, Sparkles,
+  Minus, Network, Plus, Settings, Smartphone, Sparkles,
   X
 } from 'lucide-vue-next'
 import { Call } from '@wailsio/runtime'
 import { extensionIcon } from './extensionIcons'
 import {
   abortPrompt, chooseSessionDir, chooseWorkspace, closeWindow, createSession, deleteAgent,
-  getBootstrap, getSessionChanges, getSessionHistory, listSessions, minimise, onEvent,
+  getBootstrap, getSessionChanges, getSessionHistory, getStewardProfile, listSessions, minimise, onEvent,
   getExtensions, getAgentExtensions, installPi, manageExtension, restartAgent, saveConfig,
   saveFigmaConfig, sendAgentCommand, startPrompt, testModel, toggleMaximise,
   saveBrowserProfile,
@@ -23,7 +23,8 @@ import {
   removeAgentMcpServer as beRemoveAgentMcpServer,
   installAgentExtension as beInstallAgentExtension,
   uninstallAgentExtension as beUninstallAgentExtension,
-  deleteAgentExtensionDir as beDeleteAgentExtensionDir
+  deleteAgentExtensionDir as beDeleteAgentExtensionDir,
+  listBotChannels
 } from './backend'
 import { buildT } from './i18n'
 import ChatView from './ChatView.vue'
@@ -42,12 +43,14 @@ const ModelsPage = defineAsyncComponent(() => import('./components/pages/ModelsP
 const PluginsPage = defineAsyncComponent(() => import('./components/pages/PluginsPage.vue'))
 const SettingsPage = defineAsyncComponent(() => import('./components/pages/SettingsPage.vue'))
 const SkillsPage = defineAsyncComponent(() => import('./components/pages/SkillsPage.vue'))
+const StewardPage = defineAsyncComponent(() => import('./components/pages/StewardPage.vue'))
 const TasksPage = defineAsyncComponent(() => import('./components/pages/TasksPage.vue'))
 import { BROWSER_IDENTITY_DIALOG_TITLE, isPlanConfirmationDialog, shouldAbortAfterExtensionResponse } from './components/chat/extensionDialog'
 import { mergeSubagentRuntime, parseSubagentEvent } from './components/chat/subagentRuntime'
 import { completeCompactionMessage, createCompactionMessage } from './components/chat/compactionMessages'
 import { appContextKey } from './composables/appContext'
 import { defaultThinkingLevelForModel } from './modelThinking'
+import { isResolvedStewardPermission, stewardPermissionMatchesDialog } from './stewardState.js'
 import { sendSystemNotification } from './systemNotifications'
 import {
   loadDraftForEnv, persistDraftForEnv,
@@ -68,6 +71,7 @@ const pageComponents = {
   plugins: PluginsPage,
   models: ModelsPage,
   docs: DocsPage,
+  steward: StewardPage,
   tasks: TasksPage,
   settings: SettingsPage
 }
@@ -75,6 +79,32 @@ const pageComponent = computed(() => pageComponents[activePage.value] || null)
 function goHome() { activePage.value = 'chat' }
 const environmentTab = ref('workspace')
 const sidebarOpen = ref(true)
+// 后端发出 app:shutting-down 后置为 true：覆盖全屏"正在关闭中"蒙层，
+// 让后台清理（关闭 agent 进程、steward 渠道等，最多数秒）期间有即时反馈，
+// 避免界面看起来像卡死。
+const shuttingDown = ref(false)
+// 管家是否已连接任意渠道：用于底部按钮的手机图标颜色（绿色=已连接 / 灰色=未连接）。
+const stewardConnected = ref(false)
+async function refreshStewardConnected() {
+  try {
+    const channels = await listBotChannels()
+    stewardConnected.value = Array.isArray(channels) && channels.some(c => c.status === 'connected')
+  } catch {
+    stewardConnected.value = false
+  }
+}
+// 常驻管家会话 id：用于在其自主运行时跳过前端计划确认弹窗（消息 Tab 仅展示会话详情）。
+const residentSessionId = ref(0)
+async function refreshResidentSessionId() {
+  try {
+    const profile = await getStewardProfile()
+    residentSessionId.value = Number(profile?.residentSessionId) || 0
+  } catch {}
+}
+// 打开“管家设置-消息”时刷新一次常驻会话 id，确保网关判断准确。
+watch(activePage, (page) => {
+  if (page === 'steward') void refreshResidentSessionId()
+})
 // 左侧主菜单栏宽度：可拖拽调整（min 160 / max 420 / 默认 224px），宽度持久化到 localStorage。
 const SIDEBAR_MIN = 160
 const SIDEBAR_MAX = 420
@@ -165,6 +195,15 @@ const tokenStats = ref({ input: 0, cached: 0, cacheWrite: 0, output: 0, total: 0
 const contextUsage = ref({ tokens: 0, contextWindow: 0, percent: 0 })
 const compactionByTask = reactive(new Map())
 const extensionDialog = ref(null)
+// 计划确认弹窗等待 plan-todos 的缓存：confirm 事件可能先于 setWidget 到达
+// （Wails/WebView 事件队列乱序），此时 planItems 为空，直接弹窗会渲染出
+// “只有标题和按钮、没有计划内容”的空壳确认框，用户可能在计划数据到达前
+// 就点击批准。缓存该弹窗，等 setWidget('plan-todos') 到达后再提升为正式
+// 弹窗；等待超时后仍显示（标记计划缺失、禁用批准），避免无限等待且保证
+// ack 照常发出、后端看门狗不会误判为“弹窗未渲染”而自动取消。
+const pendingPlanDialog = ref(null)
+let pendingPlanTimer = null
+const PLAN_WIDGET_WAIT_MS = 2500
 const extensionStatuses = reactive({})
 const skills = ref([])
 const skillsLoading = ref(false)
@@ -195,8 +234,20 @@ function clearPersistedExtDialog(taskId) {
 function restoreExtDialog(taskId) {
   const restored = readPersistedExtDialog(taskId)
   if (restored) {
-    extensionDialog.value = restored
-    syncTaskPendingAttention(taskId, restored)
+    // 刷新/切回恢复弹窗时的竞态兜底：若恢复的是计划确认但本地无计划数据，
+    // 优先解析消息内嵌步骤；仍没有则标记计划缺失，避免空壳确认框。
+    let dialog = restored
+    if (isPlanConfirmationDialog(restored) && planItems.value.length === 0) {
+      const embeddedSteps = parsePlanStepsFromMessage(restored.message)
+      if (embeddedSteps) {
+        dialog = { ...restored, message: stripPlanStepsMarker(restored.message) }
+        planItems.value = embeddedSteps
+      } else {
+        dialog = { ...restored, planMissing: true }
+      }
+    }
+    extensionDialog.value = dialog
+    syncTaskPendingAttention(taskId, dialog)
   }
 }
 const sidebarDotTaskIds = reactive(new Set())
@@ -419,14 +470,21 @@ const figmaActiveAuthorizationIdDraft = ref('')
 const showFigmaConfig = ref(false)
 const figma = computed(() => extensionSnapshot.value.figma || { installed: false, enabled: false, running: false, hasToken: false, version: '' })
 let activeAssistant = null
+let preparingMessage = null
 let offEvent
 let offState
 let offDocumentPreview
 let offAttachmentDrop
+let offShuttingDown
 let offSubagentEvent
 let offExtensionsChanged
+let offStewardStatus
+let offStewardPermission
 let changeRefreshTimer
 let changeRefreshRequest = 0
+// Detached subagent events can race ahead of the parent tool message. Keep a
+// bounded per-tool buffer so startup failures still reach the card/details UI.
+const pendingSubagentEvents = new Map()
 
 const t = computed(() => buildT(config.preferences.language || 'zh-CN'))
 const activeTaskRunning = computed(() => (
@@ -1828,6 +1886,8 @@ const sessionGroups = computed(() => {
   const orphan = { id: '', name: t.value.ungrouped || '未分类', env: null, all: [], visible: [], remaining: 0 }
   for (const task of tasks.value) {
     if (archivedTaskIds.has(task.id)) continue
+    // 常驻管家会话不进入左侧会话列表（在管家设置页"消息"页签查看详情）。
+    if (task.isSteward) continue
     const group = groups.find(g => g.id === task.environmentId) || orphan
     group.all.push(task)
   }
@@ -1964,6 +2024,33 @@ function parsePlanLines(lines) {
     completed: /^[☑✓]/.test(String(line)) || /~~.+~~/.test(String(line))
   }))
 }
+// 后端 plan 扩展会在确认弹窗消息尾部内嵌结构化计划步骤（双保险）：即使
+// setWidget('plan-todos') 事件延迟或丢失，确认弹窗也自带完整计划，前端无需
+// 依赖 plan-todos 到达即可渲染，彻底消除确认弹窗与计划 Widget 的竞态。
+const PLAN_STEPS_IN_MESSAGE = '__CODINGTO_PLAN_STEPS__'
+function parsePlanStepsFromMessage(message) {
+  if (!message) return null
+  const index = String(message).indexOf(PLAN_STEPS_IN_MESSAGE)
+  if (index < 0) return null
+  try {
+    const raw = JSON.parse(String(message).slice(index + PLAN_STEPS_IN_MESSAGE.length))
+    if (!Array.isArray(raw) || raw.length === 0) return null
+    const steps = raw
+      .map(s => ({
+        step: Number(s?.index ?? 0),
+        text: String(s?.text ?? '').trim(),
+        completed: Boolean(s?.completed)
+      }))
+      .filter(s => s.step > 0 && s.text)
+    return steps.length ? steps : null
+  } catch {
+    return null
+  }
+}
+function stripPlanStepsMarker(message) {
+  const index = String(message || '').indexOf(PLAN_STEPS_IN_MESSAGE)
+  return index >= 0 ? String(message).slice(0, index).trim() : message
+}
 function updatePlanFromWidget(lines) {
   planItems.value = parsePlanLines(lines)
 }
@@ -2040,6 +2127,47 @@ function clearSubagentDialog(item) {
   }
 }
 
+// A permission can be answered from an IM robot while its desktop card is
+// visible. The agent response alone does not mutate frontend state, so consume
+// the steward lifecycle event and dismiss the exact matching card here.
+function handleStewardPermissionUpdate(event) {
+  if (!isResolvedStewardPermission(event) || !event?.requestId) return
+  const requestId = String(event.requestId)
+  const sessionId = String(event.sessionId ?? '')
+  const runId = String(event.runId || '')
+  const activeId = String(activeTaskId.value ?? '')
+
+  if (runId) {
+    if (!sessionId || sessionId === activeId) {
+      const item = subagentDialogs.value.find(entry => (
+        String(entry.runId || '') === runId && String(entry.dialog?.id || '') === requestId
+      ))
+      if (item) clearSubagentDialog(item)
+    }
+    if (sessionId) clearTaskPendingAttention(sessionId, `subagent:${runId}:${requestId}`)
+    return
+  }
+
+  // Background dialogs live only in per-task storage until the user opens the
+  // conversation. Clear that copy as well, otherwise switching back restores
+  // a request that has already been answered by the robot.
+  if (sessionId) {
+    const persisted = readPersistedExtDialog(sessionId)
+    if (stewardPermissionMatchesDialog(event, persisted, sessionId)) {
+      persistExtDialogForTask(sessionId, null)
+    }
+  }
+
+  const targetId = sessionId || activeId
+  if (targetId === activeId && stewardPermissionMatchesDialog(event, extensionDialog.value, activeId)) {
+    extensionDialog.value = null
+    clearPersistedExtDialog(targetId)
+  }
+  if (targetId === activeId && String(pendingPlanDialog.value?.id || '') === requestId) {
+    flushPendingPlanDialog()
+  }
+}
+
 async function respondSubagentDialog({ item, payload }) {
   const dialog = item?.dialog
   if (!dialog?.id || !item?.runId) return
@@ -2062,6 +2190,37 @@ async function respondSubagentDialog({ item, payload }) {
   }
 }
 
+// 计划确认弹窗与 plan-todos Widget 的竞态治理（主 agent 链路）：
+// 1. 收到计划确认但 planItems 仍为空时缓存弹窗，不立即显示；
+// 2. setWidget('plan-todos') 到达后由事件处理把缓存弹窗提升为正式弹窗；
+// 3. 等待超时（远小于后端看门狗 90s）后仍显示弹窗，但标记 planMissing，
+//    ChatPlanPanel 禁用批准按钮（取消仍可用），用户不会被永远挂起。
+function clearPendingPlanTimer() {
+  if (pendingPlanTimer) {
+    clearTimeout(pendingPlanTimer)
+    pendingPlanTimer = null
+  }
+}
+function flushPendingPlanDialog() {
+  pendingPlanDialog.value = null
+  clearPendingPlanTimer()
+}
+function cachePendingPlanDialog(dialog, taskId) {
+  pendingPlanDialog.value = { ...dialog }
+  clearPendingPlanTimer()
+  pendingPlanTimer = setTimeout(() => {
+    pendingPlanTimer = null
+    const cached = pendingPlanDialog.value
+    if (!cached) return
+    // plan-todos 迟迟未到：仍显示弹窗（标记计划缺失、禁用批准），保证弹窗
+    // 最终渲染、ack 发出，后端看门狗不会超时代答取消。
+    pendingPlanDialog.value = null
+    extensionDialog.value = { ...cached, planMissing: true }
+    setTaskRunning(taskId, true)
+    persistExtDialog()
+  }, PLAN_WIDGET_WAIT_MS)
+}
+
 // 弹窗成功渲染后由 ChatPlanPanel 经 ChatComposer/ChatView 转发至此，向后端回传
 // extension_ui_ack 解除交互请求看门狗。ack 只是“弹窗已展示”的确认，不是答案；
 // 静默失败，不影响主流程。taskId 用于后台任务弹窗的确认路由。
@@ -2074,6 +2233,9 @@ function ackExtensionDialog(payload, taskId) {
 async function respondExtensionDialog(payload) {
   const dialog = extensionDialog.value
   if (!dialog) return
+  // 应答弹窗时清理可能残留的计划等待缓存（缓存尚未提升就用户取消/切换到其他
+  // 弹窗的场景），避免旧缓存把下一轮弹窗错误地延迟提升。
+  flushPendingPlanDialog()
 
   if (payload?.browserProfile) {
     extensionDialog.value = { ...dialog, saving: true, error: '' }
@@ -2212,10 +2374,14 @@ function handleSubagentEvent(event) {
     item.role === 'tool'
     && String(item.detail?.toolCallId || item.detail?.id || '') === toolCallId
   ))
-  if (!tool) return
-
   const agentName = config.agents.find(agent => agent.id === event.agentKey)?.name || ''
+  if (!tool) {
+    const pending = pendingSubagentEvents.get(toolCallId) || []
+    pendingSubagentEvents.set(toolCallId, [...pending, event].slice(-32))
+    return
+  }
   tool.detail = mergeSubagentRuntime(tool.detail, { ...event, agentName })
+  pendingSubagentEvents.delete(toolCallId)
 }
 
 function handleAgentEvent(event) {
@@ -2223,6 +2389,19 @@ function handleAgentEvent(event) {
   const sourceTaskId = eventTaskId(event)
   const hasSourceTask = sourceTaskId !== '' && sourceTaskId != null
   const sourceIsActive = !hasSourceTask || String(sourceTaskId) === String(activeTaskId.value)
+
+  // 常驻管家自主运行：其计划确认无需用户在“管家设置-消息”中手动确认，
+  // 直接自动确认并跳过前端弹窗，消息 Tab 仅保留会话详情。
+  if (
+    type === 'extension_ui_request' &&
+    event.method === 'confirm' &&
+    isPlanConfirmationDialog(event) &&
+    sourceTaskId &&
+    String(sourceTaskId) === String(residentSessionId.value)
+  ) {
+    sendAgentCommand(sourceTaskId, { type: 'extension_ui_response', id: event.id, confirmed: true, value: '' }).catch(() => {})
+    return
+  }
 
   // Runtime ownership and rendering are both scoped by conversation. Always
   // consume lifecycle/progress events so background turns settle independently
@@ -2379,12 +2558,14 @@ function handleAgentEvent(event) {
     // 重试报错（避免红字干扰结果），最终失败则保留所有报错供用户回看。
     const succeeded = Boolean(messageText(lastAssistant)) || Boolean(activeAssistant?.content) || Boolean(activeAssistant?.thinkingContent)
     activeAssistant = null
+    clearPreparingMessage()
     if (succeeded) {
       error.value = ''
       messagesList.value = messagesList.value.filter(message => message.role !== 'error')
     }
     pushChangeMessage(event.changeSummary, event._recordedAt)
     clearPersistedExtDialog(currentTask()?.id)
+    flushPendingPlanDialog()
     requestSessionState()
     refreshSessions().catch(() => {})
     scheduleSessionChangesRefresh(60)
@@ -2414,6 +2595,16 @@ function handleAgentEvent(event) {
         planItems.value = parsePlanLines(lines)
         // 出现新的计划提案时，清空上一轮残留的执行计划，否则计划面板会被执行计划条遮挡
         if (lines && lines.length) executionPlan.value = []
+        // 计划数据已就绪：若此前有缓存的计划确认弹窗（confirm 先于 setWidget 到达），
+        // 立即提升为正式弹窗，保证用户看到完整计划后再确认。
+        if (pendingPlanDialog.value) {
+          const cached = pendingPlanDialog.value
+          pendingPlanDialog.value = null
+          clearPendingPlanTimer()
+          extensionDialog.value = cached
+          setTaskRunning(sourceTaskId || activeTaskId.value, true)
+          persistExtDialog()
+        }
       } else if (key === 'plan-execution') {
         executionPlan.value = parsePlanLines(lines)
       } else if (key) {
@@ -2421,9 +2612,22 @@ function handleAgentEvent(event) {
         else delete extensionWidgets[key]
       }
     } else if (['select', 'confirm', 'input', 'editor'].includes(event.method)) {
-      extensionDialog.value = event
-      setTaskRunning(sourceTaskId || activeTaskId.value, true)
-      persistExtDialog()
+      // 计划确认弹窗可能在 plan-todos（setWidget）之前到达：若计划数据尚未就绪，
+      // 先缓存等待，避免用户看到没有计划内容、无法核对的确认框。消息内已内嵌
+      // 结构化步骤（__CODINGTO_PLAN_STEPS__）时优先直接填充计划，不依赖 setWidget。
+      let dialogEvent = event
+      const embeddedSteps = parsePlanStepsFromMessage(event.message)
+      if (embeddedSteps) {
+        dialogEvent = { ...event, message: stripPlanStepsMarker(event.message) }
+        if (planItems.value.length === 0) planItems.value = embeddedSteps
+      }
+      if (isPlanConfirmationDialog(dialogEvent) && planItems.value.length === 0) {
+        cachePendingPlanDialog(dialogEvent, sourceTaskId || activeTaskId.value)
+      } else {
+        extensionDialog.value = dialogEvent
+        setTaskRunning(sourceTaskId || activeTaskId.value, true)
+        persistExtDialog()
+      }
     }
   } else if (type === 'extension_ui_timeout') {
     // 后端看门狗超时：弹窗从未被前端确认，已代答取消解除 agent 阻塞。清理
@@ -2432,6 +2636,7 @@ function handleAgentEvent(event) {
       extensionDialog.value = null
       clearPersistedExtDialog()
     }
+    flushPendingPlanDialog()
     pushToast('info', t.value.extensionUiTimeout)
   } else if (type === 'error') {
     const msg = event.code === 'model_first_response_timeout'
@@ -2444,8 +2649,16 @@ function handleAgentEvent(event) {
   syncCurrentTask()
 }
 
+function clearPreparingMessage() {
+  if (preparingMessage && messagesList.value.includes(preparingMessage)) {
+    messagesList.value = messagesList.value.filter((message) => message !== preparingMessage)
+  }
+  preparingMessage = null
+}
+
 function ensureAssistant(thinking = false) {
   if (!activeAssistant) {
+    clearPreparingMessage()
     activeAssistant = reactive({
       id: crypto.randomUUID(), role: 'assistant', content: '', thinking,
       thinkingOpen: true, live: true, createdAt: Date.now()
@@ -2520,18 +2733,24 @@ function upsertToolMessage(event) {
     tool.content = event.toolName || event.name || call.name || tool.content
     tool.detail = { ...tool.detail, ...event, ...call, toolCallId: toolId, input: input ?? tool.detail?.input }
   }
+  const pending = pendingSubagentEvents.get(String(toolId))
+  if (pending?.length) {
+    for (const subagentEvent of pending) {
+      const agentName = config.agents.find(agent => agent.id === subagentEvent.agentKey)?.name || ''
+      tool.detail = mergeSubagentRuntime(tool.detail, { ...subagentEvent, agentName })
+    }
+    pendingSubagentEvents.delete(String(toolId))
+  }
   return tool
 }
 
 async function runPrompt({ message, images, attachments: promptAttachments, skillPath, agentId, provider, model, workDir, mode: promptMode, thinkingLevel: promptThinking }) {
   error.value = ''
-  const task = await ensureConversation(message)
-  clearTaskSidebarDot(task.id)
-  const promptAgent = config.agents.find(agent => agent.id === agentId) || selectedAgent.value
-  // 新问题真正进入消息流时，折叠此前所有轮次的思考；本轮新产生的
-  // assistant 消息会由 ensureAssistant 以展开状态创建。
-  collapsePreviousThinking()
+  const needCreateSession = !currentTask()
   const attachmentMeta = (promptAttachments || []).map((a) => ({ name: a.name, kind: a.kind, size: a.size, path: a.path || '' }))
+  // 首次发起问题到后端创建会话（pi 建会话）会有 2-3 秒延迟，期间页面无任何反馈。
+  // 这里先把用户消息与一条一次性的「正在准备会话中」占位推入消息流，消除空白期；
+  // 该占位为纯前端临时消息，不写入后端会话消息表，真实助手消息开始流式输出即被移除。
   messagesList.value.push({
     id: crypto.randomUUID(),
     role: 'user',
@@ -2539,10 +2758,28 @@ async function runPrompt({ message, images, attachments: promptAttachments, skil
     images: images || [],
     attachments: attachmentMeta
   })
-  draft.value = ''
-  setTaskRunning(task.id, true)
-  activeAssistant = null
+  if (needCreateSession) {
+    preparingMessage = reactive({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: '',
+      live: true,
+      preparing: true,
+      createdAt: Date.now()
+    })
+    messagesList.value.push(preparingMessage)
+  }
+  let task
   try {
+    task = await ensureConversation(message)
+    clearTaskSidebarDot(task.id)
+    const promptAgent = config.agents.find(agent => agent.id === agentId) || selectedAgent.value
+    // 新问题真正进入消息流时，折叠此前所有轮次的思考；本轮新产生的
+    // assistant 消息会由 ensureAssistant 以展开状态创建。
+    collapsePreviousThinking()
+    draft.value = ''
+    setTaskRunning(task.id, true)
+    activeAssistant = null
     await startPrompt({
       agentId: promptAgent?.id,
       message,
@@ -2568,7 +2805,8 @@ async function runPrompt({ message, images, attachments: promptAttachments, skil
     bumpWorkspaceToTop(config.activeEnvId)
     requestSessionState()
   } catch (err) {
-    setTaskRunning(task.id, false)
+    clearPreparingMessage()
+    if (task?.id) setTaskRunning(task.id, false)
     const raw = String(err)
     if (raw.toLowerCase().includes('prompt canceled')) {
       error.value = ''
@@ -3536,11 +3774,16 @@ provide(appContextKey, {
 })
 
 onMounted(async () => {
+  offShuttingDown = onEvent('app:shutting-down', () => {
+    shuttingDown.value = true
+  })
   offAttachmentDrop = onEvent('attachments:dropped', payload => {
     const files = Array.isArray(payload?.files) ? payload.files : []
     if (files.length) void onAddAttachments(files)
   })
   await load()
+  void refreshStewardConnected()
+  void refreshResidentSessionId()
   // 启动后后台静默检查一次客户端新版本（不弹提示，仅用于设置菜单红点）。
   // Wails 桥接在 onMounted 时可能尚未就绪，因此失败重试几次。
   void checkUpdateOnStartup()
@@ -3589,6 +3832,11 @@ onMounted(async () => {
   offExtensionsChanged = onEvent('extensions:changed', () => {
     void refreshExtensions()
   })
+  offStewardStatus = onEvent('steward:status', () => {
+    void refreshStewardConnected()
+    void refreshResidentSessionId()
+  })
+  offStewardPermission = onEvent('steward:permission', handleStewardPermissionUpdate)
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme)
 })
 
@@ -3602,7 +3850,10 @@ onBeforeUnmount(() => {
   offState?.()
   offDocumentPreview?.()
   offAttachmentDrop?.()
+  offShuttingDown?.()
   offExtensionsChanged?.()
+  offStewardStatus?.()
+  offStewardPermission?.()
   document.removeEventListener('click', closeArchivePop)
 })
 </script>
@@ -3713,6 +3964,14 @@ onBeforeUnmount(() => {
             </span>
             <span v-if="sidebarOpen">{{ t.settings }}</span>
           </button>
+          <button
+            class="sidebar__steward-btn"
+            :class="{ active: activePage === 'steward', 'is-connected': stewardConnected }"
+            :title="t.stewardMenu || '管家'"
+            @click="activePage = 'steward'"
+          >
+            <Smartphone :size="17" />
+          </button>
         </div>
       </aside>
 
@@ -3801,5 +4060,12 @@ onBeforeUnmount(() => {
 
     <AppDialogs />
     <InstallLogModal />
+
+    <div v-if="shuttingDown" class="shutdown-overlay" role="status" aria-live="polite">
+      <div class="shutdown-overlay__card">
+        <LoaderCircle :size="30" class="spin shutdown-overlay__spinner" aria-hidden="true" />
+        <p class="shutdown-overlay__text">正在关闭中…</p>
+      </div>
+    </div>
   </div>
 </template>

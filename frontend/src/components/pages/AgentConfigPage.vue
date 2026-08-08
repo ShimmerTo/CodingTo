@@ -613,9 +613,6 @@ watch(
       <button :class="{ active: activeTab === 'prompt' }" @click="onTabChange('prompt')">
         <FileText :size="15" />{{ t.agentTabPrompt }}
       </button>
-      <button :class="{ active: activeTab === 'security' }" @click="onTabChange('security')">
-        <Shield :size="15" />{{ t.agentTabSecurity }}
-      </button>
       <button :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'">
         <Sparkles :size="15" />{{ t.agentTabSkills }}
       </button>
@@ -1098,14 +1095,6 @@ watch(
             </div>
             <p v-if="!modelOptions.length" class="agent-prompt__models-empty">{{ t.agentPromptForcedNoModels }}</p>
           </div>
-        </div>
-      </section>
-
-      <section v-else-if="activeTab === 'security'" class="agent-security">
-        <div class="agent-security__empty">
-          <Shield :size="28" />
-          <strong>{{ t.agentSecurityComingSoonTitle }}</strong>
-          <p>{{ t.agentSecurityComingSoonIntro }}</p>
         </div>
       </section>
 

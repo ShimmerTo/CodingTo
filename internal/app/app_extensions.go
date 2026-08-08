@@ -16,7 +16,18 @@ func (a *App) GetExtensions() extensions.Snapshot {
 	snap := a.extensions.Snapshot(a.store.Get().Extensions)
 	cfg := a.store.Get()
 	if catalog, err := piagent.BuiltinToolCatalog(); err == nil {
-		snap.BuiltinCatalog = catalog
+		// The steward toolset is reserved for the resident steward agent and is
+		// never user-configurable, so it is hidden from the agent settings
+		// extension page's fallback catalog as well (BuiltinToolStatuses already
+		// filters it out of the per-agent statuses).
+		filtered := catalog[:0]
+		for _, tool := range catalog {
+			if tool.Key == "steward" {
+				continue
+			}
+			filtered = append(filtered, tool)
+		}
+		snap.BuiltinCatalog = filtered
 	} else {
 		snap.BuiltinCatalog = []extensions.BuiltinToolStatus{}
 	}

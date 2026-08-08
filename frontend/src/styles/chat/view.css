@@ -18,5 +18,3 @@
 .topbar-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; transition: color .15s, background .15s; }
 .topbar-btn:hover { color: var(--text); background: var(--hover); }
 .topbar-btn[aria-pressed="true"] { color: var(--accent-fg); background: var(--accent); }
-.preview-fade-enter-active, .preview-fade-leave-active { transition: opacity 0.18s ease; }
-.preview-fade-enter-from, .preview-fade-leave-to { opacity: 0; }

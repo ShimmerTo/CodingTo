@@ -2,10 +2,12 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ChevronRight, Download, FileCode2, FilePlus2, FileText, FileX2,
-  GitBranch, Image as ImageIcon, LoaderCircle, RefreshCw, X
+  GitBranch, Image as ImageIcon, LoaderCircle, Plus, RefreshCw, RotateCcw, Search,
+  Trash2, Undo2, X
 } from 'lucide-vue-next'
-import { getSessionGitSnapshot, openSessionArtifact } from '../../backend.js'
+import { applyGitFileOperation, getSessionGitSnapshot, openSessionArtifact } from '../../backend.js'
 import GitDiffDialog from './GitDiffDialog.vue'
+import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -74,6 +76,20 @@ const gitSnapshot = computed(() => (
 ))
 const gitWorktree = computed(() => gitSnapshot.value.worktree || { files: [], added: 0, deleted: 0 })
 const gitBranch = computed(() => gitSnapshot.value.branch || { files: [], added: 0, deleted: 0 })
+// 工作区变更文件搜索：输入为空时原样返回，避免额外计算开销。
+const worktreeFilter = ref('')
+const filteredWorktreeFiles = computed(() => {
+  const files = gitWorktree.value.files || []
+  const q = worktreeFilter.value.trim().toLowerCase()
+  if (!q) return files
+  return files.filter(file => String(file.path).toLowerCase().includes(q))
+})
+// 单文件 git 操作：busyPath 标记正在执行的路径（按钮转圈、防重复点击）
+const gitOpBusyPath = ref('')
+const gitOpError = ref('')
+// 破坏性操作（删除未跟踪文件 / 撤销修改）走确认弹窗
+const confirmGitOpen = ref(false)
+const confirmGitOp = ref(null)
 
 watch(
   () => props.sessionId,
@@ -286,6 +302,63 @@ function gitFileState(file) {
     if (file.unstaged) states.push(props.t.gitUnstaged)
   }
   return states.join(' · ')
+}
+
+// 按文件状态返回可执行操作（右侧栏 hover 显示）：
+// 未跟踪 → 跟踪/删除；已删除 → 恢复；其余 → 暂存/取消暂存/撤销修改。
+function gitFileActions(file) {
+  const actions = []
+  if (file.untracked) {
+    actions.push({ op: 'track', label: props.t.gitTrack, icon: Plus })
+    actions.push({ op: 'discard', label: props.t.gitDeleteFile, icon: Trash2, destructive: true })
+  } else if (file.status === 'deleted') {
+    actions.push({ op: 'restore', label: props.t.gitRestore, icon: RotateCcw })
+  } else {
+    if (file.staged) actions.push({ op: 'unstage', label: props.t.gitUnstage, icon: Undo2 })
+    if (file.unstaged) {
+      actions.push({ op: 'stage', label: props.t.gitStage, icon: Plus })
+      actions.push({ op: 'discard', label: props.t.gitDiscard, icon: RotateCcw, destructive: true })
+    }
+  }
+  return actions
+}
+
+// 破坏性操作先弹确认框，其余直接执行。
+function requestGitFileOp(op, file) {
+  if (op === 'discard') {
+    const isUntracked = file.untracked
+    confirmGitOp.value = {
+      op,
+      path: file.path,
+      title: isUntracked ? props.t.gitConfirmDeleteTitle : props.t.gitConfirmDiscardTitle,
+      description: isUntracked ? props.t.gitConfirmDeleteDesc : props.t.gitConfirmDiscardDesc
+    }
+    confirmGitOpen.value = true
+    return
+  }
+  void runGitFileOp(op, file.path)
+}
+
+function confirmDiscardGitOp() {
+  const target = confirmGitOp.value
+  confirmGitOp.value = null
+  confirmGitOpen.value = false
+  if (target) void runGitFileOp(target.op, target.path)
+}
+
+async function runGitFileOp(op, path) {
+  if (gitOpBusyPath.value) return
+  gitOpBusyPath.value = path
+  gitOpError.value = ''
+  try {
+    await applyGitFileOperation(props.sessionId, op, path)
+    await refreshGitSnapshot()
+  } catch (error) {
+    const message = String(error?.message || error)
+    gitOpError.value = formatText(props.t.gitOperationFailed, { error: message })
+  } finally {
+    gitOpBusyPath.value = ''
+  }
 }
 
 async function refreshGitSnapshot(baseBranch = selectedBase.value) {
@@ -724,21 +797,52 @@ function startResize(event) {
                 <span class="change-count change-count--added">+{{ gitWorktree.added || 0 }}</span>
                 <span class="change-count change-count--deleted">-{{ gitWorktree.deleted || 0 }}</span>
               </div>
-              <div v-if="gitWorktree.files?.length" class="git-file-list">
+              <div class="git-file-search">
+                <Search :size="13" />
+                <input
+                  v-model="worktreeFilter"
+                  type="text"
+                  :placeholder="t.gitFilterFiles"
+                  :aria-label="t.gitFilterFiles"
+                />
+                <button v-if="worktreeFilter" type="button" :title="t.gitClearFilter" :aria-label="t.gitClearFilter" @click="worktreeFilter = ''">
+                  <X :size="12" />
+                </button>
+              </div>
+              <p v-if="gitOpError" class="git-section__error" role="alert">{{ gitOpError }}</p>
+              <div v-if="filteredWorktreeFiles.length" class="git-file-list">
                 <div
-                  v-for="(file, fileIndex) in gitWorktree.files"
+                  v-for="(file, fileIndex) in filteredWorktreeFiles"
                   :key="file.path"
                   class="git-file"
                   tabindex="0"
                   :title="t.gitDoubleClickCompare"
-                  @dblclick="openGitDiff('worktree', gitWorktree.files, fileIndex)"
-                  @keydown.enter="openGitDiff('worktree', gitWorktree.files, fileIndex)"
+                  @dblclick="openGitDiff('worktree', filteredWorktreeFiles, fileIndex)"
+                  @keydown.enter="openGitDiff('worktree', filteredWorktreeFiles, fileIndex)"
                 >
                   <span class="git-file__status" :class="`is-${file.status}`">{{ gitStatusLabel(file.status) }}</span>
                   <span class="git-file__path">
                     <strong>{{ concatPath(file.path).name }}</strong>
                     <small v-if="concatPath(file.path).dir">{{ concatPath(file.path).dir }}</small>
-                    <small v-if="gitFileState(file)" class="git-file__state">{{ gitFileState(file) }}</small>
+                    <span v-if="gitFileState(file) || gitFileActions(file).length" class="git-file__meta">
+                      <small v-if="gitFileState(file)" class="git-file__state">{{ gitFileState(file) }}</small>
+                      <span v-if="gitFileActions(file).length" class="git-file__actions" @click.stop>
+                        <button
+                          v-for="action in gitFileActions(file)"
+                          :key="action.op"
+                          type="button"
+                          class="git-file__action"
+                          :class="{ 'is-danger': action.destructive }"
+                          :title="action.label"
+                          :aria-label="action.label"
+                          :disabled="gitOpBusyPath === file.path"
+                          @click.stop="requestGitFileOp(action.op, file)"
+                        >
+                          <LoaderCircle v-if="gitOpBusyPath === file.path" class="spin" :size="13" />
+                          <component :is="action.icon" v-else :size="13" />
+                        </button>
+                      </span>
+                    </span>
                   </span>
                   <span class="git-file__numbers">
                     <span v-if="file.binary" class="change-file__binary">BIN</span>
@@ -749,6 +853,7 @@ function startResize(event) {
                   </span>
                 </div>
               </div>
+              <p v-else-if="worktreeFilter.trim()" class="git-section__empty">{{ t.gitNoMatchFiles }}</p>
               <p v-else class="git-section__empty">{{ t.gitCleanWorktree }}</p>
             </section>
 
@@ -853,6 +958,14 @@ function startResize(event) {
     :t="t"
     @close="gitDialog = { ...gitDialog, open: false }"
     @update:index="gitDialog = { ...gitDialog, index: $event }"
+  />
+  <ConfirmDeleteDialog
+    v-model="confirmGitOpen"
+    :title="confirmGitOp?.title || ''"
+    :description="confirmGitOp?.description || ''"
+    :confirm-label="t.gitConfirmDiscardConfirm"
+    @confirm="confirmDiscardGitOp"
+    @cancel="confirmGitOpen = false"
   />
 </template>
 

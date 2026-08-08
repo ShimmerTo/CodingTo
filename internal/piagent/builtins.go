@@ -24,6 +24,11 @@ var systemExtensions embed.FS
 
 var retiredBuiltinTools = []string{"api", "db", "git", "browser-workflow"}
 
+// stewardToolKey is the default_tools directory name of the steward toolset,
+// kept in sync with internal/steward.ToolKey (piagent must not import steward,
+// which would create an import cycle).
+const stewardToolKey = "steward"
+
 // mcpKeyPattern restricts MCP server keys to characters that are safe for
 // LLM tool names: letters, digits, underscores and hyphens only.
 var mcpKeyPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -69,7 +74,12 @@ func BuiltinToolCatalog() ([]extensions.BuiltinToolStatus, error) {
 
 // DefaultBuiltinTools returns the default selection for a newly created agent.
 // All extensions currently present under default_tools are installed by
-// default; existing agents retain their persisted selections.
+// default; existing agents retain their persisted selections. The steward
+// toolset is excluded: it is only meaningful on the resident steward agent,
+// which internal/steward force-materializes via MaterializeBuiltinTool and
+// injects the RPC endpoint for. Enabling it by default on ordinary agents
+// would mislead the model into calling codingto_steward_* tools that fail
+// with "RPC 未配置" and hijack unrelated tasks.
 func DefaultBuiltinTools() map[string]bool {
 	catalog, err := BuiltinToolCatalog()
 	if err != nil {
@@ -77,6 +87,9 @@ func DefaultBuiltinTools() map[string]bool {
 	}
 	enabled := make(map[string]bool, len(catalog))
 	for _, tool := range catalog {
+		if tool.Key == stewardToolKey {
+			continue
+		}
 		enabled[tool.Key] = true
 	}
 	return enabled
@@ -133,6 +146,55 @@ func MaterializeSystemExtensions(piDir string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("materialize system Pi extensions: %w", err)
+	}
+	return nil
+}
+
+// MaterializeBuiltinTool copies a single bundled tool directory into the
+// agent's extensions directory, regardless of the agent's enabled set. It is
+// for tools a feature must guarantee even when the agent settings do not list
+// them — for example the steward toolset on the resident steward agent, which
+// is the only delivery path for IM replies.
+func MaterializeBuiltinTool(piDir, toolName string) error {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" || strings.ContainsAny(toolName, "/\\..") {
+		return fmt.Errorf("invalid builtin tool name %q", toolName)
+	}
+	sourceRoot := path.Join("default_tools", toolName)
+	info, err := fs.Stat(builtinTools, sourceRoot)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("built-in tool %s not found", toolName)
+	}
+	targetRoot := filepath.Join(piDir, "extensions")
+	if err := os.MkdirAll(targetRoot, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(targetRoot, 0o700); err != nil {
+		return err
+	}
+	err = fs.WalkDir(builtinTools, sourceRoot, func(sourcePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative := strings.TrimPrefix(filepath.ToSlash(sourcePath), "default_tools/")
+		target := filepath.Join(targetRoot, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		content, err := builtinTools.ReadFile(sourcePath)
+		if err != nil {
+			return err
+		}
+		return writeFileIfChanged(target, content)
+	})
+	if err != nil {
+		return fmt.Errorf("materialize built-in tool %s: %w", toolName, err)
 	}
 	return nil
 }
@@ -317,16 +379,30 @@ func applyUnmanagedManifest(status *extensions.Status, dir string) {
 }
 
 // BuiltinToolStatuses returns the version status of every tool bundled in
-// default_tools for the given agent. CurrentVersion is the version shipped with
-// the application (read from the embedded meta.json); InstalledVersion is the
-// version currently materialized into the agent's extensions directory (empty
-// when the tool has not been materialized yet). This lets the UI surface an
-// update action whenever an installed builtin is stale.
+// default_tools for the given agent, except the steward toolset: it is an
+// internal, non-user-configurable toolset reserved for the resident steward
+// agent (force-enabled by internal/steward), so it must never surface in the
+// agent settings extension page as a togglable/visible entry. CurrentVersion is
+// the version shipped with the application (read from the embedded meta.json);
+// InstalledVersion is the version currently materialized into the agent's
+// extensions directory (empty when the tool has not been materialized yet).
+// This lets the UI surface an update action whenever an installed builtin is
+// stale.
 func BuiltinToolStatuses(piDir string, enabled map[string]bool) ([]extensions.BuiltinToolStatus, error) {
 	statuses, err := BuiltinToolCatalog()
 	if err != nil {
 		return nil, err
 	}
+	// Hide the steward toolset from the agent settings UI. The tool itself stays
+	// managed (managedExtensionKeys still covers it) so its materialized
+	// directory is not mistaken for an unmanaged extension.
+	filtered := statuses[:0]
+	for _, status := range statuses {
+		if status.Key != stewardToolKey {
+			filtered = append(filtered, status)
+		}
+	}
+	statuses = filtered
 	for index := range statuses {
 		status := &statuses[index]
 		status.Installed = enabled[status.Key]

@@ -2,22 +2,139 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"codingto/internal/applog"
 	"codingto/internal/store"
 	"codingto/internal/subagentbridge"
 )
 
 const sessionEventFile = "codingto_events.jsonl"
+
+// sessionStatusTailBytes bounds status/activity inspection to a small suffix
+// of codingto_events.jsonl. Session logs can contain very large messages and
+// attachments, so task-list queries must never read the whole file.
+const sessionStatusTailBytes int64 = 256 * 1024
+
+type sessionTailState struct {
+	Found         bool
+	Running       bool
+	StartedAt     int64
+	LastEventType string
+	LastActivity  string
+	LastEventAt   int64
+}
+
+// readSessionTailState derives the latest conversation lifecycle and a compact
+// activity hint from complete JSONL records near the end of the session log.
+// It deliberately ignores free-form assistant text when deciding status:
+// lifecycle events, especially agent_settled, are the authoritative boundary.
+func readSessionTailState(sessionDir string) sessionTailState {
+	path := filepath.Join(sessionDir, sessionEventFile)
+	file, err := os.Open(path)
+	if err != nil {
+		return sessionTailState{}
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() <= 0 {
+		return sessionTailState{}
+	}
+	start := info.Size() - sessionStatusTailBytes
+	if start < 0 {
+		start = 0
+	}
+	raw := make([]byte, info.Size()-start)
+	n, err := file.ReadAt(raw, start)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return sessionTailState{}
+	}
+	raw = raw[:n]
+	lines := bytes.Split(raw, []byte{'\n'})
+	if start > 0 && len(lines) > 0 {
+		// The first record is normally a partial line because the read starts in
+		// the middle of the file. Dropping it also prevents parsing truncated JSON.
+		lines = lines[1:]
+	}
+
+	state := sessionTailState{}
+	for _, line := range lines {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event map[string]any
+		if json.Unmarshal(line, &event) != nil {
+			continue
+		}
+		eventType := stringValue(event["type"])
+		recordedAt := intValue(event["_recordedAt"])
+		state.Found = true
+		switch eventType {
+		case "user_text":
+			state.Running = true
+			state.StartedAt = recordedAt
+			state.LastActivity = "已接收任务，正在处理"
+		case "agent_start":
+			state.Running = true
+			if state.StartedAt == 0 {
+				state.StartedAt = recordedAt
+			}
+			state.LastActivity = "模型正在处理"
+		case "message_start":
+			state.Running = true
+			if state.StartedAt == 0 {
+				state.StartedAt = recordedAt
+			}
+			state.LastActivity = "正在生成回复"
+		case "message_update":
+			state.LastActivity = "正在生成回复"
+		case "tool_execution_start":
+			state.Running = true
+			toolName := strings.TrimSpace(stringValue(event["toolName"]))
+			if toolName == "" {
+				state.LastActivity = "正在执行工具"
+			} else {
+				state.LastActivity = "正在执行工具：" + toolName
+			}
+		case "tool_execution_end":
+			toolName := strings.TrimSpace(stringValue(event["toolName"]))
+			if toolName == "" {
+				state.LastActivity = "工具执行完成，等待下一步"
+			} else {
+				state.LastActivity = "工具执行完成：" + toolName
+			}
+		case "extension_ui_request":
+			state.LastActivity = "等待用户操作"
+		case "agent_end":
+			// agent_end is only a low-level model-run boundary. Automatic retry,
+			// compaction or a detached subagent follow-up can still continue.
+			state.LastActivity = "模型回合结束，等待会话收尾"
+		case "agent_settled":
+			state.Running = false
+			state.StartedAt = 0
+			state.LastActivity = "本轮已结束"
+		case "compaction_start":
+			state.LastActivity = "正在压缩上下文"
+		case "compaction_end":
+			state.LastActivity = "上下文压缩完成"
+		default:
+			continue
+		}
+		state.LastEventType = eventType
+		state.LastEventAt = recordedAt
+	}
+	return state
+}
 
 var subagentRunIDPattern = regexp.MustCompile(`^run-[A-Za-z0-9_-]{8,96}$`)
 
@@ -36,6 +153,10 @@ type Session struct {
 	ExecDurationMs int64  `json:"execDurationMs"`
 	CreatedAt      int64  `json:"createdAt"`
 	UpdatedAt      int64  `json:"updatedAt"`
+	// IsSteward marks the resident steward conversation so the frontend can
+	// hide it from the shared conversation list (it lives inside the steward
+	// page instead). It is a display hint only; the session is a normal record.
+	IsSteward bool `json:"isSteward"`
 }
 
 type CreateSessionRequest struct {
@@ -87,7 +208,12 @@ func (a *App) ListSessions() ([]Session, error) {
 	}
 	result := make([]Session, 0, len(items))
 	for _, item := range items {
-		result = append(result, sessionFromStore(item))
+		session := sessionFromStore(item)
+		// 常驻管家会话标记：前端据此将其从左侧"未分类"列表隐藏，改由管家设置页展示。
+		if a.steward != nil && a.steward.IsStewardSession(item.ID) {
+			session.IsSteward = true
+		}
+		result = append(result, session)
 	}
 	return result, nil
 }
@@ -174,7 +300,7 @@ func (a *App) GetSubagentTranscript(sessionID int64, runID string) (SessionHisto
 	if record, readErr := subagentbridge.ReadRunRecord(filepath.Join(runDir, "run.json")); readErr == nil {
 		runRecord = &record
 	} else if !errors.Is(readErr, os.ErrNotExist) {
-		log.Printf("[session %d] read subagent run record %s: %v", sessionID, runID, readErr)
+		applog.Infof("[session %d] read subagent run record %s: %v", sessionID, runID, readErr)
 		return SessionHistory{}, fmt.Errorf("read subagent run record: %w", readErr)
 	}
 	return SessionHistory{
@@ -479,6 +605,39 @@ func truncateRunes(value string, max int) string {
 	return string(runes[:max]) + "..."
 }
 
+// maxSessionEventLogLines bounds the session event log. Pi compaction rewrites
+// Pi's own session file, but codingto_events.jsonl keeps growing turn after
+// turn; after each compaction only the most recent lines are retained so the
+// file cannot balloon indefinitely.
+const maxSessionEventLogLines = 2000
+
+// truncateSessionEventLog keeps only the trailing portion of the session event
+// log. It runs after a compaction_end event (which itself is appended before
+// this call and survives), and appends a context_compacted marker line.
+func (s *AgentService) truncateSessionEventLog(sessionDir string) error {
+	s.eventLogMu.Lock()
+	defer s.eventLogMu.Unlock()
+	path := filepath.Join(sessionDir, sessionEventFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) <= maxSessionEventLogLines {
+		return nil
+	}
+	kept := lines[len(lines)-maxSessionEventLogLines:]
+	marker, _ := json.Marshal(map[string]any{
+		"type": "context_compacted", "_recordedAt": time.Now().UnixMilli(),
+	})
+	kept = append(kept, string(marker))
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(kept, "\n")+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func appendSessionEvent(sessionDir string, event any) error {
 	return appendSessionEventWithDurability(sessionDir, event, true)
 }
@@ -780,6 +939,21 @@ func readSessionMessages(sessionDir string) []map[string]any {
 				}
 			}
 			activeAssistant = -1
+			if msg := stringValue(event["errorMessage"]); msg != "" {
+				messages = append(messages, map[string]any{
+					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
+					"content": msg, "createdAt": recordedAt,
+				})
+			}
+		case "turn_end":
+			activeAssistant = -1
+			toolIndexes = map[string]int{}
+			if msg := stringValue(event["errorMessage"]); msg != "" {
+				messages = append(messages, map[string]any{
+					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
+					"content": msg, "createdAt": recordedAt,
+				})
+			}
 		case "agent_end":
 			if summary := mapValue(event["changeSummary"]); len(summary) > 0 {
 				nodeID := stringValue(summary["nodeId"])
@@ -790,6 +964,12 @@ func readSessionMessages(sessionDir string) []map[string]any {
 			}
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
+			if msg := stringValue(event["errorMessage"]); msg != "" {
+				messages = append(messages, map[string]any{
+					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
+					"content": msg, "createdAt": recordedAt,
+				})
+			}
 		case "error":
 			message := stringValue(event["error"])
 			if message == "" {
@@ -810,6 +990,42 @@ func readSessionMessages(sessionDir string) []map[string]any {
 		messages[activeAssistant]["live"] = true
 	}
 	return messages
+}
+
+// lastAssistantContent 返回会话对话中最后一条 assistant 文本消息的正文，
+// 供管家在对话结束（agent_settled）时把"会话信息"（即 AI 的最终答复）附带回
+// 传给机器人渠道，而不是只发一条"任务完成"的空壳通知。无对话或最后一条
+// assistant 无正文时返回空串。
+func lastAssistantContent(sessionDir string) string {
+	messages := readSessionMessages(sessionDir)
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i]["role"] != "assistant" {
+			continue
+		}
+		if c, ok := messages[i]["content"].(string); ok && strings.TrimSpace(c) != "" {
+			return c
+		}
+	}
+	return ""
+}
+
+// firstUserQuestion 返回会话对话中第一条 user 文本消息的正文（最多保留 100 个
+// 字符），供管家回传给机器人时附带"最开始的问题"。无用户提问时返回空串。
+func firstUserQuestion(sessionDir string) string {
+	messages := readSessionMessages(sessionDir)
+	for _, m := range messages {
+		if m["role"] != "user" {
+			continue
+		}
+		if c, ok := m["content"].(string); ok && strings.TrimSpace(c) != "" {
+			runes := []rune(c)
+			if len(runes) > 100 {
+				return string(runes[:100]) + "…"
+			}
+			return c
+		}
+	}
+	return ""
 }
 
 // subagentPiSessionFile locates Pi's own session file for a subagent run

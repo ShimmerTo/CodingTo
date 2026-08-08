@@ -1,6 +1,7 @@
 import { Events, Call, Browser } from '@wailsio/runtime'
 import { App } from '../bindings/codingto/internal/app'
 import { localFileURL } from './localFileUrl.js'
+import { DEFAULT_STEWARD_PERSONA } from './stewardState.js'
 
 const fallback = {
   config: {
@@ -207,18 +208,19 @@ export async function startPrompt(request) {
   clearMockPromptTimers(sessionId)
   const emitSessionEvent = payload => emitMock('agent:event', { ...payload, codingToSessionId: sessionId })
   emitMock('agent:state', { running: true, processRunning: true, codingToSessionId: sessionId })
-  // TEMP-REPRO: 模拟 plan_present 完整链路（setWidget plan-todos + confirm 弹窗）
-  if (true) {  // TEMP-REPRO unconditional
-    // TEMP-REPRO 乱序：confirm 先到，setWidget 后到
-    scheduleMockPromptEvent(sessionId, () => emitSessionEvent({
-      type: 'extension_ui_request', id: 'repro-plan-confirm', method: 'confirm',
-      title: '__CODINGTO_PLAN_CONFIRM__:确认执行以上计划？',
-      message: '计划：复现测试 共 6 步，请于底部计划面板核对后确认。',
-    }), 200)
+  if (request.mode === 'plan') {
+    // 模拟 plan 扩展链路（与 internal/piagent/default_tools/plan/index.ts 一致）：
+    // 先 setWidget('plan-todos') 写入完整步骤，再弹确认框。如需手动验证乱序
+    // 竞态修复（confirm 先到、setWidget 后到），把下面两个延时互换即可。
     scheduleMockPromptEvent(sessionId, () => emitSessionEvent({
       type: 'extension_ui_request', id: 'repro-plan-todos', method: 'setWidget',
       widgetKey: 'plan-todos', widgetPlacement: 'aboveEditor',
       widgetLines: ['☐ 步骤一：检查现状', '☐ 步骤二：实施改动', '☐ 步骤三：验证', '☐ 步骤四：运行测试', '☐ 步骤五：更新文档', '☐ 步骤六：归档总结'],
+    }), 200)
+    scheduleMockPromptEvent(sessionId, () => emitSessionEvent({
+      type: 'extension_ui_request', id: 'repro-plan-confirm', method: 'confirm',
+      title: '__CODINGTO_PLAN_CONFIRM__:确认执行以上计划？',
+      message: '计划：复现测试 共 6 步，请于底部计划面板核对后确认。',
     }), 400)
     return
   }
@@ -380,6 +382,12 @@ export async function getSessionGitSnapshot(id, baseBranch = '') {
   return git
 }
 
+export async function applyGitFileOperation(sessionId, op, path) {
+  if (isWails()) return App.ApplyGitFileOperation({ sessionId, op, path })
+  // 浏览器 fallback：模拟成功，避免无后端时按钮报错。
+  await new Promise(resolve => setTimeout(resolve, 120))
+}
+
 export async function getSessionGitFileDetail(id, scope, path, baseBranch = '') {
   if (isWails()) return App.GetSessionGitFileDetail(id, scope, path, baseBranch)
   const isImage = /\.(png|jpe?g|gif|webp)$/i.test(path)
@@ -432,6 +440,62 @@ export async function deleteSession(id) {
   const index = mockSessions.findIndex(item => item.id === id)
   if (index >= 0) mockSessions.splice(index, 1)
   mockSessionMessages.delete(id)
+}
+
+// ---- 管家（Steward）----
+
+export async function listBotChannels() {
+  return isWails() ? App.ListBotChannels() : []
+}
+
+export async function saveBotChannel(request) {
+  return isWails() ? App.SaveBotChannel(request) : { ...request, id: Date.now(), status: 'disconnected' }
+}
+
+export async function deleteBotChannel(id) {
+  return isWails() ? App.DeleteBotChannel(id) : null
+}
+
+export async function toggleBotChannel(id, enabled) {
+  return isWails() ? App.ToggleBotChannel(id, enabled) : null
+}
+
+export async function testBotChannel(id) {
+  return isWails() ? App.TestBotChannel(id) : null
+}
+
+export async function injectBotMessage(channelId, text) {
+  return isWails() ? App.InjectBotMessage(channelId, text) : null
+}
+
+export async function getStewardProfile() {
+  return isWails() ? App.GetStewardProfile() : {
+    ...DEFAULT_STEWARD_PERSONA, residentSessionId: 0
+  }
+}
+
+export async function saveStewardProfile(profile) {
+  return isWails() ? App.SaveStewardProfile(profile) : profile
+}
+
+export async function listBotTasks() {
+  return isWails() ? App.ListBotTasks() : []
+}
+
+export async function listStewardPermissions() {
+  return isWails() ? App.ListStewardPermissions() : []
+}
+
+export async function respondStewardPermission(requestId, answer) {
+  return isWails() ? App.RespondStewardPermission(requestId, answer) : null
+}
+
+export async function stewardStopSession(sessionId) {
+  return isWails() ? App.StewardStopSession(sessionId) : null
+}
+
+export async function stewardDeleteSession(sessionId) {
+  return isWails() ? App.StewardDeleteSession(sessionId) : null
 }
 
 const mockBuiltinCatalog = [

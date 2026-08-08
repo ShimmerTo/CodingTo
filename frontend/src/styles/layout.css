@@ -14,3 +14,29 @@
 
 .page-view { height: 100%; display: flex; flex-direction: column; }
 .page-view .content-page { height: auto; flex: 1; min-height: 0; }
+
+/* 程序关闭时的全屏蒙层：后端发出 app:shutting-down 后覆盖整个界面，
+   让后台清理（关闭 agent 进程、steward 渠道等，最多数秒）期间有即时反馈。
+   z-index 高于图片预览(1000)与归档浮层(1000)，确保盖住所有内容。 */
+.shutdown-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 15, 14, .42);
+  backdrop-filter: blur(3px);
+}
+.shutdown-overlay__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 26px 40px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.shutdown-overlay__spinner { color: var(--accent, var(--faint)); }
+.shutdown-overlay__text { margin: 0; color: var(--text); font-size: var(--fs-14); }

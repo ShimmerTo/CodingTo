@@ -9,6 +9,7 @@ import {
   subagentTimelineMessages, subagentUIState
 } from './subagentRuntime.js'
 import SubAgentInteraction from './SubAgentInteraction.vue'
+import ChatImagePreview from './ChatImagePreview.vue'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext.js'
 
 const props = defineProps({
@@ -24,6 +25,7 @@ const emit = defineEmits(['open-details', 'artifact-error'])
 const conversationEl = ref(null)
 const thinkingOpenByID = ref({})
 const aborting = ref(false)
+const previewImage = ref(null)
 let backfillPending = false
 
 function parsed(value) {
@@ -291,6 +293,7 @@ function openDetails() {
         collapse-tools-by-default
         @update-thinking-open="setThinkingOpen(messageItem.id, $event)"
         @artifact-error="emit('artifact-error', $event)"
+        @preview-image="previewImage = $event"
       />
       <component
         v-if="result.error"
@@ -323,6 +326,9 @@ function openDetails() {
       </span>
     </div>
     </div>
+    <transition name="preview-fade">
+      <ChatImagePreview v-if="previewImage" :image="previewImage" :close-title="t.close" @close="previewImage = null" />
+    </transition>
   </section>
 </template>
 

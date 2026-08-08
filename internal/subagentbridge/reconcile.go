@@ -1,10 +1,11 @@
 package subagentbridge
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"time"
+
+	"codingto/internal/applog"
 )
 
 // OrphanAbortError 是孤儿子 agent run 被对账改写为 aborted 时写入的错误说明。
@@ -46,14 +47,14 @@ func ReconcileOrphanedRuns(sessionDir string) (int, error) {
 			// 的防御语义保持一致。损坏的记录无法保留原字段，但写终态能保证
 			// 会话不会永久停留在"等待子 agent"状态。
 			if !os.IsNotExist(readErr) {
-				log.Printf("[subagent %s] reconcile unreadable run record (%v), marking aborted", entry.Name(), readErr)
+				applog.Infof("[subagent %s] reconcile unreadable run record (%v), marking aborted", entry.Name(), readErr)
 			}
 			record = RunRecord{
 				Version: 1, RunID: entry.Name(), Status: "aborted",
 				EndedAt: now, Error: OrphanAbortError, Files: []RunFile{},
 			}
 			if err := writeRunRecord(runDir, record); err != nil {
-				log.Printf("[subagent %s] reconcile missing run record: %v", entry.Name(), err)
+				applog.Infof("[subagent %s] reconcile missing run record: %v", entry.Name(), err)
 				continue
 			}
 			count++
@@ -66,7 +67,7 @@ func ReconcileOrphanedRuns(sessionDir string) (int, error) {
 		record.EndedAt = now
 		record.Error = OrphanAbortError
 		if err := writeRunRecord(runDir, record); err != nil {
-			log.Printf("[subagent %s] reconcile running run record: %v", entry.Name(), err)
+			applog.Infof("[subagent %s] reconcile running run record: %v", entry.Name(), err)
 			continue
 		}
 		count++
