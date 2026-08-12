@@ -217,7 +217,8 @@ func (s *Service) cmdDelete(msg InboundMessage, reply func(string), args []strin
 		}
 	}
 	req := &PermissionRequest{
-		RequestID: fmt.Sprintf("steward-delete-%d-%d", id, unixMillisNow()),
+		RequestID: fmt.Sprintf("steward-delete-%d-%s", id, randomToken()[:16]),
+		SessionID: id,
 		Method:    "confirm",
 		Title:     "删除对话确认",
 		Body:      fmt.Sprintf("确定删除对话 %s？该操作不可恢复。回复「确认」继续，其他回复取消。", title),
@@ -238,7 +239,10 @@ func (s *Service) relayConfirm(req *PermissionRequest, deleteSessionID int64) {
 	_ = s.SendToChannel(req.ChannelID, OutboundMessage{ThreadID: req.ThreadID, Card: &CardPayload{
 		Title: req.Title, Body: req.Body, Confirm: true,
 	}})
-	go func() {
+	s.launchBackground(func() {
+		s.mu.Lock()
+		ctx := s.runCtx
+		s.mu.Unlock()
 		select {
 		case answer := <-req.answerCh:
 			s.handleConfirmAnswer(req, answer, deleteSessionID)
@@ -247,8 +251,9 @@ func (s *Service) relayConfirm(req *PermissionRequest, deleteSessionID int64) {
 			delete(s.pending, req.RequestID)
 			s.mu.Unlock()
 			s.replyAfter(req, "⏰ 确认超时，操作已取消。")
+		case <-ctx.Done():
 		}
-	}()
+	})
 }
 
 func (s *Service) handleConfirmAnswer(req *PermissionRequest, answer *PermissionAnswer, deleteSessionID int64) {

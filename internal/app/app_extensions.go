@@ -46,6 +46,13 @@ func (a *App) GetExtensions() extensions.Snapshot {
 	directory := make(map[string][]extensions.Status, len(cfg.Agents))
 	mcpServers := make(map[string][]extensions.Status, len(cfg.Agents))
 	a.store.EnsureAgentDataDirs(&cfg)
+	dcgRuntime := extensions.Status{}
+	for _, tool := range snap.Tools {
+		if tool.Key == "dcg" {
+			dcgRuntime = tool
+			break
+		}
+	}
 	for _, agent := range cfg.Agents {
 		packageStatuses, err := piagent.InstalledPackageStatuses(agent.DataDir)
 		if err != nil {
@@ -64,6 +71,10 @@ func (a *App) GetExtensions() extensions.Snapshot {
 		mcpServers[agent.ID] = agentMCP
 
 		enabled := agent.Recommended["rtk"] && piagent.RTKMaterialized(agent.DataDir)
+		dcgEnabled := agent.Recommended["dcg"] && piagent.DCGMaterialized(agent.DataDir)
+		dcgStatus := dcgRuntime
+		dcgStatus.Enabled = dcgEnabled
+		dcgStatus.Description = "Detects dangerous bash commands and requests approval before execution."
 		installed := false
 		browserStatusVersion := ""
 		if profile, found := cfg.Agent(agent.ID); found {
@@ -86,6 +97,7 @@ func (a *App) GetExtensions() extensions.Snapshot {
 		recommended[agent.ID] = []extensions.Status{
 			extensions.PiPluginsStatusForAgent(packageStatuses),
 			extensions.RTKStatusForAgent(enabled),
+			dcgStatus,
 			browserStatus,
 			figmaStatus,
 		}
@@ -128,6 +140,7 @@ func (a *App) GetAgentExtensions(agentID string) extensions.AgentExtensionStatus
 	}
 
 	enabled := agent.Recommended["rtk"] && piagent.RTKMaterialized(agent.DataDir)
+	dcgEnabled := agent.Recommended["dcg"] && piagent.DCGMaterialized(agent.DataDir)
 	installed := false
 	browserStatusVersion := ""
 	if profile, found := cfg.Agent(agent.ID); found {
@@ -150,6 +163,7 @@ func (a *App) GetAgentExtensions(agentID string) extensions.AgentExtensionStatus
 	recommended := []extensions.Status{
 		extensions.PiPluginsStatusForAgent(packageStatuses),
 		extensions.RTKStatusForAgent(enabled),
+		extensions.DCGStatusForAgent(dcgEnabled),
 		browserStatus,
 		figmaStatus,
 	}
@@ -335,25 +349,30 @@ func (a *App) DeleteAgentExtensionDir(req AgentExtensionKeyRequest) (AgentExtens
 
 func (a *App) ManageExtension(req extensions.ActionRequest) (extensions.ActionResult, error) {
 	cfg := a.store.Get()
-	if req.Action != "install" {
+	if req.Action != "install" && req.Action != "uninstall" {
 		return a.extensions.Manage(req, cfg.Extensions)
 	}
 
-	installID := "global:" + req.Key
-	title := map[string]string{
-		"rtk":           "RTK 全局安装",
-		"agent-browser": "Agent Browser 全局安装",
-		"playwright":    "Playwright 全局安装",
-		"figma":         "Figma 全局安装",
+	operation := "安装"
+	if req.Action == "uninstall" {
+		operation = "卸载"
+	}
+	installID := "global:" + req.Action + ":" + req.Key
+	displayName := map[string]string{
+		"rtk":           "RTK",
+		"dcg":           "DCG",
+		"agent-browser": "Agent Browser",
+		"playwright":    "Playwright",
+		"figma":         "Figma",
 	}[req.Key]
-	if title == "" {
-		title = "全局扩展安装"
+	if displayName == "" {
+		displayName = "全局扩展"
 	}
 	app := application.Get()
 	app.Event.Emit("install:start", map[string]any{
 		"installId": installID,
 		"scope":     "global",
-		"title":     title,
+		"title":     displayName + " 全局" + operation,
 	})
 	result, err := a.extensions.ManageWithProgress(req, cfg.Extensions, func(line string) {
 		app.Event.Emit("install:log", map[string]any{
@@ -371,7 +390,7 @@ func (a *App) ManageExtension(req extensions.ActionRequest) (extensions.ActionRe
 		"installId": installID,
 		"success":   err == nil,
 	})
-	// 安装/启用等操作会改变全局插件(Plugins 页)与 Agent 扩展状态，
+	// 安装、卸载等操作会改变全局插件(Plugins 页)与 Agent 扩展状态，
 	// 通知前端重新拉取快照，避免列表停留在安装前的旧数据。
 	app.Event.Emit("extensions:changed", map[string]any{
 		"key":    req.Key,

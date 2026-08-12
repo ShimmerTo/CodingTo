@@ -309,7 +309,7 @@ async function submitManualMCP() {
 
     <!-- Manual MCP configuration dialog -->
     <Teleport to="body">
-      <div v-if="showManualModal" class="modal-backdrop" @click.self="showManualModal = false">
+      <div v-if="showManualModal" class="modal-backdrop" @pointerdown.self="showManualModal = false">
         <div class="agent-editor-dialog manual-mcp-dialog" role="dialog" aria-modal="true">
           <header class="agent-editor-dialog__head">
             <h2>{{ t.manualMcp }}</h2>
@@ -370,7 +370,7 @@ async function submitManualMCP() {
 
     <!-- JSON import sub-dialog -->
     <Teleport to="body">
-      <div v-if="showJsonImport" class="modal-backdrop" @click.self="showJsonImport = false">
+      <div v-if="showJsonImport" class="modal-backdrop" @pointerdown.self="showJsonImport = false">
         <div class="agent-editor-dialog manual-mcp-dialog" role="dialog" aria-modal="true">
           <header class="agent-editor-dialog__head">
             <h2>{{ t.manualMcpImportJson }}</h2>

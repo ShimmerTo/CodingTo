@@ -70,9 +70,10 @@ export default function (pi: ExtensionAPI) {
     });
   };
 
-  register('codingto_steward_reply', '回复机器人用户（管家所有对外回复都必须走此工具；不要只输出普通文本）。', {
+  register('codingto_steward_reply', '回复机器人用户（管家所有对外回复都必须走此工具；审批通知传 permissionRequestId 发送精确审批卡，普通回复传 text）。', {
     text: { type: 'string', description: '要发送的回复文本' },
-  }, ['text']);
+    permissionRequestId: { type: 'string', description: '待审批请求 ID；传入时发送对应审批卡，不要同时改写审批内容' },
+  }, []);
 
   register('codingto_steward_list_environments', '查看所有环境列表。', {}, []);
   register('codingto_steward_create_environment', '创建（或更新同名）环境。', {
@@ -94,6 +95,25 @@ export default function (pi: ExtensionAPI) {
   }, ['sessionId']);
   register('codingto_steward_list_running', '查看当前真正进行中的对话；结果包含实时累计时长、当前回合开始时间和会话日志中的最近活动。', {}, []);
   register('codingto_steward_list_sessions', '查看所有对话。', {}, []);
+  register('codingto_steward_continue_task', '继续指定的已有对话；适合基于该对话结果追问、修改或执行下一步，不要为同一工作重复新建对话。', {
+    sessionId: { type: 'string', description: '要继续的会话 ID' },
+    task: { type: 'string', description: '发送给该会话的后续要求' },
+  }, ['sessionId', 'task']);
+  register('codingto_steward_list_permissions', '列出当前 IM 用户和线程中的全部待审批/选择/输入项。用户消息可能在回答待办时必须先调用。', {}, []);
+  register('codingto_steward_answer_permissions', '根据用户真实意图实际回答一个或多个待办。调用成功才代表已批准、拒绝、选择或输入；禁止只在文字里声称已处理。', {
+    answers: {
+      type: 'array',
+      description: '决定列表 [{requestId, answer}]；answer 使用批准/拒绝、选项值或用户输入原文',
+      items: {
+        type: 'object',
+        properties: {
+          requestId: { type: 'string', description: 'list_permissions 返回的准确请求 ID' },
+          answer: { type: 'string', description: '对该请求的答案' },
+        },
+        required: ['requestId', 'answer'],
+      },
+    },
+  }, ['answers']);
   register('codingto_steward_delete_session', '删除对话（破坏性，请先确认）。', {
     sessionId: { type: 'string', description: '会话 ID' },
   }, ['sessionId']);
@@ -114,8 +134,10 @@ export default function (pi: ExtensionAPI) {
           '你是 CodingTo 的管家 Agent：',
           '- 每一轮都必须调用至少一个 codingto_steward_reply 工具输出总结。',
           '- 回复用户必须通过 codingto_steward_reply 工具；不要假设消息会自动送达。',
-          '- 执行操作优先使用管家工具：codingto_steward_list_environments / codingto_steward_create_environment / codingto_steward_start_task / codingto_steward_stop_task / codingto_steward_list_running / codingto_steward_list_sessions / codingto_steward_delete_session。',
-          '- 用户要求创建、启动、派发新对话/任务时，调用 codingto_steward_start_task；工具返回后继续调用 codingto_steward_reply 告知用户会话 ID / 启动状态。',
+          '- 执行操作优先使用管家工具，包括环境、对话、任务和审批工具。',
+          '- 用户消息可能是在回答计划审批、危险命令、选择题或输入框时，先调用 codingto_steward_list_permissions 获取当前上下文的准确待办，再根据自然语言含义调用 codingto_steward_answer_permissions；可以一次处理多项。只有工具成功后才能说已经批准、拒绝或选择。',
+          '- 用户要求基于已有结果继续、修改或追问时，调用 codingto_steward_continue_task 继续原对话；要求创建、启动、派发独立新任务时调用 codingto_steward_start_task。工具返回后继续调用 codingto_steward_reply 告知会话 ID / 启动状态。',
+          '- 不得自行替用户做审批决定；可以理解“都批准”“第二个拒绝”“按你建议的选项”等自然表达，意图仍不清楚时再澄清。',
           '- 破坏性操作（删除环境、删除对话）必须先调用 codingto_steward_ask_confirm 获得用户确认。',
           '- 模糊请求必须通过 codingto_steward_reply 提出澄清；无法执行也必须通过 codingto_steward_reply 说明原因。',
         ].join('\n'),

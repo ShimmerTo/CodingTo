@@ -1,6 +1,10 @@
 package app
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -82,4 +86,40 @@ func (s *AgentService) disarmIdleReclaimLocked() {
 		s.idleTimer = nil
 	}
 	s.idleSession = 0
+}
+
+// stewardTurnRecovery inspects the durable session event log for one resident
+// dispatch token. A started-but-unsettled turn is deliberately left uncertain
+// so startup recovery never repeats an operation with unknown side effects.
+func (s *AgentService) stewardTurnRecovery(sessionID int64, dispatchToken string) (started, settled bool, err error) {
+	if sessionID <= 0 || dispatchToken == "" {
+		return false, false, nil
+	}
+	session, ok, err := s.store.Store().SessionByID(sessionID)
+	if err != nil || !ok {
+		return false, false, err
+	}
+	file, err := os.Open(filepath.Join(session.SessionDir, sessionEventFile))
+	if os.IsNotExist(err) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || stringValue(event["_stewardDispatchToken"]) != dispatchToken {
+			continue
+		}
+		switch stringValue(event["type"]) {
+		case "user_text", "message_start":
+			started = true
+		case "agent_settled":
+			started, settled = true, true
+		}
+	}
+	return started, settled, scanner.Err()
 }

@@ -87,6 +87,33 @@
   color: var(--accent, #4f8cff);
   background: color-mix(in srgb, var(--accent, #4f8cff) 16%, transparent);
 }
+.security-select-wrap { position: relative; flex: 0 0 auto; }
+.security-select-btn { height: 28px; display: flex; align-items: center; gap: 5px; padding: 0 8px; border: 0; border-radius: 7px; color: var(--success); background: transparent; cursor: pointer; font-size: var(--fs-13); white-space: nowrap; }
+.security-select-btn__label { font-size: var(--fs-12); color: var(--muted); font-weight: 500; }
+.security-select-btn__label--on { color: var(--success); font-weight: 600; }
+.security-select-btn__label--off { color: var(--danger); font-weight: 600; }
+.security-select-btn__label--missing { color: var(--muted); font-weight: 600; }
+.security-select-btn:hover:not(:disabled) { background: transparent; }
+.security-select-btn--off { color: var(--danger); }
+.security-select-btn--missing { position: relative; color: var(--muted); }
+.security-select-btn--missing .security-select-btn__shield { color: var(--muted); }
+.security-select-btn--missing .security-select-btn__alert { position: absolute; top: 1px; right: 1px; color: var(--danger); }
+.security-select-btn:disabled { opacity: .4; cursor: not-allowed; }
+.security-menu { position: absolute; bottom: 38px; left: 0; z-index: 24; width: min(320px, calc(100vw - 40px)); }
+.security-menu__pop { padding: 7px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow); }
+.security-menu__item { width: 100%; display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; text-align: left; cursor: pointer; }
+.security-menu__item:hover { color: var(--text); background: var(--surface-2); }
+.security-menu__item--protect > svg { color: var(--success); }
+.security-menu__item--protect.security-menu__item--active { color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); }
+.security-menu__item--off > svg { color: var(--danger); }
+.security-menu__item--off.security-menu__item--active { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.security-menu__item > svg { flex: 0 0 auto; margin-top: 2px; }
+.security-menu__item > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.security-menu__item strong { font-size: var(--fs-13); font-weight: 600; }
+.security-menu__item small { color: var(--faint); font-size: var(--fs-12); line-height: 1.35; }
+.security-menu__hint { margin: 0; padding: 4px 6px; color: var(--muted); font-size: var(--fs-12); line-height: 1.55; }
+.security-menu__link { color: var(--link); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.security-menu__link:hover { color: var(--accent); }
 .selected-skill-chip { display: inline-flex; align-items: center; gap: 6px; max-width: calc(100% - 24px); margin: 8px 12px 0; padding: 5px 7px 5px 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); background: var(--surface-2); font-size: var(--fs-12); }
 .selected-skill-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selected-skill-chip button { display: grid; place-items: center; padding: 1px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }

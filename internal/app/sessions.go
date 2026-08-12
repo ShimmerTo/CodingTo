@@ -190,6 +190,7 @@ type SessionHistory struct {
 	Messages     []map[string]any          `json:"messages"`
 	TokenStats   SessionTokenStats         `json:"tokenStats"`
 	ContextUsage SessionContextUsage       `json:"contextUsage"`
+	Runtime      SessionRuntimeState       `json:"runtime"`
 	SubagentUI   map[string]any            `json:"subagentUi,omitempty"`
 	Subagent     *subagentbridge.RunRecord `json:"subagent,omitempty"`
 }
@@ -206,9 +207,23 @@ func (a *App) ListSessions() ([]Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	runtimeStates := a.agent.sessionExecutionSnapshots()
 	result := make([]Session, 0, len(items))
 	for _, item := range items {
 		session := sessionFromStore(item)
+		// Database status is durable bookkeeping and can remain "running" if a
+		// terminal frontend event was missed. The runtime pool is authoritative
+		// for current execution state, including conversations waiting on children.
+		if runtime, ok := runtimeStates[item.ID]; ok {
+			session.ExecDurationMs = runtime.ExecDurationMs
+			if runtime.Running {
+				session.Status = "running"
+			} else {
+				session.Status = "active"
+			}
+		} else if session.Status == "running" {
+			session.Status = "active"
+		}
 		// 常驻管家会话标记：前端据此将其从左侧"未分类"列表隐藏，改由管家设置页展示。
 		if a.steward != nil && a.steward.IsStewardSession(item.ID) {
 			session.IsSteward = true
@@ -271,12 +286,59 @@ func (a *App) GetSessionHistory(id int64) (SessionHistory, error) {
 		return SessionHistory{}, errors.New("session not found")
 	}
 	messages := readSessionMessages(item.SessionDir)
+	reconcileSubagentRunRecords(item.SessionDir, messages)
 	tokenStats, contextUsage := readSessionTokenStats(item.SessionDir)
 	return SessionHistory{
 		Messages:     messages,
 		TokenStats:   tokenStats,
 		ContextUsage: contextUsage,
+		Runtime:      a.sessionRuntimeState(id),
 	}, nil
+}
+
+// reconcileSubagentRunRecords overlays durable child-run terminal state onto
+// the reconstructed parent tool cards. Detached completion notifications can
+// race with a parent abort, but run.json is atomically written by the bridge and
+// remains the authoritative source when the conversation is opened again.
+func reconcileSubagentRunRecords(sessionDir string, messages []map[string]any) {
+	root := filepath.Join(sessionDir, "subagents")
+	for _, message := range messages {
+		if stringValue(message["role"]) != "tool" {
+			continue
+		}
+		detail := mapValue(message["detail"])
+		subagent := mapValue(detail["subagent"])
+		runID := stringValue(subagent["runId"])
+		if !subagentRunIDPattern.MatchString(runID) {
+			continue
+		}
+		record, err := subagentbridge.ReadRunRecord(filepath.Join(root, runID, "run.json"))
+		if err != nil {
+			continue
+		}
+		// Preserve transient timeline/UI fields collected from the parent event
+		// stream while replacing lifecycle fields with the durable record.
+		subagent["runId"] = record.RunID
+		subagent["agentKey"] = record.AgentKey
+		subagent["agentName"] = record.AgentName
+		subagent["parentNodeId"] = record.ParentNodeID
+		subagent["toolCallId"] = record.ToolCallID
+		if record.Status != "" {
+			subagent["status"] = record.Status
+		}
+		subagent["task"] = record.Task
+		subagent["text"] = record.Text
+		subagent["error"] = record.Error
+		subagent["startedAt"] = record.StartedAt
+		subagent["endedAt"] = record.EndedAt
+		subagent["files"] = record.Files
+		switch record.Status {
+		case "completed", "failed", "aborted", "timeout":
+			delete(subagent, "abortRequested")
+		}
+		detail["subagent"] = subagent
+		message["detail"] = detail
+	}
 }
 
 func (a *App) GetSubagentTranscript(sessionID int64, runID string) (SessionHistory, error) {

@@ -7,6 +7,7 @@ type ServiceStatus = 'ready' | 'login_required' | 'not_ready' | 'ok' | 'closed' 
 type ServiceResponse = {
   status: ServiceStatus;
   leaseId?: string;
+  headed?: boolean;
   code?: string;
   message?: string;
   output?: string;
@@ -23,6 +24,7 @@ type LeaseState = {
   leaseId: string;
   targetUrl: string;
   origin: string;
+  headed?: boolean;
   createdAt: string;
 };
 
@@ -39,6 +41,8 @@ const serviceURL = String(process.env.CODINGTO_BROWSER_SERVICE_URL || '').replac
 const serviceToken = String(process.env.CODINGTO_BROWSER_SERVICE_TOKEN || '');
 const ownerAgentID = String(process.env.CODINGTO_BROWSER_AGENT_ID || '');
 const ownerSessionID = String(process.env.CODINGTO_BROWSER_SESSION_ID || '');
+const existingProfileHeaded = process.env.CODINGTO_BROWSER_PROFILE_EXISTING_MODE !== 'headless';
+const authenticatedTaskHeaded = process.env.CODINGTO_BROWSER_PROFILE_AUTHENTICATED_MODE !== 'headless';
 
 const IDENTITY_DIALOG_TITLE = '选择浏览器身份';
 const NEW_PROFILE_OPTION = '+ 新建 Profile';
@@ -151,6 +155,7 @@ async function writeLease(file: string, response: ServiceResponse, target: { url
     leaseId: response.leaseId,
     targetUrl: target.url,
     origin: target.origin,
+    ...(typeof response.headed === 'boolean' ? { headed: response.headed } : {}),
     createdAt: new Date().toISOString(),
   } satisfies LeaseState, null, 2), { mode: 0o600 });
 }
@@ -206,14 +211,19 @@ function toolResult(response: ServiceResponse) {
   const visible = {
     status: response.status,
     ...(response.leaseId ? { leaseId: response.leaseId } : {}),
+    ...(typeof response.headed === 'boolean' ? { headed: response.headed } : {}),
     ...(response.code ? { code: response.code } : {}),
     ...(response.message ? { message: response.message } : {}),
   };
   let hint = '';
   if (response.status === 'ready') {
-    hint = '\n目标页面已经打开。后续使用 codingto_browser_execute，不要调用 agent_browser 或重复 open。';
-  } else if (response.status === 'login_required' || response.status === 'not_ready') {
+    hint = `\n目标页面已经以${response.headed === false ? '无头' : '有头'}方式打开。后续使用 codingto_browser_execute，不要调用 agent_browser 或重复 open。`;
+  } else if (response.status === 'login_required') {
     hint = '\n请让用户在已打开的窗口中完成登录或安全检查，然后结束当前回合。';
+  } else if (response.status === 'not_ready') {
+    hint = response.headed === false
+      ? '\n页面尚未加载完成，请稍后用相同参数重试。'
+      : '\n请让用户保留已打开的窗口，然后结束当前回合并稍后重试。';
   }
   return {
     content: [{ type: 'text', text: JSON.stringify(visible) + hint }],
@@ -261,9 +271,11 @@ export default function (api: ExtensionAPI) {
     description: [
       'Browser Profile 登录态管理器。仅当你已经访问目标 URL 并发现页面需要登录时调用，公开页面不要调用。',
       '必须传入用户最初给出的目标页面 URL，不要传登录重定向 URL。',
-      '本工具让用户选择同域 Profile（最多展示 20 个），选择“+ 新建 Profile”会在同一对话框内联输入新 Key 并由 Go 服务创建；然后由 CodingTo 的 Go 服务启动并持有可见 Chrome。',
-      'status=ready 时只会返回 leaseId；目标页已经打开，后续必须调用 codingto_browser_execute。',
-      'status=login_required 或 not_ready 时，让用户在窗口中登录或完成人机验证，然后结束当前回合。',
+      '本工具让用户选择同域 Profile（最多展示 20 个），选择“+ 新建 Profile”会在同一对话框内联输入新 Key 并由 Go 服务创建；然后由 CodingTo 的 Go 服务启动并持有 Chrome。',
+      'status=ready 时会返回 leaseId 和实际 headed 模式；目标页已经打开，后续必须调用 codingto_browser_execute。',
+      'headed=true 表示有头，headed=false 表示无头；未传时使用 Agent 的“已有 Profile 登录态检查”策略。',
+      '即使请求无头，检测到需要用户登录、人机验证或安全检查时也会自动切换为有头窗口。',
+      'status=login_required 时让用户在有头窗口中登录或完成人机验证；status=not_ready 时按返回提示稍后重试。',
       '用户发来下一条消息后再次调用本工具验证；没有固定次数上限，窗口由 Go 服务保持。',
       '不要自行读取 Profile 路径、Cookie、CDP 端口或 Chrome 进程信息。',
     ].join(''),
@@ -271,6 +283,7 @@ export default function (api: ExtensionAPI) {
       type: 'object',
       properties: {
         url: { type: 'string', description: '已确认需要登录的 http/https 目标页面地址。' },
+        headed: { type: 'boolean', description: '可选。true 为有头，false 为无头；需要用户登录时会强制有头。' },
       },
       required: ['url'],
     },
@@ -279,6 +292,7 @@ export default function (api: ExtensionAPI) {
       if (!target) {
         return toolResult({ status: 'error', code: 'INVALID_URL', message: '仅支持不带内嵌凭据的 http/https URL。' });
       }
+      const headed = typeof params?.headed === 'boolean' ? params.headed : existingProfileHeaded;
       const progress = (text: string) => onUpdate?.({
         content: [{ type: 'text', text }],
         details: { status: 'working' },
@@ -290,6 +304,9 @@ export default function (api: ExtensionAPI) {
           const response = await callService(
             'POST',
             `/v1/browser/${encodeURIComponent(pending.leaseId)}/verify`,
+            // login_required is always stored as headed=true by the service;
+            // a merely slow headless page keeps its requested visibility.
+            { headed: pending.headed !== false },
           );
           await rememberResponse(response, {
             url: pending.targetUrl,
@@ -305,6 +322,7 @@ export default function (api: ExtensionAPI) {
           const response = await callService(
             'POST',
             `/v1/browser/${encodeURIComponent(active.leaseId)}/verify`,
+            { headed },
           );
           await rememberResponse(response, target);
           if (response.code !== 'LEASE_NOT_FOUND') return toolResult(response);
@@ -348,6 +366,7 @@ export default function (api: ExtensionAPI) {
             codingToSessionId: Number(ownerSessionID),
             profileId: profile.id,
             targetUrl: target.url,
+            headed,
           });
           if (response.code === 'PROFILE_RECLAIMED' || response.code === 'PROFILE_BUSY') {
             progress(response.code === 'PROFILE_RECLAIMED'
@@ -373,6 +392,8 @@ export default function (api: ExtensionAPI) {
     description: [
       '在 Go 持有的 Browser Lease 上执行浏览器操作。',
       'leaseId 必须来自 codingto_browser_prepare。',
+      'headed=true 表示有头，headed=false 表示无头；未传时使用 Agent 的“登录后任务执行”策略。',
+      '切换模式时服务会用同一 Profile 重启浏览器；若登录失效，即使请求无头也会强制打开有头窗口。',
       '允许 snapshot、click、fill、type、press、hover、scroll、select、check、uncheck、get、eval、screenshot、wait、find、back、forward、reload。',
       '禁止 close、quit、exit、open，以及 --profile、--cdp、--session 等连接参数。',
     ].join(''),
@@ -382,6 +403,7 @@ export default function (api: ExtensionAPI) {
         leaseId: { type: 'string', description: 'codingto_browser_prepare 返回的 leaseId。' },
         args: { type: 'array', items: { type: 'string' }, description: 'agent-browser 命令参数，例如 ["snapshot","-i"]。' },
         timeoutMs: { type: 'number', description: '可选超时，1000 到 120000 毫秒。' },
+        headed: { type: 'boolean', description: '可选。true 为有头，false 为无头；需要用户登录时会强制有头。' },
       },
       required: ['leaseId', 'args'],
     },
@@ -392,18 +414,20 @@ export default function (api: ExtensionAPI) {
         return toolResult({ status: 'error', code: 'LEASE_NOT_ACTIVE', message: '该 Browser Lease 不属于当前活动会话。' });
       }
       try {
+        const headed = typeof params?.headed === 'boolean' ? params.headed : authenticatedTaskHeaded;
         const response = await callService(
           'POST',
           `/v1/browser/${encodeURIComponent(leaseId)}/execute`,
           {
             args: Array.isArray(params?.args) ? params.args.map(String) : [],
             timeoutMs: Number(params?.timeoutMs || 30_000),
+            headed,
           },
         );
         if (response.status === 'ok') {
           return {
             content: [{ type: 'text', text: response.output || '' }],
-            details: { status: 'ok', leaseId },
+            details: { status: 'ok', leaseId, headed: response.headed ?? headed },
           };
         }
         await rememberResponse(response, { url: active.targetUrl, origin: active.origin });
@@ -441,7 +465,7 @@ export default function (api: ExtensionAPI) {
           '# Browser Profile 登录继续',
           '',
           '用户已在等待登录的流程中发来一条消息。',
-          `立即调用 codingto_browser_prepare，参数 url 为 ${pending.targetUrl}，通过现有 lease 验证页面。`,
+          `立即调用 codingto_browser_prepare，参数 url 为 ${pending.targetUrl}、headed 为 ${pending.headed !== false}，通过现有 lease 验证页面。`,
           '不要重新访问匿名浏览器，也不要再次询问用户选择 Profile。',
         ].join('\n')],
         exclude: [],

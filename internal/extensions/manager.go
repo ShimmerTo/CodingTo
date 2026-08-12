@@ -326,7 +326,7 @@ func (m *Manager) Snapshot(cfg Config) Snapshot {
 	}
 
 	return Snapshot{
-		Tools:         []Status{RTKGlobalStatus(), m.agentBrowserStatus(), m.playwrightStatus()},
+		Tools:         []Status{RTKGlobalStatus(), DCGGlobalStatus(), m.agentBrowserStatus(), m.playwrightStatus()},
 		Figma:         figmaStatus,
 		GlobalMCP:     GlobalPackageStatuses(cfg.GlobalMCP),
 		GlobalPlugins: GlobalPackageStatuses(cfg.GlobalPlugins),
@@ -499,6 +499,27 @@ func RTKGlobalStatus() Status {
 	}
 }
 
+// DCGGlobalStatus reports the shared destructive-command classifier binary.
+// Agent-specific enablement is represented by the managed Pi bridge below.
+func DCGGlobalStatus() Status {
+	installed, version := detectDCG()
+	sourcePath := ""
+	if path, err := DCGExecutable(); err == nil {
+		sourcePath, _ = filepath.Abs(path)
+	}
+	return Status{
+		Key:         "dcg",
+		Name:        "DCG (Destructive Command Guard)",
+		Description: "Detects destructive shell and git commands before execution and asks for explicit user approval.",
+		Homepage:    "https://github.com/Dicklesworthstone/destructive_command_guard",
+		InstallHint: dcgInstallHint(),
+		Installed:   installed,
+		Enabled:     installed,
+		Version:     version,
+		SourcePath:  sourcePath,
+	}
+}
+
 // AgentBrowserStatus reports the globally shared browser runtime. The Pi
 // wrapper itself remains installed independently for each agent.
 func (m *Manager) agentBrowserStatus() Status {
@@ -625,6 +646,28 @@ func RTKStatusForAgent(enabled bool) Status {
 	}
 }
 
+// DCGStatusForAgent reports the shared dcg binary plus this agent's managed
+// bridge state. Callers pass true only when the recommendation flag is enabled
+// and the bridge is physically materialized.
+func DCGStatusForAgent(enabled bool) Status {
+	installed, version := detectDCG()
+	sourcePath := ""
+	if path, err := DCGExecutable(); err == nil {
+		sourcePath, _ = filepath.Abs(path)
+	}
+	return Status{
+		Key:         "dcg",
+		Name:        "DCG (Destructive Command Guard)",
+		Description: "Detects dangerous bash commands and requests approval before execution.",
+		Homepage:    "https://github.com/Dicklesworthstone/destructive_command_guard",
+		InstallHint: dcgInstallHint(),
+		Installed:   installed,
+		Enabled:     enabled,
+		Version:     version,
+		SourcePath:  sourcePath,
+	}
+}
+
 // BrowserNativeStatusForAgent describes the Pi Agent Browser Native recommended
 // extension for the given agent. Installation is driven by `pi install
 // npm:pi-agent-browser-native`, which lands the extension in the agent's
@@ -712,28 +755,60 @@ func (m *Manager) ManageWithProgress(req ActionRequest, cfg Config, onLine func(
 func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (ActionResult, error) {
 	switch req.Key {
 	case "rtk":
-		if req.Action == "install" {
+		switch req.Action {
+		case "install":
 			output, err := installRTK(onLine)
 			if err != nil {
 				return ActionResult{Message: "RTK installation failed", Output: output}, err
 			}
 			return ActionResult{Message: "RTK installed", Output: output}, nil
+		case "uninstall":
+			output, err := uninstallRTK(onLine)
+			if err != nil {
+				return ActionResult{Message: "RTK uninstall failed", Output: output}, err
+			}
+			return ActionResult{Message: "RTK uninstalled", Output: output}, nil
+		}
+	case "dcg":
+		switch req.Action {
+		case "install":
+			output, err := installDCG(onLine)
+			if err != nil {
+				return ActionResult{Message: "DCG installation failed", Output: output}, err
+			}
+			return ActionResult{Message: "DCG installed", Output: output}, nil
+		case "uninstall":
+			output, err := uninstallDCG(onLine)
+			if err != nil {
+				return ActionResult{Message: "DCG uninstall failed", Output: output}, err
+			}
+			return ActionResult{Message: "DCG uninstalled", Output: output}, nil
 		}
 	case AgentBrowserPackage:
-		if req.Action == "install" {
+		switch req.Action {
+		case "install":
 			output, err := m.installAgentBrowser(onLine)
 			if err != nil {
 				return ActionResult{Message: "Agent Browser installation failed", Output: output}, err
 			}
 			return ActionResult{Message: "Agent Browser installed", Output: output}, nil
+		case "uninstall":
+			return m.uninstallNPMRuntime(AgentBrowserPackage, "Agent Browser", &m.agentBrowserCache, &m.agentBrowserCacheAt, onLine)
 		}
 	case PlaywrightPackage:
-		if req.Action == "install" {
+		switch req.Action {
+		case "install":
 			output, err := m.installPlaywright(onLine)
 			if err != nil {
 				return ActionResult{Message: "Playwright installation failed", Output: output}, err
 			}
 			return ActionResult{Message: "Playwright installed", Output: output}, nil
+		case "uninstall":
+			output, err := m.uninstallPlaywright(onLine)
+			if err != nil {
+				return ActionResult{Message: "Playwright uninstall failed", Output: output}, err
+			}
+			return ActionResult{Message: "Playwright uninstalled", Output: output}, nil
 		}
 	case "figma":
 		switch req.Action {
@@ -743,32 +818,223 @@ func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (Ac
 				return ActionResult{Message: "Figma MCP installation failed", Output: output}, err
 			}
 			return ActionResult{Message: "Figma MCP installed", Output: output}, nil
+		case "uninstall":
+			return m.uninstallNPMRuntime(FigmaPackage, "Figma MCP", &m.figmaCache, &m.figmaCacheAt, onLine)
 		}
 	}
 	return ActionResult{}, fmt.Errorf("unsupported extension action: %s/%s", req.Key, req.Action)
 }
 
 func installRTK(onLine func(string)) (string, error) {
+	var output string
+	var err error
 	switch runtime.GOOS {
 	case "windows":
 		winget, err := exec.LookPath("winget")
 		if err != nil {
 			return "", errors.New("winget was not found; install RTK from the rtk-ai/rtk releases page")
 		}
-		return runUnboundedWithProgress(onLine, winget, "install", "--id", "rtk-ai.rtk", "--exact", "--silent", "--accept-source-agreements", "--accept-package-agreements")
+		output, err = runUnboundedWithProgress(onLine, winget, "install", "--id", "rtk-ai.rtk", "--exact", "--silent", "--accept-source-agreements", "--accept-package-agreements")
 	case "darwin":
 		brew, err := exec.LookPath("brew")
 		if err != nil {
 			return "", errors.New("Homebrew was not found; install RTK from the rtk-ai/rtk releases page")
 		}
-		return runUnboundedWithProgress(onLine, brew, "install", "rtk")
+		output, err = runUnboundedWithProgress(onLine, brew, "install", "rtk")
 	default:
 		sh, err := exec.LookPath("sh")
 		if err != nil {
 			return "", errors.New("sh was not found; install RTK from the rtk-ai/rtk releases page")
 		}
-		return runUnboundedWithProgress(onLine, sh, "-c", "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh")
+		output, err = runUnboundedWithProgress(onLine, sh, "-c", "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh")
 	}
+	if err != nil {
+		return output, err
+	}
+
+	rtk, err := RTKExecutable()
+	if err != nil {
+		return output, errors.New("rtk CLI was not found after installation")
+	}
+	if onLine != nil {
+		onLine("> rtk init -g")
+	}
+	initOutput, err := runRTKGlobalInit(onLine, rtk, runUnboundedWithProgress)
+	combined := joinCommandOutput(output, initOutput)
+	if err != nil {
+		return combined, fmt.Errorf("RTK was installed but global initialization failed: %w", err)
+	}
+	return combined, nil
+}
+
+func installDCG(onLine func(string)) (string, error) {
+	var output string
+	var err error
+	if runtime.GOOS == "windows" {
+		powershell, lookErr := exec.LookPath("powershell")
+		if lookErr != nil {
+			powershell, lookErr = exec.LookPath("pwsh")
+		}
+		if lookErr != nil {
+			return "", errors.New("PowerShell was not found; install DCG from its releases page")
+		}
+		command := "$source=(Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.ps1').Content; & ([scriptblock]::Create([string]$source)) -EasyMode -Verify -NoConfigure"
+		output, err = runUnboundedWithProgress(onLine, powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command)
+	} else {
+		sh, lookErr := exec.LookPath("sh")
+		if lookErr != nil {
+			return "", errors.New("sh was not found; install DCG from its releases page")
+		}
+		command := "curl -fsSL 'https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.sh' | sh -s -- --easy-mode --verify --no-configure"
+		output, err = runUnboundedWithProgress(onLine, sh, "-c", command)
+	}
+	if err != nil {
+		return output, err
+	}
+	if _, err := DCGExecutable(); err != nil {
+		return output, errors.New("dcg CLI was not found after installation")
+	}
+	return output, nil
+}
+
+func uninstallDCG(onLine func(string)) (string, error) {
+	dcg, err := DCGExecutable()
+	if err != nil {
+		return "", errors.New("dcg CLI was not found")
+	}
+	resolvedDCG := dcg
+	if resolved, resolveErr := filepath.EvalSymlinks(dcg); resolveErr == nil {
+		resolvedDCG = resolved
+	}
+	if strings.Contains(filepath.ToSlash(resolvedDCG), "/Cellar/dcg/") {
+		if brew, lookErr := exec.LookPath("brew"); lookErr == nil {
+			output, uninstallErr := runUnboundedWithProgress(onLine, brew, "uninstall", "dcg")
+			if uninstallErr != nil {
+				return output, uninstallErr
+			}
+			if _, findErr := DCGExecutable(); findErr == nil {
+				return output, errors.New("another dcg executable is still discoverable")
+			}
+			return output, nil
+		}
+	}
+	if err := removeDetectedDCGBinary(dcg, onLine); err != nil {
+		return "", err
+	}
+	if remaining, findErr := DCGExecutable(); findErr == nil {
+		return "", fmt.Errorf("another dcg executable is still discoverable at %s", remaining)
+	}
+	return "", nil
+}
+
+func removeDetectedDCGBinary(path string, onLine func(string)) error {
+	target := filepath.Clean(strings.TrimSpace(path))
+	if target == "" || target == "." {
+		return errors.New("invalid DCG executable path")
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect DCG executable %s: %w", target, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("DCG executable path is a directory: %s", target)
+	}
+	if err := os.Remove(target); err != nil {
+		return fmt.Errorf("remove DCG executable %s: %w", target, err)
+	}
+	if onLine != nil {
+		onLine("removed " + target)
+	}
+	return nil
+}
+
+type progressCommandRunner func(func(string), string, ...string) (string, error)
+
+func runRTKGlobalInit(onLine func(string), rtk string, runner progressCommandRunner) (string, error) {
+	return runner(onLine, rtk, "init", "-g")
+}
+
+func uninstallRTK(onLine func(string)) (string, error) {
+	rtk, err := RTKExecutable()
+	if err != nil {
+		return "", errors.New("rtk CLI was not found")
+	}
+	if onLine != nil {
+		onLine("> rtk init -g --uninstall")
+	}
+	cleanupOutput, cleanupErr := runUnboundedWithProgress(onLine, rtk, "init", "-g", "--uninstall")
+	if cleanupErr != nil && onLine != nil {
+		onLine("warn: unable to remove RTK global initialization: " + cleanupErr.Error())
+	}
+
+	var uninstallOutput string
+	var packageManagerErr error
+	switch runtime.GOOS {
+	case "windows":
+		winget, lookErr := exec.LookPath("winget")
+		if lookErr == nil {
+			uninstallOutput, packageManagerErr = runUnboundedWithProgress(onLine, winget, "uninstall", "--id", "rtk-ai.rtk", "--exact", "--silent", "--accept-source-agreements")
+		}
+	case "darwin":
+		brew, lookErr := exec.LookPath("brew")
+		if lookErr == nil {
+			uninstallOutput, packageManagerErr = runUnboundedWithProgress(onLine, brew, "uninstall", "rtk")
+		}
+	}
+	if packageManagerErr != nil && onLine != nil {
+		onLine("warn: package manager uninstall did not remove RTK: " + packageManagerErr.Error())
+	}
+
+	if _, statErr := os.Lstat(rtk); statErr == nil {
+		if removeErr := removeDetectedRTKBinary(rtk, onLine); removeErr != nil {
+			return joinCommandOutput(cleanupOutput, uninstallOutput), removeErr
+		}
+	} else if !os.IsNotExist(statErr) {
+		return joinCommandOutput(cleanupOutput, uninstallOutput), fmt.Errorf("inspect RTK executable %s: %w", rtk, statErr)
+	}
+
+	combined := joinCommandOutput(cleanupOutput, uninstallOutput)
+	if remaining, findErr := RTKExecutable(); findErr == nil {
+		return combined, fmt.Errorf("another RTK executable is still discoverable at %s", remaining)
+	}
+	return combined, nil
+}
+
+func removeDetectedRTKBinary(path string, onLine func(string)) error {
+	target := filepath.Clean(strings.TrimSpace(path))
+	if target == "" || target == "." {
+		return errors.New("invalid RTK executable path")
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect RTK executable %s: %w", target, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("RTK executable path is a directory: %s", target)
+	}
+	if err := os.Remove(target); err != nil {
+		return fmt.Errorf("remove RTK executable %s: %w", target, err)
+	}
+	if onLine != nil {
+		onLine("Removed " + target)
+	}
+	return nil
+}
+
+func joinCommandOutput(parts ...string) string {
+	trimmed := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			trimmed = append(trimmed, value)
+		}
+	}
+	return strings.Join(trimmed, "\n")
 }
 
 func (m *Manager) installAgentBrowser(onLine func(string)) (string, error) {
@@ -785,6 +1051,19 @@ func (m *Manager) installAgentBrowser(onLine func(string)) (string, error) {
 	m.agentBrowserCacheAt = time.Time{}
 	m.detectMu.Unlock()
 	return strings.TrimSpace(output), nil
+}
+
+func (m *Manager) uninstallNPMRuntime(packageName, displayName string, cache **binaryDetect, cacheAt *time.Time, onLine func(string)) (ActionResult, error) {
+	result, err := m.UninstallGlobalPackage(packageName, onLine)
+	if err != nil {
+		return ActionResult{Message: displayName + " uninstall failed", Command: result.Command, Output: result.Output}, err
+	}
+	m.detectMu.Lock()
+	*cache = nil
+	*cacheAt = time.Time{}
+	m.detectMu.Unlock()
+	result.Message = displayName + " uninstalled"
+	return result, nil
 }
 
 // installPlaywright installs the Playwright CLI globally and then downloads the
@@ -816,6 +1095,30 @@ func (m *Manager) installPlaywright(onLine func(string)) (string, error) {
 		return combined, fmt.Errorf("unable to download Chromium for Playwright: %w", err)
 	}
 
+	m.detectMu.Lock()
+	m.playwrightCache = nil
+	m.playwrightCacheAt = time.Time{}
+	m.detectMu.Unlock()
+	return combined, nil
+}
+
+func (m *Manager) uninstallPlaywright(onLine func(string)) (string, error) {
+	playwright, err := playwrightExecutable()
+	if err != nil {
+		return "", errors.New("playwright CLI was not found")
+	}
+	if onLine != nil {
+		onLine("> playwright uninstall")
+	}
+	browserOutput, err := runUnboundedWithProgress(onLine, playwright, "uninstall")
+	if err != nil {
+		return browserOutput, fmt.Errorf("unable to remove Playwright browsers: %w", err)
+	}
+	result, err := m.UninstallGlobalPackage(PlaywrightPackage, onLine)
+	combined := joinCommandOutput(browserOutput, result.Output)
+	if err != nil {
+		return combined, err
+	}
 	m.detectMu.Lock()
 	m.playwrightCache = nil
 	m.playwrightCacheAt = time.Time{}
@@ -1005,6 +1308,68 @@ func rtkInstallHint() string {
 	}
 }
 
+func dcgInstallHint() string {
+	if runtime.GOOS == "windows" {
+		return "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.ps1'))) -EasyMode -Verify -NoConfigure"
+	}
+	return "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.sh | bash -s -- --easy-mode --no-configure"
+}
+
+// DCGInstalled reports whether the dcg binary is discoverable.
+func DCGInstalled() bool {
+	_, err := DCGExecutable()
+	return err == nil
+}
+
+// DCGExecutable locates dcg on PATH and in the default locations used by the
+// upstream installers and Cargo. Explicit CODINGTO_DCG_BIN is checked first so
+// packaged and developer builds can pin a verified binary without mutating PATH.
+func DCGExecutable() (string, error) {
+	if explicit := strings.TrimSpace(os.Getenv("CODINGTO_DCG_BIN")); explicit != "" {
+		if info, err := os.Stat(filepath.Clean(explicit)); err == nil && !info.IsDir() {
+			return filepath.Abs(filepath.Clean(explicit))
+		}
+	}
+	names := []string{"dcg"}
+	if runtime.GOOS == "windows" {
+		names = []string{"dcg.exe", "dcg.cmd", "dcg"}
+	}
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".local", "bin", "dcg"),
+		filepath.Join(home, ".cargo", "bin", "dcg"),
+	}
+	if runtime.GOOS == "windows" {
+		candidates = []string{
+			filepath.Join(home, ".local", "bin", "dcg.exe"),
+			filepath.Join(home, ".cargo", "bin", "dcg.exe"),
+		}
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return filepath.Abs(candidate)
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func detectDCG() (bool, string) {
+	path, err := DCGExecutable()
+	if err != nil {
+		return false, ""
+	}
+	output, _ := run(path, "--version")
+	if line, _, ok := strings.Cut(strings.TrimSpace(output), "\n"); ok {
+		output = line
+	}
+	return true, strings.TrimSpace(output)
+}
+
 // RTKInstalled reports whether the rtk binary is discoverable on PATH.
 func RTKInstalled() bool {
 	_, err := RTKExecutable()
@@ -1032,6 +1397,9 @@ func RTKExecutable() (string, error) {
 		}
 		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
 			candidates = append([]string{filepath.Join(localAppData, "Microsoft", "WinGet", "Links", "rtk.exe")}, candidates...)
+			if packageBinary := findRTKInWinGetPackages(filepath.Join(localAppData, "Microsoft", "WinGet", "Packages")); packageBinary != "" {
+				candidates = append([]string{packageBinary}, candidates...)
+			}
 		}
 	}
 	for _, candidate := range candidates {
@@ -1040,6 +1408,25 @@ func RTKExecutable() (string, error) {
 		}
 	}
 	return "", exec.ErrNotFound
+}
+
+// findRTKInWinGetPackages handles WinGet installs where the package manager
+// reports that an alias was added but does not create Links/rtk.exe until a new
+// terminal session. CodingTo runs initialization in the existing process, so it
+// must be able to execute the package binary directly.
+func findRTKInWinGetPackages(packagesRoot string) string {
+	matches, err := filepath.Glob(filepath.Join(filepath.Clean(packagesRoot), "rtk-ai.rtk_*", "rtk.exe"))
+	if err != nil {
+		return ""
+	}
+	sort.Strings(matches)
+	for index := len(matches) - 1; index >= 0; index-- {
+		if info, statErr := os.Stat(matches[index]); statErr == nil && !info.IsDir() {
+			path, _ := filepath.Abs(matches[index])
+			return path
+		}
+	}
+	return ""
 }
 
 func detectRTK() (bool, string) {

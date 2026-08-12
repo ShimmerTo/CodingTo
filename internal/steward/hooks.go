@@ -65,10 +65,12 @@ func (s *Service) RelayPermission(sessionID int64, event map[string]any) bool {
 		req.ChannelID = task.ChannelID
 		req.Sender = task.Sender
 		req.ThreadID = task.Thread
-	} else if cur != nil {
+	} else if resident && cur != nil {
 		req.ChannelID = cur.ChannelID
 		req.Sender = cur.SenderID
 		req.ThreadID = cur.ThreadID
+		req.ReceiveIDType = cur.ReceiveIDType
+		req.ReplyToMessageID = cur.ReplyToMessageID
 	}
 	if req.ChannelID == 0 && s.takeoverScope() == "all" {
 		if cid, sender, thread := s.reportTarget(); cid != 0 {
@@ -80,11 +82,11 @@ func (s *Service) RelayPermission(sessionID int64, event map[string]any) bool {
 	if resident && !managed && req.ChannelID == 0 && strings.HasPrefix(str(event["title"]), planConfirmDialogPrefix) {
 		if req.RequestID != "" {
 			confirmed := true
-			go func() {
+			s.launchBackground(func() {
 				if err := s.app.SendExtensionUIResponse(sessionID, req.RequestID, &confirmed, nil); err != nil {
 					s.logger.Printf("auto-confirm resident plan failed: request=%q error=%v", req.RequestID, err)
 				}
-			}()
+			})
 		}
 		return true
 	}
@@ -160,10 +162,12 @@ func (s *Service) RelaySubagentPermission(sessionID int64, subagent map[string]a
 		req.ChannelID = task.ChannelID
 		req.Sender = task.Sender
 		req.ThreadID = task.Thread
-	} else if cur != nil {
+	} else if s.IsStewardSession(sessionID) && cur != nil {
 		req.ChannelID = cur.ChannelID
 		req.Sender = cur.SenderID
 		req.ThreadID = cur.ThreadID
+		req.ReceiveIDType = cur.ReceiveIDType
+		req.ReplyToMessageID = cur.ReplyToMessageID
 	}
 	if req.ChannelID == 0 && s.takeoverScope() == "all" {
 		if cid, sender, thread := s.reportTarget(); cid != 0 {
@@ -190,7 +194,11 @@ func permissionTitle(event map[string]any) string {
 }
 
 func permissionBody(event map[string]any) string {
-	for _, key := range []string{"body", "description", "detail", "reason"} {
+	// Pi's ui.confirm(title, message) protocol emits the second argument as
+	// `message`. Keep the older aliases for other extensions, but prefer the
+	// canonical field so bot-relayed approvals include the exact operation the
+	// user is being asked to authorize (notably the DCG command preview).
+	for _, key := range []string{"message", "body", "description", "detail", "reason"} {
 		if value := str(event[key]); value != "" {
 			return value
 		}
@@ -234,5 +242,3 @@ func permissionOptions(event map[string]any) []CardOption {
 	}
 	return options
 }
-
-var _ = fmt.Sprintf

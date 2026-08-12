@@ -8,9 +8,9 @@ import { listBrowserProfiles, deleteBrowserProfile, renameBrowserProfile } from 
 import InstallDialog from '../../components/InstallDialog.vue'
 import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 
-const { t, bootstrap, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, removeAgentMcpServer, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, deleteSkill, skills, refreshSkills, skillsLoading } = useAppContext()
+const { t, bootstrap, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, agentConfigInitialTab, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, removeAgentMcpServer, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, deleteSkill, skills, refreshSkills, skillsLoading } = useAppContext()
 
-const activeTab = ref('basics')
+const activeTab = ref(agentConfigInitialTab.value || 'basics')
 const availableSubagents = computed(() =>
   (agentList.value || []).filter(agent => agent.id !== selectedAgent.value?.id)
 )
@@ -109,9 +109,7 @@ function normalizedBrowserPolicy(policy) {
     existingProfileMode: ['headed', 'headless'].includes(policy?.existingProfileMode)
       ? policy.existingProfileMode
       : RECOMMENDED_BROWSER_PROFILE_POLICY.existingProfileMode,
-    interactiveLoginMode: ['headed', 'headless'].includes(policy?.interactiveLoginMode)
-      ? policy.interactiveLoginMode
-      : RECOMMENDED_BROWSER_PROFILE_POLICY.interactiveLoginMode,
+    interactiveLoginMode: 'headed',
     authenticatedTaskMode: ['headed', 'headless'].includes(policy?.authenticatedTaskMode)
       ? policy.authenticatedTaskMode
       : RECOMMENDED_BROWSER_PROFILE_POLICY.authenticatedTaskMode,
@@ -174,6 +172,10 @@ const builtinStatuses = computed(() => {
 const rtkStatus = computed(() => {
   const agentId = selectedAgent.value?.id || ''
   return (extensionSnapshot.value?.recommended?.[agentId] || []).find(tool => tool.key === 'rtk') || null
+})
+const dcgStatus = computed(() => {
+  const agentId = selectedAgent.value?.id || ''
+  return (extensionSnapshot.value?.recommended?.[agentId] || []).find(tool => tool.key === 'dcg') || null
 })
 const recommendedExtensions = computed(() => {
   const agentId = selectedAgent.value?.id || ''
@@ -557,6 +559,7 @@ watch(
   () => selectedAgent.value?.id,
   (id) => {
     showBrowserPolicyModal.value = false
+    activeTab.value = agentConfigInitialTab.value || 'basics'
     if (!id) return
     void refreshAgentExtensions(id)
     if (activeTab.value === 'prompt') loadPrompt(id)
@@ -777,6 +780,22 @@ watch(
                   <span class="btn-install__install">{{ t.runInstall }}</span>
                   <span class="btn-install__delete">{{ t.delete }}</span>
                 </button>
+              </div>
+            </article>
+
+            <article class="agent-ext-row">
+              <span class="agent-ext-row__icon"><component :is="extensionIcon('dcg')" /></span>
+              <div class="agent-ext-row__body">
+                <header class="agent-ext-row__head">
+                  <h3>DCG</h3>
+                </header>
+                <p class="agent-ext-row__description">{{ t.dcgDescription }}</p>
+                <div class="agent-ext-row__meta">
+                  <span class="agent-ext-row__version" :class="{ 'plugin-error': dcgStatus && !dcgStatus.installed }">{{ !dcgStatus || !dcgStatus.installed ? t.dcgBinaryMissing : (dcgStatus.version || t.installed) }}</span>
+                </div>
+              </div>
+              <div class="agent-ext-row__actions">
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.recommended?.dcg }" :disabled="!dcgStatus?.installed && !selectedAgent?.recommended?.dcg" @click="onExtensionToggle('recommended', 'dcg', selectedAgent?.recommended?.dcg, 'DCG')"><span class="btn-install__install">{{ t.enable }}</span><span class="btn-install__delete">{{ t.delete }}</span></button>
               </div>
             </article>
 
@@ -1149,9 +1168,8 @@ watch(
                   <strong>{{ t.browserPolicyLogin }}</strong>
                   <small>{{ t.browserPolicyLoginHint }}</small>
                 </span>
-                <select v-model="browserPolicyDraft.interactiveLoginMode">
-                  <option value="headed">{{ t.browserModeHeaded }}（{{ t.browserPolicyRecommended }}）</option>
-                  <option value="headless">{{ t.browserModeHeadless }}</option>
+                <select v-model="browserPolicyDraft.interactiveLoginMode" disabled>
+                  <option value="headed">{{ t.browserModeHeaded }}（{{ t.browserPolicyRequired }}）</option>
                 </select>
               </label>
               <label class="browser-policy-row">

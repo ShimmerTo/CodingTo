@@ -4,17 +4,17 @@
         <key>CFBundlePackageType</key>
             <string>APPL</string>
         <key>CFBundleName</key>
-            <string>My Product</string>
+            <string>CodingTo</string>
         <key>CFBundleExecutable</key>
-            <string>codingtotemplate.exe</string>
+            <string>CodingTo</string>
         <key>CFBundleIdentifier</key>
-            <string>com.example.codingtotemplate</string>
+            <string>dev.codingto.desktop</string>
         <key>CFBundleVersion</key>
-            <string>0.1.0</string>
+            <string>0.1.5</string>
         <key>CFBundleGetInfoString</key>
-            <string>This is a comment</string>
+            <string>Local-first desktop workspace for Pi Agent</string>
         <key>CFBundleShortVersionString</key>
-            <string>0.1.0</string>
+            <string>0.1.5</string>
         <key>CFBundleIconFile</key>
             <string>icons</string>
         <key>CFBundleIconName</key>
@@ -24,6 +24,6 @@
         <key>NSHighResolutionCapable</key>
             <string>true</string>
         <key>NSHumanReadableCopyright</key>
-            <string>© 2026, My Company</string>
+            <string>© 2026 CodingTo</string>
     </dict>
 </plist>

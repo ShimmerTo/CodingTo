@@ -1,5 +1,5 @@
 <template>
-  <div v-if="visible" class="ilm-overlay" @click.self="close">
+  <div v-if="visible" class="ilm-overlay" @pointerdown.self="close">
     <div class="ilm-panel">
       <div class="ilm-header">
         <div class="ilm-title">

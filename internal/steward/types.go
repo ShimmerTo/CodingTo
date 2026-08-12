@@ -37,6 +37,9 @@ type InboundMessage struct {
 	// ReplyToMessageID lets Feishu reply through the message reply API,
 	// avoiding receive_id conversion for the immediate response.
 	ReplyToMessageID string
+	// MessageID is the platform's stable inbound id used for durable duplicate
+	// suppression. Connectors that cannot provide one leave it empty.
+	MessageID string
 	// Webhook is the DingTalk per-conversation session webhook (valid ~2h)
 	// carried by the latest inbound message. It is persisted so replies and
 	// test sends still work after a restart or reconnect. Other platforms
@@ -161,6 +164,11 @@ type AppControl interface {
 	ListSessions() ([]SessionView, error)
 	CreateSession(agentID, envID, title, provider, model string) (SessionView, error)
 	StartPrompt(sessionID int64, message string) error
+	// StartStewardPrompt starts a resident turn with a durable correlation
+	// token that is echoed on lifecycle events and persisted in session logs.
+	StartStewardPrompt(sessionID int64, message, dispatchToken string) error
+	SessionRuntimeState(sessionID int64) SessionRuntimeState
+	RecoverStewardTurn(sessionID int64, dispatchToken string) (StewardTurnRecovery, error)
 	StopSession(sessionID int64) error
 	DeleteSession(sessionID int64) error
 	ListEnvironments() ([]EnvironmentView, error)
@@ -198,6 +206,21 @@ type AppControl interface {
 	CompactSession(sessionID int64, instructions string) error
 }
 
+// SessionRuntimeState is the lease check used by the steward queue. Known is
+// false when no materialized runtime exists for the conversation.
+type SessionRuntimeState struct {
+	Known   bool
+	Running bool
+}
+
+// StewardTurnRecovery is reconstructed from the durable session event log.
+// Started without Settled is intentionally treated as uncertain, never as a
+// safe automatic retry.
+type StewardTurnRecovery struct {
+	Started bool
+	Settled bool
+}
+
 // PlanStep is one parsed plan item from the plan-todos widget.
 type PlanStep struct {
 	Index     int    `json:"index"`
@@ -218,18 +241,21 @@ type PermissionAnswer struct {
 // relayed to the bot user, or a steward-initiated confirmation that waits for
 // the bot user's answer.
 type PermissionRequest struct {
-	RequestID string
-	SessionID int64
-	RunID     string // empty for main-agent requests
-	Method    string // select | confirm | input | editor
-	Title     string
-	Body      string
-	Options   []CardOption
-	Plan      []PlanStep
-	ChannelID int64
-	Sender    string
-	ThreadID  string
-	CreatedAt time.Time
+	RecordID         int64
+	RequestID        string
+	SessionID        int64
+	RunID            string // empty for main-agent requests
+	Method           string // select | confirm | input | editor
+	Title            string
+	Body             string
+	Options          []CardOption
+	Plan             []PlanStep
+	ChannelID        int64
+	Sender           string
+	ThreadID         string
+	ReceiveIDType    string
+	ReplyToMessageID string
+	CreatedAt        time.Time
 	// ProfileParent is set for the second step of a remote Browser Profile
 	// creation flow. It is kept in memory only; the original request remains
 	// the one answered back to the extension.
@@ -240,6 +266,7 @@ type PermissionRequest struct {
 // PublicPermissionView is the JSON shape emitted to the frontend.
 type PublicPermissionView struct {
 	ID        int64        `json:"id"`
+	Code      string       `json:"code"`
 	RequestID string       `json:"requestId"`
 	SessionID int64        `json:"sessionId"`
 	RunID     string       `json:"runId,omitempty"`

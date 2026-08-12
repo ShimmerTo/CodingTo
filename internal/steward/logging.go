@@ -6,24 +6,19 @@ import (
 	"strings"
 )
 
-// stewardLogPreview keeps console diagnostics useful without dumping complete
-// chat messages, tool output, or credentials into the terminal. Logging is on
-// the control path only for lifecycle events; streamed token deltas are never
-// logged, so diagnostics do not add per-token overhead.
+// stewardLogPreview keeps diagnostics useful without writing message content,
+// permission answers, task text, profile keys, or provider errors to disk.
+// IDs and lengths are sufficient to correlate lifecycle failures.
 func stewardLogPreview(value string) string {
 	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
-	const maxRunes = 240
-	runes := []rune(value)
-	if len(runes) > maxRunes {
-		return string(runes[:maxRunes]) + "…"
+	if value == "" {
+		return ""
 	}
-	return value
+	return fmt.Sprintf("<redacted chars=%d>", len([]rune(value)))
 }
 
 func (s *Service) logInbound(msg InboundMessage, route string) {
-	// Log the full inbound text: the user asked for received messages to be
-	// recorded verbatim in the daily log for diagnosis.
-	s.logger.Printf("inbound: channel=%d platform=%s sender=%q thread=%q route=%s text=%q", msg.ChannelID, msg.Platform, msg.SenderID, msg.ThreadID, route, msg.Text)
+	s.logger.Printf("inbound: channel=%d platform=%s sender=%q thread=%q route=%s content=%s", msg.ChannelID, msg.Platform, msg.SenderID, msg.ThreadID, route, stewardLogPreview(msg.Text))
 }
 
 // OnAgentEvent logs high-value lifecycle events for a steward-managed or
@@ -59,12 +54,15 @@ func (s *Service) OnAgentEvent(sessionID int64, event map[string]any) {
 		s.logger.Printf("agent event: scope=%s session=%d type=%s willRetry=%t error=%q", scope, sessionID, eventType, boolValue(event["willRetry"]), stewardEventError(event))
 	case "agent_settled":
 		s.logger.Printf("agent event: scope=%s session=%d type=%s", scope, sessionID, eventType)
-		if resident {
-			if channelID, msg, ok := s.finishResidentTurn(sessionID); ok {
+		if resident && !boolValue(event["waitingSubagents"]) {
+			dispatchToken := str(event["_stewardDispatchToken"])
+			eventID, channelID, msg, fallback := s.finishResidentTurn(sessionID, dispatchToken)
+			if fallback {
 				if err := s.SendToChannel(channelID, msg); err != nil {
 					s.logger.Printf("resident silent turn fallback failed: session=%d channel=%d error=%v", sessionID, channelID, err)
 				}
 			}
+			s.completeActiveEvent(eventID, dispatchToken)
 		}
 	case "auto_retry_start":
 		s.logger.Printf("agent event: scope=%s session=%d type=%s", scope, sessionID, eventType)

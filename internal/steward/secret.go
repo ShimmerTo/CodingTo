@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // secretCipher is the platform-specific encryption hook (Windows DPAPI or
@@ -22,6 +23,7 @@ type secretCipher interface {
 type SecretStore struct {
 	dir    string
 	cipher secretCipher
+	mu     sync.Mutex
 }
 
 func NewSecretStore(baseDir string) (*SecretStore, error) {
@@ -45,8 +47,14 @@ func (s *SecretStore) channelPath(channelID int64) string {
 
 // Save encrypts and writes the secret map for one channel.
 func (s *SecretStore) Save(channelID int64, secrets map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveUnlocked(channelID, secrets)
+}
+
+func (s *SecretStore) saveUnlocked(channelID int64, secrets map[string]string) error {
 	if len(secrets) == 0 {
-		return s.Delete(channelID)
+		return s.deleteUnlocked(channelID)
 	}
 	plain, err := json.Marshal(secrets)
 	if err != nil {
@@ -68,7 +76,9 @@ func (s *SecretStore) Save(channelID int64, secrets map[string]string) error {
 // fields. Only non-empty updates replace existing values; deleting an entire
 // channel still uses Delete explicitly.
 func (s *SecretStore) Merge(channelID int64, updates map[string]string) error {
-	secrets, err := s.Load(channelID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	secrets, err := s.loadUnlocked(channelID)
 	if err != nil {
 		return err
 	}
@@ -77,12 +87,18 @@ func (s *SecretStore) Merge(channelID int64, updates map[string]string) error {
 			secrets[key] = value
 		}
 	}
-	return s.Save(channelID, secrets)
+	return s.saveUnlocked(channelID, secrets)
 }
 
 // Load decrypts and returns the secret map for one channel. A missing blob
 // returns an empty map, not an error.
 func (s *SecretStore) Load(channelID int64) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadUnlocked(channelID)
+}
+
+func (s *SecretStore) loadUnlocked(channelID int64) (map[string]string, error) {
 	path := s.channelPath(channelID)
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -104,6 +120,12 @@ func (s *SecretStore) Load(channelID int64) (map[string]string, error) {
 
 // Delete removes the secret blob for one channel.
 func (s *SecretStore) Delete(channelID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteUnlocked(channelID)
+}
+
+func (s *SecretStore) deleteUnlocked(channelID int64) error {
 	path := s.channelPath(channelID)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

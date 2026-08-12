@@ -34,31 +34,54 @@ func (s *AgentService) AbortPrompt(sessionIDs ...int64) error {
 			}
 			return result
 		}
-		runtime, err := s.runtimeForCommand(sessionIDs[0])
-		if err != nil {
-			return err
+		s.mu.Lock()
+		runtime := s.runtimes[sessionIDs[0]]
+		s.mu.Unlock()
+		// A missing runtime means the conversation is already idle. Treat abort as
+		// idempotent and explicitly repair a frontend that missed the terminal
+		// event instead of returning an error that leaves its stop button visible.
+		if runtime == nil {
+			s.emitEvent("agent:state", map[string]any{
+				"running": false, "processRunning": false,
+				"codingToSessionId": sessionIDs[0], "aborted": true, "fallback": true,
+			})
+			return nil
 		}
-		return runtime.abortPromptSingle()
+		return runtime.abortPromptSingle(sessionIDs[0])
 	}
 	return s.abortPromptSingle()
 }
 
-func (s *AgentService) abortPromptSingle() error {
+func (s *AgentService) abortPromptSingle(requestedSessionIDs ...int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sessionID := s.activeSessionID
+	if len(requestedSessionIDs) > 0 && requestedSessionIDs[0] > 0 {
+		sessionID = requestedSessionIDs[0]
+	}
 	if s.preparing {
 		s.prepareCanceled = true
 		return nil
 	}
-	if !s.adapter.IsRunning() {
+	// Always fan the cancellation out to every child run before inspecting the
+	// parent. The parent may already be idle while detached subagents are still
+	// winding down, and one click must terminate the whole conversation tree.
+	s.handleAbortCommandLocked()
+	if s.execTurnStart.IsZero() {
+		s.emitEvent("agent:state", map[string]any{
+			"running": false, "processRunning": s.adapter.IsRunning(),
+			"codingToSessionId": sessionID, "aborted": true, "fallback": true,
+		})
 		return nil
 	}
-	// Reliably stop every subagent currently running under this conversation:
-	// drop an abort marker into each running run directory. The bridge polls
-	// the marker and kills the subagent Pi process directly, so a wedged parent
-	// Pi (which cannot process the abort command below) still cannot leave
-	// subagents running.
-	s.handleAbortCommandLocked()
+	if !s.adapter.IsRunning() {
+		s.finishExecutionLocked("active")
+		s.emitEvent("agent:state", map[string]any{
+			"running": false, "processRunning": false,
+			"codingToSessionId": sessionID, "aborted": true, "fallback": true,
+		})
+		return nil
+	}
 	// Pi can remain busy after a low-level agent_end event while it retries,
 	// compacts, or processes a queued continuation. The UI correctly keeps the
 	// stop button visible in those phases, so never discard its abort merely
@@ -87,6 +110,7 @@ func (s *AgentService) forceSettleWaitingLocked() {
 	s.finishExecutionLocked("active")
 	s.emitEvent("agent:state", map[string]any{
 		"running": false, "processRunning": true, "codingToSessionId": s.activeSessionID,
+		"aborted": true, "fallback": true,
 	})
 }
 
@@ -94,14 +118,21 @@ func (s *AgentService) forceSettleWaitingLocked() {
 // directory and drops an abort marker for every run still marked running. The
 // caller must hold s.mu.
 func (s *AgentService) abortRunningSubagentsLocked() {
-	if s.activeSessionDir == "" {
-		return
+	abortRunningSubagents(s.activeSessionDir, s.activeSessionID)
+}
+
+// abortRunningSubagents is also used by the App boundary before runtime lookup,
+// so even a stale/missing parent runtime cannot strand detached child processes.
+func abortRunningSubagents(sessionDir string, sessionID int64) int {
+	if sessionDir == "" {
+		return 0
 	}
-	root := filepath.Join(s.activeSessionDir, "subagents")
+	root := filepath.Join(sessionDir, "subagents")
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return
+		return 0
 	}
+	requested := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -116,9 +147,12 @@ func (s *AgentService) abortRunningSubagentsLocked() {
 			continue
 		}
 		if err := os.WriteFile(filepath.Join(runDir, ".abort"), []byte("1"), 0o600); err != nil {
-			applog.Infof("[session %d] mark subagent %s aborted: %v", s.activeSessionID, entry.Name(), err)
+			applog.Infof("[session %d] mark subagent %s aborted: %v", sessionID, entry.Name(), err)
+			continue
 		}
+		requested++
 	}
+	return requested
 }
 
 // agentEndErrorMessage 从 agent_end 事件中提取模型/provider 返回的真实错误。

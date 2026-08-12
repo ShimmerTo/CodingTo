@@ -17,6 +17,8 @@ const props = defineProps({
   stopping: { type: Boolean, default: false },
   connected: { type: Boolean, default: false },
   selectedAgent: { type: Object, default: null },
+  dcgStatus: { type: Object, default: null },
+  sessionDcgDisabled: { type: Boolean, default: false },
   draft: { type: String, default: '' },
   pendingPrompts: { type: Array, default: () => [] },
   modelOptions: { type: Array, default: () => [] },
@@ -51,6 +53,8 @@ const props = defineProps({
 
 const emit = defineEmits([
   'update:draft', 'send', 'stop', 'select-agent', 'open-agent-config',
+  'open-plugins', 'open-agent-extensions',
+  'update:dcg',
   'update:model', 'add-images', 'update:thinking',
   'update:skill',
   'remove-image', 'add-attachments', 'remove-attachment',
@@ -198,6 +202,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
 
       <ChatHeader
         :title="activeTitle"
+        :session-id="sessionId"
         :created-at="activeCreatedAt"
         :connected="connected"
         :execution-elapsed-ms="executionElapsedMs"
@@ -224,6 +229,8 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         :running="running"
         :stopping="stopping"
         :selected-agent="selectedAgent"
+        :dcg-status="dcgStatus"
+        :session-dcg-disabled="sessionDcgDisabled"
         :draft="draft"
         :pending-prompts="pendingPrompts"
         :model-options="modelOptions"
@@ -254,6 +261,9 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @stop="emit('stop')"
         @select-agent="emit('select-agent', $event)"
         @open-agent-config="emit('open-agent-config')"
+        @open-plugins="emit('open-plugins')"
+        @open-agent-extensions="emit('open-agent-extensions', $event)"
+        @update:dcg="emit('update:dcg', $event)"
         @update:model="emit('update:model', $event)"
         @add-images="emit('add-images', $event)"
         @update:thinking="emit('update:thinking', $event)"

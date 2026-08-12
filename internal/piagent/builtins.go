@@ -22,6 +22,9 @@ var builtinTools embed.FS
 //go:embed all:system_extensions
 var systemExtensions embed.FS
 
+//go:embed all:recommended_extensions
+var recommendedExtensions embed.FS
+
 var retiredBuiltinTools = []string{"api", "db", "git", "browser-workflow"}
 
 // stewardToolKey is the default_tools directory name of the steward toolset,
@@ -282,11 +285,11 @@ func RemoveBuiltinTools(piDir string, enabled map[string]bool) error {
 
 // managedExtensionKeys returns the set of extension directory names owned by
 // CodingTo: builtin tools (default_tools), mandatory system extensions
-// (system_extensions) and the RTK Pi bridge. Anything else physically present
+// (system_extensions) and managed recommended bridges. Anything else physically present
 // under an agent's extensions/ directory was installed outside CodingTo's
 // management and should be surfaced to the user for review and removal.
 func managedExtensionKeys() map[string]bool {
-	keys := map[string]bool{"rtk": true}
+	keys := map[string]bool{"rtk": true, "dcg": true}
 	if catalog, err := BuiltinToolCatalog(); err == nil {
 		for _, tool := range catalog {
 			keys[tool.Key] = true
@@ -446,6 +449,35 @@ func MaterializeRTKExtension(piDir, source string) (string, error) {
 // given agent's extensions directory.
 func RTKMaterialized(piDir string) bool {
 	info, err := os.Stat(filepath.Join(piDir, "extensions", "rtk", "index.ts"))
+	return err == nil && !info.IsDir()
+}
+
+// MaterializeDCGExtension installs CodingTo's bundled Pi bridge for dcg into
+// one agent directory. The dcg binary remains a shared global runtime; this
+// bridge is the per-agent opt-in switch that performs pre-execution checks and
+// asks the user before a dangerous command is allowed to continue.
+func MaterializeDCGExtension(piDir string) (string, error) {
+	content, err := recommendedExtensions.ReadFile("recommended_extensions/dcg/index.ts")
+	if err != nil {
+		return "", fmt.Errorf("read DCG Pi extension: %w", err)
+	}
+	target := filepath.Join(piDir, "extensions", "dcg", "index.ts")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return "", fmt.Errorf("create DCG extension directory: %w", err)
+	}
+	if err := os.Chmod(filepath.Dir(target), 0o700); err != nil {
+		return "", fmt.Errorf("secure DCG extension directory: %w", err)
+	}
+	if err := writeFileIfChanged(target, content); err != nil {
+		return "", fmt.Errorf("materialize DCG Pi extension: %w", err)
+	}
+	return target, nil
+}
+
+// DCGMaterialized reports whether CodingTo's managed dcg bridge is present for
+// an agent. Binary availability is reported independently by extensions.Status.
+func DCGMaterialized(piDir string) bool {
+	info, err := os.Stat(filepath.Join(piDir, "extensions", "dcg", "index.ts"))
 	return err == nil && !info.IsDir()
 }
 
@@ -784,6 +816,16 @@ func RemoveRTKExtension(piDir string) error {
 	target := filepath.Join(piDir, "extensions", "rtk", "index.ts")
 	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove RTK Pi extension: %w", err)
+	}
+	return nil
+}
+
+// RemoveDCGExtension removes only CodingTo's managed per-agent dcg bridge.
+// It never uninstalls the shared dcg binary or changes another agent.
+func RemoveDCGExtension(piDir string) error {
+	target := filepath.Join(piDir, "extensions", "dcg", "index.ts")
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove DCG Pi extension: %w", err)
 	}
 	return nil
 }

@@ -579,8 +579,24 @@ func (s *Store) UpdateSession(id int64, values map[string]any) error {
 }
 
 func (s *Store) DeleteSession(id int64) error {
-	_, err := s.db.QuickDelete("tbl_session", map[string]any{"id": id}).Exec()
-	return err
+	tx, err := s.db.GetTx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		"DELETE FROM tbl_steward_event WHERE session_id = ?",
+		"DELETE FROM tbl_steward_permission WHERE session_id = ?",
+		"DELETE FROM tbl_bot_task WHERE session_id = ?",
+	} {
+		if _, err := tx.Exec(statement, id); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM tbl_session WHERE id = ?", id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) RecoverSessions() error {

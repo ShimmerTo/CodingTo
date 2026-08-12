@@ -1,8 +1,8 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  Bot, Brain, Check, ChevronDown, CircleStop, File, FileAudio, FileText, FileVideo, Gauge, Image,
-  LoaderCircle, Paperclip, Pencil, Send, Sparkles, Trash2, X, BrainCog
+  Bot, Brain, Check, AlertCircle, ChevronDown, CircleStop, File, FileAudio, FileText, FileVideo, Gauge, Image,
+  LoaderCircle, Paperclip, Pencil, Send, Shield, ShieldOff, Sparkles, Trash2, X, BrainCog
 } from 'lucide-vue-next'
 import { formatFileSize, formatTokenCount, imageSrc } from './chatFormatters.js'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext'
@@ -15,6 +15,9 @@ const props = defineProps({
   running: { type: Boolean, default: false },
   stopping: { type: Boolean, default: false },
   selectedAgent: { type: Object, default: null },
+  dcgStatus: { type: Object, default: null },
+  // 本次对话是否关闭命令拦截（会话级状态，不改智能体 recommended.dcg 配置）
+  sessionDcgDisabled: { type: Boolean, default: false },
   draft: { type: String, default: '' },
   pendingPrompts: { type: Array, default: () => [] },
   modelOptions: { type: Array, default: () => [] },
@@ -42,8 +45,10 @@ const props = defineProps({
 
 const emit = defineEmits([
   'update:draft', 'send', 'stop', 'select-agent', 'open-agent-config',
+  'open-plugins', 'open-agent-extensions',
   'update:model', 'add-images', 'update:thinking',
   'update:skill',
+  'update:dcg',
   'remove-image', 'preview-image', 'compact', 'respond-extension', 'ack-extension',
   'respond-subagent-dialog', 'ack-subagent-dialog',
   'edit-pending', 'delete-pending',
@@ -56,6 +61,8 @@ const modelMenuOpen = ref(false)
 const modelWrapEl = ref(null)
 const skillMenuOpen = ref(false)
 const skillWrapEl = ref(null)
+const securityMenuOpen = ref(false)
+const securityWrapEl = ref(null)
 const textareaEl = ref(null)
 
 const modelGroups = computed(() => {
@@ -76,6 +83,25 @@ const selectedSkillOptions = computed(() => {
     skill.sourceType === 'pi'
   )
 })
+// 拦截是否生效 = 智能体配置开启 DCG && 本次对话未关闭命令拦截。
+// 「关闭危险命令检测」只作用于当前对话（sessionDcgDisabled），
+// 不会修改智能体的 recommended.dcg 配置。
+const dcgPolicyEnabled = computed(() => {
+  return Boolean(props.selectedAgent) && props.selectedAgent?.recommended?.dcg !== false && !props.sessionDcgDisabled
+})
+// dcgStatus.enabled 是该智能体 DCG 是否真正启用（配置开启且桥接已物化）的权威标志，
+// 来自后端 GetExtensions/GetAgentExtensions 的 DCGStatusForAgent。
+// 用 enabled 而非 installed：installed 只代表全局 DCG 二进制是否安装，
+// 无法反映「该智能体是否开启 DCG」，会导致未开启的智能体被误判为已安装。
+const dcgActive = computed(() => Boolean(props.dcgStatus?.enabled))
+const dcgNotInstalled = computed(() => !dcgActive.value)
+
+function openPluginsPage() {
+  emit('open-plugins')
+}
+function openAgentExtensions() {
+  emit('open-agent-extensions', props.selectedAgent)
+}
 
 function skillTypeLabel(skill) {
   return skill.loadMode === 'startup'
@@ -130,6 +156,12 @@ function onDocumentPointerDown(event) {
   if (agentSwitcherOpen.value && agentWrapEl.value && !agentWrapEl.value.contains(event.target)) agentSwitcherOpen.value = false
   if (modelMenuOpen.value && modelWrapEl.value && !modelWrapEl.value.contains(event.target)) modelMenuOpen.value = false
   if (skillMenuOpen.value && skillWrapEl.value && !skillWrapEl.value.contains(event.target)) skillMenuOpen.value = false
+  if (securityMenuOpen.value && securityWrapEl.value && !securityWrapEl.value.contains(event.target)) securityMenuOpen.value = false
+}
+
+function selectDCGPolicy(enabled) {
+  securityMenuOpen.value = false
+  emit('update:dcg', enabled)
 }
 
 function pickAgent(agent) {
@@ -453,6 +485,44 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
                   <span class="skill-menu__type" :class="{ 'skill-menu__type--startup': skill.loadMode === 'startup' }">{{ skillTypeLabel(skill) }}</span>
                   <Check v-if="selectedSkill && skill.id === selectedSkill.id" :size="14" />
                 </button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="dcgStatus || dcgPolicyEnabled" ref="securityWrapEl" class="security-select-wrap">
+            <button
+              class="security-select-btn"
+              :class="{
+                'security-select-btn--missing': dcgNotInstalled,
+                'security-select-btn--off': !dcgNotInstalled && !dcgPolicyEnabled
+              }"
+              :title="dcgNotInstalled ? t.securityPolicyMissing : t.securityPolicy"
+              @click="securityMenuOpen = !securityMenuOpen"
+            >
+              <template v-if="dcgNotInstalled">
+                <Shield class="security-select-btn__shield" :size="14" />
+                <AlertCircle class="security-select-btn__alert" :size="11" />
+              </template>
+              <Shield v-else :size="14" />
+              <span class="security-select-btn__label" :class="dcgNotInstalled ? 'security-select-btn__label--missing' : (dcgPolicyEnabled ? 'security-select-btn__label--on' : 'security-select-btn__label--off')">{{ dcgNotInstalled ? t.securityPolicyNotInstalled : (dcgPolicyEnabled ? t.securityPolicyEnabled : t.securityPolicyDisabled) }}</span>
+            </button>
+            <div v-if="securityMenuOpen" class="security-menu">
+              <div class="security-menu__pop">
+                <p v-if="dcgNotInstalled" class="security-menu__hint">
+                  {{ t.securityPolicyMissingHint1 }}<a class="security-menu__link" @click.prevent="openPluginsPage">{{ t.securityPolicyMissingPlugin }}</a>{{ t.securityPolicyMissingHint2 }}<a class="security-menu__link" @click.prevent="openAgentExtensions">{{ t.securityPolicyMissingDcg }}</a>{{ t.securityPolicyMissingHint3 }}
+                </p>
+                <template v-else>
+                  <button class="security-menu__item security-menu__item--protect" :class="{ 'security-menu__item--active': dcgPolicyEnabled }" @click="selectDCGPolicy(true)">
+                    <Shield :size="14" />
+                    <span><strong>{{ t.dcgInterceptionMode }}</strong><small>{{ t.dcgInterceptionModeHint }}</small></span>
+                    <Check v-if="dcgPolicyEnabled" :size="14" />
+                  </button>
+                  <button class="security-menu__item security-menu__item--off" :class="{ 'security-menu__item--active': !dcgPolicyEnabled }" @click="selectDCGPolicy(false)">
+                    <ShieldOff :size="14" />
+                    <span><strong>{{ t.dcgDetectionOff }}</strong><small>{{ t.dcgDetectionOffHint }}</small></span>
+                    <Check v-if="!dcgPolicyEnabled" :size="14" />
+                  </button>
+                </template>
               </div>
             </div>
           </div>

@@ -21,6 +21,24 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Validate macOS bundle metadata
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          import re
+          from pathlib import Path
+
+          config = Path("build/config.yml").read_text(encoding="utf-8")
+          version = re.search(r'^\s*version:\s*"([^"]+)"', config, re.MULTILINE).group(1)
+          for name in ("Info.plist", "Info.dev.plist"):
+              with Path("build/darwin", name).open("rb") as stream:
+                  plist = plistlib.load(stream)
+              assert plist["CFBundleExecutable"] == "CodingTo", (name, plist["CFBundleExecutable"])
+              assert plist["CFBundleName"] == "CodingTo", (name, plist["CFBundleName"])
+              assert plist["CFBundleShortVersionString"] == version, (name, plist["CFBundleShortVersionString"], version)
+          PY
+
       - name: Validate tag and project versions
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash

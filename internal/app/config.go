@@ -120,8 +120,8 @@ type AgentProfile struct {
 }
 
 // BrowserProfilePolicy controls the browser visibility used at each distinct
-// stage. Values are "headed" or "headless"; Normalize supplies safe defaults
-// for agents created before the policy was introduced.
+// stage. Existing-profile checks and authenticated tasks accept "headed" or
+// "headless"; interactive login is always normalized to "headed".
 type BrowserProfilePolicy struct {
 	ExistingProfileMode   string `json:"existingProfileMode"`
 	InteractiveLoginMode  string `json:"interactiveLoginMode"`
@@ -141,9 +141,10 @@ func (p *BrowserProfilePolicy) Normalize() {
 	if p.ExistingProfileMode != "headed" && p.ExistingProfileMode != "headless" {
 		p.ExistingProfileMode = defaults.ExistingProfileMode
 	}
-	if p.InteractiveLoginMode != "headed" && p.InteractiveLoginMode != "headless" {
-		p.InteractiveLoginMode = defaults.InteractiveLoginMode
-	}
+	// Interactive login always needs a visible window for credentials, QR
+	// codes, CAPTCHA and MFA. Keep the persisted field for compatibility, but
+	// never normalize it to an unsafe headless value.
+	p.InteractiveLoginMode = defaults.InteractiveLoginMode
 	if p.AuthenticatedTaskMode != "headed" && p.AuthenticatedTaskMode != "headless" {
 		p.AuthenticatedTaskMode = defaults.AuthenticatedTaskMode
 	}
@@ -165,6 +166,7 @@ func DefaultAgentProfile() AgentProfile {
 	return AgentProfile{
 		ID: "default", Name: "Default Agent", Description: "General-purpose coding agent",
 		Builtin:              piagent.DefaultBuiltinTools(),
+		Recommended:          map[string]bool{"dcg": true},
 		SubAgents:            []string{},
 		PiTools:              defaultPiTools(),
 		BrowserProfilePolicy: DefaultBrowserProfilePolicy(),
@@ -214,6 +216,9 @@ func (a *AgentProfile) Normalize(index int) {
 	}
 	if a.Recommended == nil {
 		a.Recommended = map[string]bool{}
+	}
+	if _, configured := a.Recommended["dcg"]; !configured {
+		a.Recommended["dcg"] = true
 	}
 	if a.SubAgents == nil {
 		a.SubAgents = []string{}
@@ -723,6 +728,13 @@ func (s *ConfigStore) syncRecommendedExtensions(cfg AppConfig) error {
 			_, _ = piagent.MaterializeRTKExtension(agent.DataDir, rtkSource)
 		} else {
 			_ = piagent.RemoveRTKExtension(agent.DataDir)
+		}
+		if agent.Recommended["dcg"] {
+			if _, err := piagent.MaterializeDCGExtension(agent.DataDir); err != nil {
+				return fmt.Errorf("sync DCG for %s: %w", agent.Name, err)
+			}
+		} else {
+			_ = piagent.RemoveDCGExtension(agent.DataDir)
 		}
 		if err := piagent.SyncFigmaMCPConfig(agent.DataDir, agent.Recommended["figma"]); err != nil {
 			return fmt.Errorf("sync Pi Figma for %s: %w", agent.Name, err)

@@ -44,7 +44,12 @@ func (l *loopback) Send(_ context.Context, msg steward.OutboundMessage) error {
 	return nil
 }
 
-func (l *loopback) Close() error { return nil }
+func (l *loopback) Close() error {
+	// Compare-and-delete prevents an old connector that is finishing shutdown
+	// from unregistering a newer replacement for the same channel.
+	loopbackRegistry.CompareAndDelete(l.channelID, l)
+	return nil
+}
 
 // InjectLoopback delivers a simulated inbound message to the loopback channel.
 func InjectLoopback(channelID int64, msg steward.InboundMessage) error {
@@ -63,11 +68,6 @@ func InjectLoopback(channelID int64, msg steward.InboundMessage) error {
 		onMessage(msg)
 	}
 	return nil
-}
-
-// UnregisterLoopback forgets the loopback connector for the channel id.
-func UnregisterLoopback(channelID int64) {
-	loopbackRegistry.Delete(channelID)
 }
 
 // ReadLoopback returns the outbound messages captured by the loopback channel

@@ -34,10 +34,10 @@ const form = ref({
   enabled: true
 })
 const platformLabels = computed(() => ({
-  dingtalk: t.steward_platform_dingtalk,
-  feishu: t.steward_platform_feishu,
-  wecom: t.steward_platform_wecom,
-  loopback: t.steward_platform_loopback
+  dingtalk: t.value.steward_platform_dingtalk,
+  feishu: t.value.steward_platform_feishu,
+  wecom: t.value.steward_platform_wecom,
+  loopback: t.value.steward_platform_loopback
 }))
 const platformFields = computed(() => {
   switch (form.value.platform) {
@@ -128,7 +128,7 @@ async function loadSessionDetail() {
 }
 
 
-const stewardAgent = computed(() => ({ name: persona.value.name || t.stewardMenu }))
+const stewardAgent = computed(() => ({ name: persona.value.name || t.value.stewardMenu }))
 
 // 切换到消息 tab 时先刷新 Profile，避免页面打开后新建的常驻会话仍显示为空。
 async function switchMessagesTab() {
@@ -174,7 +174,7 @@ async function submitChannel() {
   await loadAll()
 }
 async function removeChannel(channel) {
-  if (!window.confirm(t.steward_channel_delete_confirm)) return
+  if (!window.confirm(t.value.steward_channel_delete_confirm)) return
   await deleteBotChannel(channel.id)
   await loadAll()
 }
@@ -192,7 +192,7 @@ function errText(err) {
 async function sendTest(channel) {
   try {
     await testBotChannel(channel.id)
-    pushToast('success', t.steward_test_sent)
+    pushToast('success', t.value.steward_test_sent)
   } catch (err) {
     pushToast('error', errText(err))
   }
@@ -206,12 +206,12 @@ async function sendSimulated() {
 }
 function statusLabel(channel) {
   const map = {
-    connected: t.steward_channel_status_connected,
-    connecting: t.steward_channel_status_connecting,
-    disconnected: t.steward_channel_status_disconnected,
-    error: t.steward_channel_status_error
+    connected: t.value.steward_channel_status_connected,
+    connecting: t.value.steward_channel_status_connecting,
+    disconnected: t.value.steward_channel_status_disconnected,
+    error: t.value.steward_channel_status_error
   }
-  return map[channel.status] || channel.status || t.steward_channel_status_disconnected
+  return map[channel.status] || channel.status || t.value.steward_channel_status_disconnected
 }
 function channelStatusClass(channel) {
   return channel?.status === 'connected' ? 'is-connected' : 'is-disconnected'
@@ -229,7 +229,7 @@ function handleChannelStatus(payload) {
 async function savePersona() {
   try {
     await saveStewardProfile({ ...persona.value })
-    pushToast('success', t.steward_persona_saved)
+    pushToast('success', t.value.steward_persona_saved)
   } catch (err) {
     pushToast('error', errText(err))
   }

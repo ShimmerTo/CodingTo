@@ -105,6 +105,13 @@ func (s *AgentService) prepareSubagentRuntime(
 			return fmt.Errorf("write subagent %s models.json: %w", child.Name, err)
 		}
 		childEnv := agentProcessEnv(cfg, child)
+		if child.Recommended["dcg"] {
+			if _, err := piagent.MaterializeDCGExtension(child.DataDir); err != nil {
+				return fmt.Errorf("materialize DCG extension for subagent %s: %w", child.Name, err)
+			}
+		} else {
+			_ = piagent.RemoveDCGExtension(child.DataDir)
+		}
 		if selected, found := piagent.FindModel(cfg.Providers, child.DefaultProvider, child.DefaultModel); found {
 			childEnv["CODINGTO_MODEL_INPUT_MODALITIES"] = strings.Join(selected.Input, ",")
 			agents = append(agents, subagentbridge.AgentConfig{
@@ -134,6 +141,9 @@ func (s *AgentService) prepareSubagentRuntime(
 				agents[index].Env[key] = value
 			}
 		}
+		// 子 Agent 复用主会话的 DCG 标记文件：本次对话关闭拦截后，
+		// 子 Agent 的 bash 同样不再经过 DCG 检测，且实时生效。
+		agents[index].Env["CODINGTO_DCG_DISABLE_MARKER"] = filepath.Join(sessionDir, dcgDisabledMarkerFile)
 	}
 	snapshot := subagentbridge.Snapshot{
 		Version:    subagentbridge.SnapshotVersion,

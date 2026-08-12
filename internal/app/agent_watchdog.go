@@ -301,6 +301,14 @@ func (s *AgentService) handleFirstResponseTimeout(sessionID int64, nodeID string
 	s.pendingRestart = false
 	s.activeChangeNode = ""
 	sessionDir := s.activeSessionDir
+	stewardToken := s.activeStewardToken
+	if s.stewardPromptPending {
+		stewardToken = s.pendingStewardToken
+		s.activeStewardToken = stewardToken
+		s.pendingStewardToken = ""
+		s.stewardPromptPending = false
+	}
+	stewardHookSet := s.stewardHooks
 	sessionPath := s.activeSession
 	if sessionPath != "" {
 		if _, err := os.Stat(sessionPath); errors.Is(err, os.ErrNotExist) {
@@ -344,10 +352,16 @@ func (s *AgentService) handleFirstResponseTimeout(sessionID int64, nodeID string
 		},
 	}
 	for _, event := range events {
+		if stewardToken != "" {
+			event["_stewardDispatchToken"] = stewardToken
+		}
 		if err := s.appendEvent(sessionDir, event); err != nil {
 			applog.Infof("[session %d] append first-response timeout event: %v", sessionID, err)
 		}
 		application.Get().Event.Emit("agent:event", event)
+		if stewardHookSet != nil && stewardHookSet.onAgentEvent != nil {
+			stewardHookSet.onAgentEvent(sessionID, event)
+		}
 	}
 	application.Get().Event.Emit("agent:state", map[string]any{
 		"running": false, "processRunning": false,

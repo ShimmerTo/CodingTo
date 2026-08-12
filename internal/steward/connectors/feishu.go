@@ -114,6 +114,7 @@ func (f *feishu) handleMessage(event *larkim.P2MessageReceiveV1) {
 		ThreadID:         threadID,
 		ReceiveIDType:    receiveIDType,
 		ReplyToMessageID: deref(message.MessageId),
+		MessageID:        deref(message.MessageId),
 		Text:             text,
 		Raw:              event,
 	})

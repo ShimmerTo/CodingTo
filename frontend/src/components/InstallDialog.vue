@@ -23,7 +23,7 @@ const emit = defineEmits(['update:command', 'run', 'close'])
 </script>
 
 <template>
-  <div class="modal-backdrop" @click.self="emit('close')">
+  <div class="modal-backdrop" @pointerdown.self="emit('close')">
     <div class="install-dialog">
       <h3>{{ title }}</h3>
       <p v-if="hint" class="install-dialog__hint">{{ hint }}</p>

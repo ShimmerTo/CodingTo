@@ -35,8 +35,25 @@ const (
 
 // CompactInstructions is the built-in compaction prompt: it tells Pi's
 // summarizer which parts of the history matter most when a resident steward
-// conversation is compressed after CompactAfterTurns rounds.
-const CompactInstructions = "压缩历史对话时，请尽量保留最近的近期用户问题，确保后续对话能理解用户最近关注的重点和尚未完成的请求。"
+// conversation is compressed after CompactAfterTurns rounds. It must keep the
+// model's recent IM replies so a later short answer like "2" still resolves
+// against the choices the user was shown.
+const CompactInstructions = "压缩历史对话时，请尽量保留最近的近期用户问题，以及你最近通过 IM 发送给用户的消息内容（特别是列表、方案、选项等用户可能用序号或短词回复的内容），确保后续对话能理解用户回复中「2」「第二个」这类指代。"
+
+// recentOutbound bounds the per-thread echo buffer: recentOutboundMaxEntries
+// caps how many delivered messages are kept per channel:thread, and
+// recentOutboundMaxChars truncates each entry so the re-injected context stays
+// small and never impacts runtime performance.
+const (
+	recentOutboundMaxEntries = 5
+	recentOutboundMaxChars   = 400
+	recentOutboundTTL        = 30 * time.Minute
+	inboundWorkerCount       = 8
+	inboundQueueCapacity     = 256
+	stewardHistoryRetention  = 30 * 24 * time.Hour
+	stewardHistoryBatch      = 500
+	stewardHistoryInterval   = time.Hour
+)
 
 // onlineNoticeThrottle bounds how often a single channel sends the
 // "已上线" notice, so quick reconnect loops cannot spam the chat.
@@ -73,13 +90,38 @@ type Service struct {
 	tasks               map[int64]store.BotTask // sessionID -> task
 	managed             map[int64]bool          // sessionID -> bot-managed flag
 	pending             map[string]*PermissionRequest
+	permissionWaiters   map[string]chan struct{}
 	profileParents      map[string]*PermissionRequest // follow-up request id -> original Browser Profile selection
 	plans               map[string][]PlanStep         // session[:run] -> latest plan widget
 	permissionTimeout   time.Duration
+	eventQueue          []store.StewardEvent
+	eventDispatching    bool
+	activeEvent         *store.StewardEvent
+	eventLeaseTimer     *time.Timer
+	eventLeaseInterval  time.Duration
+
+	// recentOutbound keeps the last few messages actually delivered to each IM
+	// channel:thread. It is re-injected into the resident prompt so later turns
+	// can resolve follow-up replies like "2" against what the user saw (tool-call
+	// parameters are not a reliable record after compaction).
+	recentOutbound            map[string][]outboundEcho
+	recentOutboundLastCleanup time.Time
 
 	rpcToken  string
 	rpcServer *http.Server
 	rpcURL    string
+
+	runCtx       context.Context
+	runCancel    context.CancelFunc
+	backgroundWG sync.WaitGroup
+	inboundQueue chan InboundMessage
+	shuttingDown bool
+}
+
+// outboundEcho is one message the steward actually delivered to an IM channel.
+type outboundEcho struct {
+	Text   string
+	SentAt time.Time
 }
 
 type residentTurn struct {
@@ -92,6 +134,9 @@ type residentTurn struct {
 	ToolCalls        int
 	ReplySent        bool
 	TaskStarted      bool
+	EventID          int64
+	FallbackText     string
+	DispatchToken    string
 }
 
 func (t *residentTurn) hasProgress() bool {
@@ -112,11 +157,15 @@ func NewService(st *store.Store, secrets *SecretStore, app AppControl, factories
 		tasks:               make(map[int64]store.BotTask),
 		managed:             make(map[int64]bool),
 		pending:             make(map[string]*PermissionRequest),
+		permissionWaiters:   make(map[string]chan struct{}),
 		profileParents:      make(map[string]*PermissionRequest),
 		plans:               make(map[string][]PlanStep),
 		permissionTimeout:   DefaultPermissionTimeout,
+		recentOutbound:      make(map[string][]outboundEcho),
 		lastOnlineNotice:    make(map[int64]time.Time),
 		onlineNoticePending: make(map[int64]bool),
+		eventLeaseInterval:  2 * time.Minute,
+		inboundQueue:        make(chan InboundMessage, inboundQueueCapacity),
 	}
 	service.channels.onStatus = service.emitChannelStatus
 	return service
@@ -157,6 +206,8 @@ func (s *Service) Start(ctx context.Context) error {
 	profile = stewardProfileWithDefaults(profile)
 	s.mu.Lock()
 	s.profile = profile
+	s.runCtx, s.runCancel = context.WithCancel(ctx)
+	s.shuttingDown = false
 	s.mu.Unlock()
 	s.logger.Printf("profile loaded: enabled=%t agent=%q name=%q provider=%q model=%q residentSession=%d compactAfterTurns=%d", profile.Enabled, profile.AgentID, profile.Name, profile.Provider, profile.Model, profile.ResidentSessionID, profile.CompactAfterTurns)
 
@@ -166,9 +217,23 @@ func (s *Service) Start(ctx context.Context) error {
 
 	// Reload bot-managed sessions so restart does not lose the mapping.
 	s.reloadManagedSessions()
+	s.reloadPendingPermissions()
+	s.reloadStewardEvents()
+	if err := s.migrateDingTalkWebhooks(); err != nil {
+		s.logger.Printf("dingtalk webhook migration failed: %v", err)
+	}
+	if err := s.store.CleanupStewardHistory(time.Now().Add(-stewardHistoryRetention).UnixMilli(), stewardHistoryBatch); err != nil {
+		s.logger.Printf("steward history cleanup failed: %v", err)
+	}
+
+	for i := 0; i < inboundWorkerCount; i++ {
+		s.launchBackground(s.inboundWorker)
+	}
+	s.launchBackground(s.historyCleanupWorker)
 
 	// Start the local RPC endpoint the steward-tools extension talks to.
 	if err := s.startRPCServer(); err != nil {
+		s.stopBackground()
 		return fmt.Errorf("steward: start rpc server: %w", err)
 	}
 
@@ -178,6 +243,8 @@ func (s *Service) Start(ctx context.Context) error {
 	// Start every enabled channel.
 	channels, err := s.store.ListBotChannels()
 	if err != nil {
+		_ = s.closeRPCServer()
+		s.stopBackground()
 		return fmt.Errorf("steward: list channels: %w", err)
 	}
 	for _, ch := range channels {
@@ -205,11 +272,93 @@ func countEnabledChannels(channels []store.BotChannel) int {
 
 // Shutdown stops all channels and the RPC server.
 func (s *Service) Shutdown() error {
-	s.channels.stopAll()
-	if s.rpcServer != nil {
-		_ = s.rpcServer.Close()
+	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return nil
 	}
+	s.shuttingDown = true
+	if s.eventLeaseTimer != nil {
+		s.eventLeaseTimer.Stop()
+		s.eventLeaseTimer = nil
+	}
+	cancel := s.runCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.channels.stopAll()
+	_ = s.closeRPCServer()
+	s.waitBackground(3 * time.Second)
 	return nil
+}
+
+func (s *Service) launchBackground(fn func()) bool {
+	s.mu.Lock()
+	if s.shuttingDown || s.runCtx == nil {
+		s.mu.Unlock()
+		return false
+	}
+	s.backgroundWG.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.backgroundWG.Done()
+		fn()
+	}()
+	return true
+}
+
+func (s *Service) stopBackground() {
+	s.mu.Lock()
+	s.shuttingDown = true
+	cancel := s.runCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.waitBackground(3 * time.Second)
+}
+
+func (s *Service) waitBackground(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() { s.backgroundWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.logger.Printf("background shutdown timed out after %s", timeout)
+	}
+}
+
+func (s *Service) inboundWorker() {
+	for {
+		s.mu.Lock()
+		ctx := s.runCtx
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-s.inboundQueue:
+			s.processNaturalInbound(msg)
+		}
+	}
+}
+
+func (s *Service) historyCleanupWorker() {
+	s.mu.Lock()
+	ctx := s.runCtx
+	s.mu.Unlock()
+	ticker := time.NewTicker(stewardHistoryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.store.CleanupStewardHistory(time.Now().Add(-stewardHistoryRetention).UnixMilli(), stewardHistoryBatch); err != nil {
+				s.logger.Printf("steward history cleanup failed: %v", err)
+			}
+		}
+	}
 }
 
 // AgentEnvironment injects the steward-tools RPC endpoint into the resident
@@ -310,7 +459,8 @@ func (s *Service) emitChannelStatus(channelID int64, status, lastError string) {
 	if status == channelStatusRunning {
 		// A platform send can involve network I/O. Keep connector supervision
 		// and application startup responsive while the greeting is delivered.
-		go s.sendOnlineNotice(channelID)
+		s.launchBackground(func() { s.sendOnlineNotice(channelID) })
+		s.launchBackground(s.dispatchNextStewardEvent)
 	}
 }
 
@@ -399,12 +549,93 @@ func (s *Service) sendOne(channelID int64, msg OutboundMessage) error {
 	// The connector then finds a valid destination even right after a restart.
 	s.seedConnectorWebhook(channelID, msg.ThreadID)
 	if err := s.channels.send(channelID, msg); err != nil {
-		s.logger.Printf("outbound failed: channel=%d thread=%q error=%v", channelID, msg.ThreadID, err)
+		s.logger.Printf("outbound failed: channel=%d thread=%q error=%s", channelID, msg.ThreadID, stewardLogPreview(err.Error()))
 		return err
 	}
-	s.logger.Printf("outbound sent: channel=%d thread=%q kind=%s text=%q", channelID, msg.ThreadID, outboundKind(msg), outboundLogText(msg))
+	s.logger.Printf("outbound sent: channel=%d thread=%q kind=%s content=%s", channelID, msg.ThreadID, outboundKind(msg), stewardLogPreview(outboundLogText(msg)))
 	s.emitMessage("out", channelID, msg)
+	// Keep a short echo of what the user actually saw so the resident model can
+	// resolve follow-up replies (e.g. "2") against it.
+	s.recordOutbound(channelID, msg.ThreadID, outboundLogText(msg))
 	return nil
+}
+
+// recordOutbound appends a delivered message to the per-thread echo buffer,
+// skipping empty text (cards carry their body separately) and transport-level
+// noise the user would never answer with a choice. The buffer is bounded per
+// thread so memory stays flat and the re-injected prompt stays small.
+func (s *Service) recordOutbound(channelID int64, threadID, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" || isOutboundNoise(text) {
+		return
+	}
+	key := outboundEchoKey(channelID, threadID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.recentOutboundLastCleanup.IsZero() || now.Sub(s.recentOutboundLastCleanup) >= 10*time.Minute {
+		cutoff := now.Add(-recentOutboundTTL)
+		for echoKey, buffered := range s.recentOutbound {
+			kept := buffered[:0]
+			for _, entry := range buffered {
+				if entry.SentAt.After(cutoff) {
+					kept = append(kept, entry)
+				}
+			}
+			if len(kept) == 0 {
+				delete(s.recentOutbound, echoKey)
+			} else {
+				s.recentOutbound[echoKey] = kept
+			}
+		}
+		s.recentOutboundLastCleanup = now
+	}
+	entries := s.recentOutbound[key]
+	entries = append(entries, outboundEcho{Text: truncateRunes(text, recentOutboundMaxChars), SentAt: now})
+	if len(entries) > recentOutboundMaxEntries {
+		entries = entries[len(entries)-recentOutboundMaxEntries:]
+	}
+	s.recentOutbound[key] = entries
+}
+
+// recentOutboundPrompt renders the buffered outbound messages for a
+// channel:thread as an assistant-visible block, appended to the next inbound
+// prompt so the model knows what the user is replying to. Returns "" when
+// there is nothing to show.
+func (s *Service) recentOutboundPrompt(channelID int64, threadID string) string {
+	key := outboundEchoKey(channelID, threadID)
+	s.mu.Lock()
+	entries := append([]outboundEcho(nil), s.recentOutbound[key]...)
+	s.mu.Unlock()
+	return renderRecentOutbound(entries)
+}
+
+// renderRecentOutbound formats echo entries as "你最近通过 IM 发送给用户的消息"
+// bullets. Pure function, unit-tested directly.
+func renderRecentOutbound(entries []outboundEcho) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n[你最近通过 IM 发送给用户的消息]\n")
+	for _, entry := range entries {
+		b.WriteString("- ")
+		b.WriteString(entry.Text)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// outboundEchoKey indexes the echo buffer by channel and thread, so concurrent
+// conversations on different threads never leak each other's context.
+func outboundEchoKey(channelID int64, threadID string) string {
+	return strconv.FormatInt(channelID, 10) + ":" + threadID
+}
+
+// isOutboundNoise reports whether a delivered message is transport-level
+// chatter (greetings, acks) that should not be re-injected into the prompt.
+func isOutboundNoise(text string) bool {
+	return strings.HasPrefix(text, "😊") && strings.Contains(text, "已上线")
 }
 
 // channelPlatform returns the persisted platform of a channel, or "" when the
@@ -421,6 +652,44 @@ func (s *Service) channelPlatform(channelID int64) string {
 // is considered usable (the platform documents roughly 2 hours).
 const dingWebhookFreshWindow = 90 * time.Minute
 
+const (
+	dingWebhookSecretKey       = "_dingtalkSessionWebhook"
+	dingWebhookThreadSecretKey = "_dingtalkWebhookThread"
+	dingWebhookAtSecretKey     = "_dingtalkWebhookAt"
+)
+
+func (s *Service) persistDingTalkWebhook(channelID int64, threadID, webhook string, receivedAt int64) error {
+	if channelID <= 0 || threadID == "" || webhook == "" || s.secrets == nil {
+		return nil
+	}
+	return s.secrets.Merge(channelID, map[string]string{
+		dingWebhookSecretKey: webhook, dingWebhookThreadSecretKey: threadID,
+		dingWebhookAtSecretKey: strconv.FormatInt(receivedAt, 10),
+	})
+}
+
+// migrateDingTalkWebhooks moves legacy plaintext capability URLs into the
+// encrypted per-channel secret blob. The old columns remain for schema
+// compatibility but are cleared once the encrypted copy succeeds.
+func (s *Service) migrateDingTalkWebhooks() error {
+	channels, err := s.store.ListBotChannels()
+	if err != nil {
+		return err
+	}
+	for _, channel := range channels {
+		if channel.Platform != string(PlatformDingTalk) || channel.LastWebhook == "" {
+			continue
+		}
+		if err := s.persistDingTalkWebhook(channel.ID, channel.LastThreadID, channel.LastWebhook, channel.LastWebhookAt); err != nil {
+			return err
+		}
+		if err := s.store.UpdateBotChannel(channel.ID, map[string]any{"last_webhook": "", "last_webhook_at": 0}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // seedConnectorWebhook injects the channel's persisted DingTalk session
 // webhook into the active connector when it is still fresh. Non-DingTalk
 // platforms and missing/stale webhooks are skipped silently.
@@ -436,15 +705,16 @@ func (s *Service) seedConnectorWebhook(channelID int64, threadID string) {
 	if !ok {
 		return
 	}
-	channel, ok, err := s.store.BotChannelByID(channelID)
-	if err != nil || !ok || channel.LastWebhook == "" {
+	secrets, err := s.secrets.Load(channelID)
+	if err != nil || secrets[dingWebhookSecretKey] == "" || secrets[dingWebhookThreadSecretKey] != threadID {
 		return
 	}
-	if time.Since(time.UnixMilli(channel.LastWebhookAt)) > dingWebhookFreshWindow {
-		s.logger.Printf("webhook seed skipped: channel=%d thread=%q reason=stale age=%s", channelID, threadID, time.Since(time.UnixMilli(channel.LastWebhookAt)).Round(time.Second))
+	webhookAt, _ := strconv.ParseInt(secrets[dingWebhookAtSecretKey], 10, 64)
+	if webhookAt <= 0 || time.Since(time.UnixMilli(webhookAt)) > dingWebhookFreshWindow {
+		s.logger.Printf("webhook seed skipped: channel=%d thread=%q reason=stale", channelID, threadID)
 		return
 	}
-	seeder.SeedWebhook(threadID, channel.LastWebhook)
+	seeder.SeedWebhook(threadID, secrets[dingWebhookSecretKey])
 	s.logger.Printf("webhook seeded: channel=%d thread=%q", channelID, threadID)
 }
 
@@ -461,6 +731,15 @@ func outboundLogText(msg OutboundMessage) string {
 			text += " "
 		}
 		text += msg.Card.Body
+	}
+	for index, option := range msg.Card.Options {
+		label := strings.TrimSpace(option.Label)
+		if label == "" {
+			label = strings.TrimSpace(option.Value)
+		}
+		if label != "" {
+			text += fmt.Sprintf("\n%d. %s", index+1, label)
+		}
 	}
 	return text
 }
@@ -485,7 +764,17 @@ func (s *Service) lastOutboundTarget(channelID int64, msg OutboundMessage) (Outb
 		return msg, fmt.Errorf("channel not found: %d", channelID)
 	}
 	switch channel.Platform {
-	case string(PlatformFeishu), string(PlatformWeCom):
+	case string(PlatformFeishu):
+		// The persisted inbound target is authoritative: group messages store a
+		// chat_id, while p2p messages store an open_id. LastSenderID is audit
+		// metadata and must not turn a group target into a private message.
+		msg.ThreadID = channel.LastThreadID
+		msg.ReceiveIDType = channel.LastReceiveIDType
+		if msg.ThreadID == "" {
+			msg.ThreadID = channel.LastSenderID
+			msg.ReceiveIDType = "open_id"
+		}
+	case string(PlatformWeCom):
 		msg.ThreadID = channel.LastSenderID
 		if msg.ThreadID != "" {
 			// Feishu sender ids are user open_ids; a group receive type must
@@ -511,16 +800,25 @@ func (s *Service) lastOutboundTarget(channelID int64, msg OutboundMessage) (Outb
 // ---- inbound routing ----
 
 func (s *Service) handleInbound(msg InboundMessage) {
+	if msg.MessageID != "" {
+		claimed, err := s.store.ClaimStewardInbound(msg.ChannelID, msg.MessageID, time.Now().UnixMilli())
+		if err != nil {
+			s.logger.Printf("inbound duplicate check failed: channel=%d error=%s", msg.ChannelID, stewardLogPreview(err.Error()))
+		} else if !claimed {
+			s.logger.Printf("inbound duplicate ignored: channel=%d", msg.ChannelID)
+			return
+		}
+	}
 	s.emitMessage("in", msg.ChannelID, OutboundMessage{Text: msg.Text})
 	if strings.TrimSpace(msg.Text) == "" {
 		s.recordInbound(msg)
 		s.logInbound(msg, "ignored-empty")
 		return
 	}
-	// A bot reply to a pending plan/permission must be consumed by the
-	// permission pipeline before it can be mistaken for a new natural-language
-	// request. This is the missing bridge for remote plan approvals and Browser
-	// Profile selection.
+	// Only a confirmation initiated by the resident steward itself is consumed
+	// here, because its ask_confirm tool call is synchronously waiting. Replies
+	// to worker/session permissions continue to the resident AI, which resolves
+	// their meaning and applies decisions through scoped RPC tools.
 	if s.answerInboundPermission(msg) {
 		s.recordInbound(msg)
 		s.logInbound(msg, "permission-answer")
@@ -534,11 +832,28 @@ func (s *Service) handleInbound(msg InboundMessage) {
 		return
 	}
 
-	// Never make the channel callback wait for model startup, session creation,
-	// or tool execution. The worker sends a transport-level acknowledgement
-	// first, then dispatches the natural-language request in the background.
+	// Never make the connector callback wait for model startup or tool
+	// execution. A fixed worker pool bounds resource use under an inbound burst.
 	s.logInbound(msg, "natural-async")
-	go s.processNaturalInbound(msg)
+	s.mu.Lock()
+	ctx := s.runCtx
+	closing := s.shuttingDown || ctx == nil
+	s.mu.Unlock()
+	if closing {
+		return
+	}
+	select {
+	case s.inboundQueue <- msg:
+	case <-ctx.Done():
+	case <-time.After(50 * time.Millisecond):
+		// Preserve the message when the worker buffer is saturated. This path
+		// performs only the durable/local work synchronously and skips the
+		// transport-level acknowledgement instead of spawning an unbounded
+		// overflow goroutine or silently dropping user input.
+		s.logger.Printf("inbound worker queue saturated: channel=%d", msg.ChannelID)
+		s.recordInbound(msg)
+		s.handleNatural(msg)
+	}
 }
 
 func (s *Service) recordInbound(msg InboundMessage) {
@@ -546,7 +861,13 @@ func (s *Service) recordInbound(msg InboundMessage) {
 		s.logger.Printf("record channel latest sender skipped: invalid channel=%d", msg.ChannelID)
 		return
 	}
-	if err := s.store.RecordBotChannelInbound(msg.ChannelID, msg.SenderID, msg.ThreadID, msg.ReceiveIDType, msg.ReplyToMessageID, msg.Webhook, time.Now().UnixMilli()); err != nil {
+	receivedAt := time.Now().UnixMilli()
+	if msg.Platform == PlatformDingTalk && msg.Webhook != "" {
+		if err := s.persistDingTalkWebhook(msg.ChannelID, msg.ThreadID, msg.Webhook, receivedAt); err != nil {
+			s.logger.Printf("persist dingtalk webhook failed: channel=%d error=%v", msg.ChannelID, err)
+		}
+	}
+	if err := s.store.RecordBotChannelInbound(msg.ChannelID, msg.SenderID, msg.ThreadID, msg.ReceiveIDType, msg.MessageID, "", receivedAt); err != nil {
 		s.logger.Printf("record channel latest sender: channel=%d error=%v", msg.ChannelID, err)
 	}
 }
@@ -624,20 +945,28 @@ func (s *Service) markResidentTask(sessionID int64) {
 	s.mu.Unlock()
 }
 
-func (s *Service) finishResidentTurn(sessionID int64) (int64, OutboundMessage, bool) {
+func (s *Service) finishResidentTurn(sessionID int64, dispatchToken string) (int64, int64, OutboundMessage, bool) {
 	s.mu.Lock()
 	turn := s.residentTurns[sessionID]
+	if turn == nil || dispatchToken == "" || turn.DispatchToken != dispatchToken {
+		s.mu.Unlock()
+		return 0, 0, OutboundMessage{}, false
+	}
 	delete(s.residentTurns, sessionID)
 	s.current = nil
 	s.mu.Unlock()
-	if turn == nil || turn.hasProgress() {
-		return 0, OutboundMessage{}, false
+	if turn.hasProgress() {
+		return turn.EventID, 0, OutboundMessage{}, false
 	}
 	s.logger.Printf("resident silent turn fallback: session=%d channel=%d toolCalls=%d text=%q", sessionID, turn.ChannelID, turn.ToolCalls, stewardLogPreview(turn.Text))
-	return turn.ChannelID, OutboundMessage{
+	fallback := strings.TrimSpace(turn.FallbackText)
+	if fallback == "" {
+		fallback = "我收到你的请求了，但这轮总管没有成功触发任何管家工具。请再发一次，或稍后重试；我会继续用高思考模式处理，避免请求静默丢失。"
+	}
+	return turn.EventID, turn.ChannelID, OutboundMessage{
 		ThreadID: turn.ThreadID, ReceiveIDType: turn.ReceiveIDType,
 		ReplyToMessageID: turn.ReplyToMessageID,
-		Text:             "我收到你的请求了，但这轮总管没有成功触发任何管家工具。请再发一次，或稍后重试；我会继续用高思考模式处理，避免请求静默丢失。",
+		Text:             fallback,
 	}, true
 }
 
@@ -650,57 +979,25 @@ func (s *Service) handleNatural(msg InboundMessage) {
 		_ = s.SendToChannel(msg.ChannelID, OutboundMessage{ThreadID: msg.ThreadID, Text: "管家当前未启用（请在 CodingTo 管家设置中开启）。"})
 		return
 	}
-	agentID := s.stewardAgent
-	agentName := s.stewardAgentName
-	sessionID := s.stewardSession
 	s.mu.Unlock()
-
-	if agentID == "" {
-		s.logger.Printf("natural rejected: channel=%d reason=agent-not-configured", msg.ChannelID)
-		_ = s.SendToChannel(msg.ChannelID, OutboundMessage{ThreadID: msg.ThreadID, Text: "管家未配置执行 Agent，请在管家设置中选择。使用 /help 查看可用命令。"})
-		return
-	}
-	if sessionID == 0 {
-		s.logger.Printf("resident session missing: creating agent=%q name=%q", agentID, agentName)
-		created, err := s.ensureStewardSession(agentID, agentName)
-		if err != nil {
-			s.logger.Printf("resident session create failed: agent=%q error=%v", agentID, err)
-			_ = s.SendToChannel(msg.ChannelID, OutboundMessage{ThreadID: msg.ThreadID, Text: "管家会话创建失败：" + err.Error()})
-			return
-		}
-		sessionID = created
-	}
-	// Reserve the resident turn before touching the runtime. A second inbound
-	// message must not overwrite the reply target of the active turn.
-	turnArmed := s.armResidentTurn(sessionID, msg)
-	if !turnArmed {
-		s.logger.Printf("natural rejected: channel=%d session=%d reason=resident-busy", msg.ChannelID, sessionID)
-		_ = s.SendToChannel(msg.ChannelID, OutboundMessage{
-			ThreadID: msg.ThreadID, ReceiveIDType: msg.ReceiveIDType,
-			ReplyToMessageID: msg.ReplyToMessageID,
-			Text:             "管家正在处理上一条消息，请稍后再试。",
-		})
-		return
-	}
-	// 上下文压缩：常驻对话累计达到 CompactAfterTurns 轮后，先压缩历史再处理
-	// 本轮，避免上下文无限膨胀（同时截断会话记录文件）。
-	if s.trackResidentTurn(sessionID) {
-		if err := s.compactResident(sessionID); err != nil {
-			s.logger.Printf("resident compact failed: session=%d error=%v", sessionID, err)
+	prompt := fmt.Sprintf("[来自 %s 的消息]\n%s", displayName(msg), msg.Text)
+	pendingCount := 0
+	for _, request := range s.pendingPermissionsFor(msg) {
+		if request.answerCh == nil {
+			pendingCount++
 		}
 	}
-	prompt := fmt.Sprintf("%s\n[来自 %s 的消息]\n%s", s.personaPrompt(), displayName(msg), msg.Text)
-	s.logger.Printf("prompt dispatch: %s agent=%q", formatStewardPromptKind(sessionID, msg.Text), agentID)
-	startedAt := time.Now()
-	if err := s.app.StartPrompt(sessionID, prompt); err != nil {
-		if turnArmed {
-			s.clearResidentTurn(sessionID)
-		}
-		s.logger.Printf("prompt failed: %s elapsed=%s error=%v", formatStewardPromptKind(sessionID, msg.Text), time.Since(startedAt).Round(time.Millisecond), err)
-		_ = s.SendToChannel(msg.ChannelID, OutboundMessage{ThreadID: msg.ThreadID, Text: "管家处理失败：" + err.Error()})
-		return
+	if pendingCount > 0 {
+		prompt += fmt.Sprintf("\n\n[当前 IM 上下文有 %d 个待处理审批/交互项。请先调用 codingto_steward_list_permissions 获取准确请求 ID 和内容，再根据用户本条消息的真实意图调用 codingto_steward_answer_permissions；不要仅用文字声称已处理。]", pendingCount)
 	}
-	s.logger.Printf("prompt accepted: %s elapsed=%s", formatStewardPromptKind(sessionID, msg.Text), time.Since(startedAt).Round(time.Millisecond))
+	if _, err := s.enqueueStewardEvent(store.StewardEvent{
+		Kind: "inbound", ChannelID: msg.ChannelID, Sender: msg.SenderID, Thread: msg.ThreadID,
+		ReceiveIDType: msg.ReceiveIDType, ReplyToMessageID: msg.ReplyToMessageID,
+		PromptText: prompt, FallbackText: "管家处理失败，请稍后重试。", Priority: stewardPriorityNatural,
+	}); err != nil {
+		s.logger.Printf("queue inbound failed: channel=%d error=%v", msg.ChannelID, err)
+		_ = s.SendToChannel(msg.ChannelID, OutboundMessage{ThreadID: msg.ThreadID, Text: "管家消息入队失败：" + err.Error()})
+	}
 }
 
 // trackResidentTurn counts one natural-language round of the resident steward
@@ -717,11 +1014,11 @@ func (s *Service) trackResidentTurn(sessionID int64) bool {
 }
 
 // compactAfterTurnsLocked returns the configured compaction threshold (default
-// 20). Caller must hold s.mu.
+// 30). Caller must hold s.mu.
 func (s *Service) compactAfterTurnsLocked() int {
 	turns := s.profile.CompactAfterTurns
 	if turns <= 0 {
-		return 20
+		return store.DefaultStewardCompactAfterTurns
 	}
 	return turns
 }
@@ -761,7 +1058,8 @@ func (s *Service) personaPrompt() string {
 	}
 	b.WriteString("【职责】你是 CodingTo 的管家：通过 codingto_steward_* 工具管理环境、会话与授权；" +
 		"每轮都必须调用至少一个 codingto_steward_* 工具，不能只输出普通文本；" +
-		"回复用户必须使用 codingto_steward_reply 工具；用户要求创建/启动/派发新对话或任务时，先调用 codingto_steward_start_task，再用 codingto_steward_reply 告知结果；" +
+		"回复用户必须使用 codingto_steward_reply 工具；遇到审批或交互回复时先调用 codingto_steward_list_permissions，再按用户语义调用 codingto_steward_answer_permissions，工具成功前不得声称已经处理；" +
+		"用户要求继续既有对话时调用 codingto_steward_continue_task，要求创建/启动/派发独立新任务时调用 codingto_steward_start_task，再用 codingto_steward_reply 告知结果；" +
 		"无法执行或需要澄清时也必须调用 codingto_steward_reply 说明；执行破坏性操作（删除环境/对话）前先用 codingto_steward_ask_confirm 向用户确认。\n")
 	if strings.TrimSpace(profile.Prompt) != "" {
 		b.WriteString(profile.Prompt)
@@ -913,6 +1211,9 @@ func (s *Service) SetProfile(p store.StewardProfile) error {
 	s.mu.Unlock()
 	s.resolveStewardAgent()
 	s.logger.Printf("profile saved: agent=%q name=%q provider=%q model=%q enabled=%t", saved.AgentID, saved.Name, saved.Provider, saved.Model, saved.Enabled)
+	if saved.Enabled {
+		s.launchBackground(s.dispatchNextStewardEvent)
+	}
 	return nil
 }
 
@@ -1004,11 +1305,9 @@ func (s *Service) reportTarget() (channelID int64, sender, thread string) {
 	return 0, "", ""
 }
 
-// reportResultToEnabledChannels broadcasts an unbound local-session result to
-// every enabled bot channel. Delivery is best-effort: one disconnected or
-// misconfigured channel must not prevent the remaining channels from receiving
-// the result. An empty destination lets SendToChannel resolve each platform's
-// latest persisted sender/thread independently.
+// reportResultToEnabledChannels queues an unbound local-session result for the
+// resident steward once per enabled channel. An empty destination lets the
+// eventual steward_reply resolve each platform's latest persisted target.
 func (s *Service) reportResultToEnabledChannels(sessionID int64, resultText string) int {
 	channels, err := s.store.ListBotChannels()
 	if err != nil {
@@ -1021,18 +1320,16 @@ func (s *Service) reportResultToEnabledChannels(sessionID int64, resultText stri
 			enabled = append(enabled, channel)
 		}
 	}
-	var sends sync.WaitGroup
-	sends.Add(len(enabled))
 	for _, channel := range enabled {
-		channelID := channel.ID
-		go func() {
-			defer sends.Done()
-			if err := s.SendToChannel(channelID, OutboundMessage{Text: resultText, Markdown: true}); err != nil {
-				s.logger.Printf("task finish broadcast failed: session=%d channel=%d error=%v", sessionID, channelID, err)
-			}
-		}()
+		prompt := fmt.Sprintf("接管的对话 #%d 已结束。请阅读以下结果，使用 codingto_steward_reply 向用户发送清晰、完整的结果；保留其中的列表、选项和待用户决定的内容，方便用户继续回复：\n\n%s", sessionID, resultText)
+		if _, err := s.enqueueStewardEvent(store.StewardEvent{
+			Kind: "task_result", SessionID: sessionID, ChannelID: channel.ID,
+			Sender:     channel.LastSenderID,
+			PromptText: prompt, FallbackText: resultText, Priority: stewardPriorityResult,
+		}); err != nil {
+			s.logger.Printf("task finish queue failed: session=%d channel=%d error=%v", sessionID, channel.ID, err)
+		}
 	}
-	sends.Wait()
 	return len(enabled)
 }
 
@@ -1071,6 +1368,10 @@ func (s *Service) FinishTask(sessionID int64, status, resultText string) {
 		}
 		return
 	}
+	if task.Status != "pending" && task.Status != "running" {
+		s.logger.Printf("task finish ignored: task=%d session=%d reason=already-%s", task.ID, sessionID, task.Status)
+		return
+	}
 	now := time.Now().UnixMilli()
 	if err := s.store.UpdateBotTask(task.ID, map[string]any{"status": status, "result_text": resultText, "finished_at": now}); err != nil {
 		s.logger.Printf("task finish persistence failed: task=%d error=%v", task.ID, err)
@@ -1086,7 +1387,15 @@ func (s *Service) FinishTask(sessionID int64, status, resultText string) {
 	s.emitTask(updated, "finished")
 
 	if channelID > 0 {
-		_ = s.SendToChannel(channelID, OutboundMessage{ThreadID: thread, Text: resultText, Markdown: true})
+		prompt := fmt.Sprintf("接管的对话 #%d（%s）已结束。请阅读以下结果并理解下一步语义：可直接用 codingto_steward_reply 告知结果；用户后续要求基于此结果继续时使用 codingto_steward_continue_task(sessionId=%d)，若是独立工作则使用 codingto_steward_start_task 新建对话。保留结果中的列表、选项和待用户决定内容：\n\n%s", sessionID, task.TaskBrief, sessionID, resultText)
+		if _, err := s.enqueueStewardEvent(store.StewardEvent{
+			Kind: "task_result", SessionID: sessionID, ChannelID: channelID,
+			Sender: task.Sender, Thread: thread, PromptText: prompt,
+			FallbackText: resultText, Priority: stewardPriorityResult,
+		}); err != nil {
+			s.logger.Printf("task finish queue failed: task=%d session=%d error=%v", task.ID, sessionID, err)
+			_ = s.SendToChannel(channelID, OutboundMessage{ThreadID: thread, Text: resultText, Markdown: true})
+		}
 	}
 }
 
@@ -1169,10 +1478,35 @@ func (s *Service) startRPCServer() error {
 	s.mu.Unlock()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rpc", s.handleRPC)
-	s.rpcServer = &http.Server{Handler: mux}
+	server := &http.Server{
+		Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
+		WriteTimeout: DefaultPermissionTimeout + 30*time.Second, IdleTimeout: 60 * time.Second,
+	}
+	s.mu.Lock()
+	s.rpcServer = server
+	s.mu.Unlock()
 	go func() {
-		_ = s.rpcServer.Serve(listener)
+		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			s.logger.Printf("rpc server stopped unexpectedly: %v", serveErr)
+		}
 	}()
 	s.logger.Printf("rpc ready: url=%s", s.rpcURL)
+	return nil
+}
+
+func (s *Service) closeRPCServer() error {
+	s.mu.Lock()
+	server := s.rpcServer
+	s.rpcServer = nil
+	s.mu.Unlock()
+	if server == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		_ = server.Close()
+		return err
+	}
 	return nil
 }

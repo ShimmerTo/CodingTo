@@ -156,6 +156,14 @@ func (c *stewardControl) CreateSession(agentID, envID, title, provider, model st
 }
 
 func (c *stewardControl) StartPrompt(sessionID int64, message string) error {
+	return c.startPrompt(sessionID, message, "")
+}
+
+func (c *stewardControl) StartStewardPrompt(sessionID int64, message, dispatchToken string) error {
+	return c.startPrompt(sessionID, message, dispatchToken)
+}
+
+func (c *stewardControl) startPrompt(sessionID int64, message, dispatchToken string) error {
 	item, ok, err := c.app.store.Store().SessionByID(sessionID)
 	if err != nil {
 		return err
@@ -174,8 +182,18 @@ func (c *stewardControl) StartPrompt(sessionID int64, message string) error {
 		// the steward tools. Dispatched worker tasks keep this empty and therefore
 		// resolve to the normal model / working-directory defaults.
 		SessionPath: item.SessionPath, WorkDir: workDir, Provider: item.Provider, Model: item.Model,
-		ThinkingLevel: thinkingLevel,
+		ThinkingLevel: thinkingLevel, StewardDispatchToken: dispatchToken,
 	})
+}
+
+func (c *stewardControl) SessionRuntimeState(sessionID int64) steward.SessionRuntimeState {
+	state := c.app.agent.sessionRuntimeState(sessionID)
+	return steward.SessionRuntimeState{Known: state.Known, Running: state.Running}
+}
+
+func (c *stewardControl) RecoverStewardTurn(sessionID int64, dispatchToken string) (steward.StewardTurnRecovery, error) {
+	started, settled, err := c.app.agent.stewardTurnRecovery(sessionID, dispatchToken)
+	return steward.StewardTurnRecovery{Started: started, Settled: settled}, err
 }
 
 func (c *stewardControl) StopSession(sessionID int64) error {

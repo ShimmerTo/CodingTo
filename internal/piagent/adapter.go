@@ -43,7 +43,7 @@ func NewAdapter() *Adapter { return &Adapter{events: make(chan Event, 256), done
 
 func FindExecutable() (string, bool) {
 	for _, name := range []string{"pi", "pi.cmd", "pi.exe"} {
-		if path, err := exec.LookPath(name); err == nil {
+		if path, err := commandPath(name); err == nil {
 			return path, true
 		}
 	}

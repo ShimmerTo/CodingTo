@@ -37,7 +37,7 @@ const fallback = {
       figma: { enabled: false, activeAuthorizationId: '', authorizations: [] }
     },
     activeAgentId: 'default',
-    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: {}, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
+    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
     environments: [],
     activeEnvId: '',
     sshConfigs: [],
@@ -101,7 +101,7 @@ export async function installPi() {
   fallback.piInstalled = true
   fallback.piPath = 'pi'
   if (!fallback.config.agents.length) {
-    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: {}, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
+    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
     fallback.config.activeAgentId = 'default'
   }
   if (!fallback.config.environments) fallback.config.environments = []
@@ -202,6 +202,16 @@ export async function chooseSessionDir() {
   return isWails() ? App.ChooseSessionDir() : ''
 }
 
+export async function setSessionDcgDisabled(sessionId, disabled) {
+  if (isWails()) return App.SetSessionDcgDisabled(Number(sessionId), Boolean(disabled))
+  return true
+}
+
+export async function getSessionDcgDisabled(sessionId) {
+  if (isWails()) return App.GetSessionDcgDisabled(Number(sessionId))
+  return false
+}
+
 export async function startPrompt(request) {
   if (isWails()) return App.StartPrompt(request)
   const sessionId = request.sessionId
@@ -285,14 +295,25 @@ export async function sendAgentCommand(sessionId, command) {
 
 export async function abortPrompt(sessionId) {
   if (isWails()) {
-    return App.StartPrompt({
-      sessionId,
-      command: { id: 'codingto-abort', type: 'abort' }
-    })
+    return App.AbortSession(sessionId)
   }
   clearMockPromptTimers(sessionId)
   emitMock('agent:event', { type: 'agent_settled', codingToSessionId: sessionId })
   emitMock('agent:state', { running: false, codingToSessionId: sessionId })
+  return { known: true, running: false, processRunning: true, waitingSubagents: false, execDurationMs: 0, startedAt: 0 }
+}
+
+export async function getSessionRuntimeState(sessionId) {
+  if (isWails()) return App.GetSessionRuntimeState(sessionId)
+  const running = mockPromptTimers.has(String(sessionId))
+  return {
+    known: running,
+    running,
+    processRunning: true,
+    waitingSubagents: false,
+    execDurationMs: 0,
+    startedAt: 0
+  }
 }
 
 export async function restartAgent() {
@@ -331,6 +352,7 @@ export async function getSessionHistory(id) {
     messages: structuredClone(mockSessionMessages.get(id) || []),
     tokenStats: { input: 1240, cached: 860, cacheWrite: 0, output: 312, total: 2412 },
     contextUsage: { tokens: 1552, contextWindow: 272000, percent: 1 },
+    runtime: await getSessionRuntimeState(id),
   }
 }
 
@@ -509,6 +531,7 @@ const mockBuiltinCatalog = [
 const mockExtensions = {
   tools: [
     { key: 'rtk', name: 'RTK', installed: false, enabled: false, version: '', installHint: 'winget install --id rtk-ai.rtk --exact' },
+    { key: 'dcg', name: 'DCG', installed: false, enabled: false, version: '', installHint: "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.ps1'))) -EasyMode -Verify -NoConfigure" },
     { key: 'agent-browser', name: 'Agent Browser', installed: false, enabled: false, version: '', installHint: 'npm install -g agent-browser' }
   ],
   figma: { installed: false, enabled: false, running: false, pid: 0, hasToken: false, version: '' },
@@ -572,6 +595,7 @@ export async function getExtensions() {
     snapshot.recommended[agent.id] = [
       mockPiPluginsStatus(agent.id),
       { key: 'rtk', name: 'RTK', installed: !!agent.recommended?.rtk, enabled: !!agent.recommended?.rtk, version: '' },
+      { key: 'dcg', name: 'DCG', installed: !!mockExtensions.tools.find(tool => tool.key === 'dcg')?.installed, enabled: !!agent.recommended?.dcg, version: '' },
       { key: 'browser-native', name: 'Pi Agent Browser Native', installed: false, enabled: false, version: '' },
       { key: 'figma', name: 'Pi Figma', installed: !!agent.recommended?.figma, enabled: !!agent.recommended?.figma, version: 'preview' }
     ]
@@ -591,6 +615,7 @@ export async function getAgentExtensions(agentId) {
     recommended: [
       mockPiPluginsStatus(agentId),
       { key: 'rtk', name: 'RTK', installed: !!agent?.recommended?.rtk, enabled: !!agent?.recommended?.rtk, version: '' },
+      { key: 'dcg', name: 'DCG', installed: !!mockExtensions.tools.find(tool => tool.key === 'dcg')?.installed, enabled: !!agent?.recommended?.dcg, version: '' },
       { key: 'browser-native', name: 'Pi Agent Browser Native', installed: false, enabled: false, version: '' },
       { key: 'figma', name: 'Pi Figma', installed: !!agent?.recommended?.figma, enabled: !!agent?.recommended?.figma, version: 'preview' }
     ],
@@ -644,12 +669,23 @@ export async function manageExtension(request) {
     mockExtensions.figma.installed = true
     mockExtensions.figma.version = '0.13.2'
   }
+  if (request.key === 'figma' && request.action === 'uninstall') {
+    mockExtensions.figma.installed = false
+    mockExtensions.figma.enabled = false
+    mockExtensions.figma.version = ''
+  }
   const tool = mockExtensions.tools.find(item => item.key === request.key)
   if (tool && request.action === 'install') {
     tool.installed = true
     tool.enabled = true
     if (tool.key === 'agent-browser') tool.version = 'agent-browser preview'
     if (tool.key === 'rtk') tool.version = 'rtk preview'
+    if (tool.key === 'dcg') tool.version = 'dcg preview'
+  }
+  if (tool && request.action === 'uninstall') {
+    tool.installed = false
+    tool.enabled = false
+    tool.version = ''
   }
   if (tool && ['enable', 'start'].includes(request.action)) tool.enabled = true
   if (tool && ['disable', 'stop'].includes(request.action)) tool.enabled = false

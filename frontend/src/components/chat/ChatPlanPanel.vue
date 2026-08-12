@@ -1,7 +1,14 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
-import { CheckCircle2, ChevronDown, ChevronUp, KeyRound, ListTodo } from 'lucide-vue-next'
-import { extensionDialogTitle, isPlanConfirmationDialog } from './extensionDialog.js'
+import { CheckCircle2, ChevronDown, ChevronUp, KeyRound, ListTodo, ShieldAlert } from 'lucide-vue-next'
+import {
+  browserProfileCreateTarget,
+  extensionDialogTitle,
+  isBrowserProfileCreateOption,
+  isDCGConfirmationDialog,
+  isPlanConfirmationDialog,
+  SECURE_BROWSER_PROFILE_DIALOG_TITLE
+} from './extensionDialog.js'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -14,17 +21,23 @@ const emit = defineEmits(['respond', 'ack'])
 const planCollapsed = ref(false)
 const responseValue = ref('')
 const dialogEl = ref(null)
+const profileKeyInput = ref(null)
+const isInlineBrowserProfile = ref(false)
 const browserProfile = ref({
   key: '', targetUrl: ''
 })
-const isSecureBrowserProfile = computed(() => props.dialog?.title === '__CODINGTO_SECURE_BROWSER_PROFILE__')
+const isSecureBrowserProfile = computed(() => props.dialog?.title === SECURE_BROWSER_PROFILE_DIALOG_TITLE)
+const isBrowserProfileForm = computed(() => isSecureBrowserProfile.value || isInlineBrowserProfile.value)
 const visibleDialogTitle = computed(() => extensionDialogTitle(props.dialog))
 // 计划确认弹窗：用于在 plan-todos 未就绪时展示缺失提示区，并禁用批准按钮。
 const isPlanDialog = computed(() => isPlanConfirmationDialog(props.dialog))
+const isDCGDialog = computed(() => isDCGConfirmationDialog(props.dialog))
 
 watch(() => props.dialog?.id, () => {
   responseValue.value = props.dialog?.prefill || ''
-  if (props.dialog?.title === '__CODINGTO_SECURE_BROWSER_PROFILE__') {
+  isInlineBrowserProfile.value = false
+  browserProfile.value = { key: '', targetUrl: '' }
+  if (props.dialog?.title === SECURE_BROWSER_PROFILE_DIALOG_TITLE) {
     let setup = {}
     try { setup = JSON.parse(props.dialog?.placeholder || '{}') } catch { /* invalid setup becomes empty */ }
     browserProfile.value = {
@@ -45,8 +58,22 @@ watch(() => props.dialog?.id, () => {
 }, { immediate: true })
 
 function submitBrowserProfile() {
-  if (!browserProfile.value.key.trim()) return
+  if (props.dialog?.saving || !browserProfile.value.key.trim()) return
   emit('respond', { browserProfile: { ...browserProfile.value } })
+}
+
+function startBrowserProfileCreation(option) {
+  isInlineBrowserProfile.value = true
+  browserProfile.value = {
+    key: '',
+    targetUrl: browserProfileCreateTarget(option)
+  }
+  nextTick(() => profileKeyInput.value?.focus())
+}
+
+function leaveBrowserProfileCreation() {
+  isInlineBrowserProfile.value = false
+  browserProfile.value = { key: '', targetUrl: '' }
 }
 
 // select 弹窗的 options 既可能是纯字符串（计划扩展、浏览器身份扩展），也可能是
@@ -71,11 +98,18 @@ function optionDescription(option) {
 function isPrimaryOption(option) {
   return optionLabel(option).toLowerCase().startsWith('execute')
 }
+function selectOption(option, index) {
+  if (isBrowserProfileCreateOption(option)) {
+    startBrowserProfileCreation(option)
+    return
+  }
+  emit('respond', { value: optionValue(option, index) })
+}
 </script>
 
 <template>
   <section class="plan-panel">
-    <div v-if="items.length" class="plan-proposal">
+    <div v-if="items.length && !isDCGDialog" class="plan-proposal">
       <div class="plan-proposal__head">
         <ListTodo :size="14" />
         <span>{{ t.planProposalTitle || '执行计划' }}</span>
@@ -116,21 +150,22 @@ function isPrimaryOption(option) {
       </div>
       <p class="plan-proposal__missing">{{ t.planMissing || '计划数据未就绪，请取消后重试' }}</p>
     </div>
-    <div v-if="dialog" ref="dialogEl" class="extension-prompt" :class="{ 'extension-prompt--credential': isSecureBrowserProfile }">
-      <template v-if="isSecureBrowserProfile">
+    <div v-if="dialog" ref="dialogEl" class="extension-prompt" :class="{ 'extension-prompt--credential': isBrowserProfileForm, 'extension-prompt--danger': isDCGDialog }">
+      <template v-if="isBrowserProfileForm">
         <strong><KeyRound :size="14" />{{ t.browserProfileCreateTitle }}</strong>
         <p>{{ t.browserProfileSecureHint }}</p>
         <p v-if="dialog.error" class="extension-prompt__error">{{ dialog.error }}</p>
         <div class="browser-profile-form">
-          <label><span>{{ t.browserProfileKey }}</span><input v-model="browserProfile.key" :placeholder="t.browserProfileKeyPlaceholder" autocomplete="off" autocapitalize="none" spellcheck="false" /></label>
+          <label><span>{{ t.browserProfileKey }}</span><input ref="profileKeyInput" v-model="browserProfile.key" :placeholder="t.browserProfileKeyPlaceholder" autocomplete="off" autocapitalize="none" spellcheck="false" @keydown.enter.prevent="submitBrowserProfile" /></label>
         </div>
         <div class="extension-prompt__actions">
           <button class="primary" :disabled="dialog.saving || !browserProfile.key.trim()" @click="submitBrowserProfile">{{ dialog.saving ? t.savingItem : t.browserProfileCreate }}</button>
-          <button :disabled="dialog.saving" @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
+          <button v-if="isInlineBrowserProfile" :disabled="dialog.saving" @click="leaveBrowserProfileCreation">{{ t.back }}</button>
+          <button v-else :disabled="dialog.saving" @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
         </div>
       </template>
       <template v-else>
-      <strong>{{ visibleDialogTitle }}</strong>
+      <strong><ShieldAlert v-if="isDCGDialog" :size="15" />{{ visibleDialogTitle }}</strong>
       <p v-if="dialog.message">{{ dialog.message }}</p>
       <div v-if="dialog.method === 'select'" class="extension-prompt__actions">
         <button
@@ -138,13 +173,13 @@ function isPrimaryOption(option) {
           :key="optionValue(option, index)"
           :class="{ primary: isPrimaryOption(option) }"
           :title="optionDescription(option)"
-          @click="emit('respond', { value: optionValue(option, index) })"
+          @click="selectOption(option, index)"
         >{{ optionLabel(option) }}</button>
         <button @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
       </div>
       <div v-else-if="dialog.method === 'confirm'" class="extension-prompt__actions">
-        <button class="primary" :disabled="dialog.planMissing" @click="emit('respond', { confirmed: true })">{{ t.confirm || 'Confirm' }}</button>
-        <button @click="emit('respond', { confirmed: false })">{{ t.cancel }}</button>
+        <button class="primary" :class="{ 'primary--danger': isDCGDialog }" :disabled="dialog.planMissing" @click="emit('respond', { confirmed: true })">{{ isDCGDialog ? t.dcgApproveCommand : (t.confirm || 'Confirm') }}</button>
+        <button @click="emit('respond', { confirmed: false })">{{ isDCGDialog ? t.dcgRejectCommand : t.cancel }}</button>
       </div>
       <template v-else>
         <textarea v-model="responseValue" :placeholder="dialog.placeholder || ''" rows="4"></textarea>

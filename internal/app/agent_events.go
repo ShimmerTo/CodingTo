@@ -93,6 +93,9 @@ closed:
 	if s.activeSessionID == sessionID {
 		interruptedNodeID = s.activeChangeNode
 		s.activeChangeNode = ""
+		s.activeStewardToken = ""
+		s.pendingStewardToken = ""
+		s.stewardPromptPending = false
 	}
 	s.finishExecutionLocked("active")
 	s.disarmUIWatchdogLocked("")
@@ -174,6 +177,9 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	var relayUI bool
 	var taskSettled bool
 	s.mu.Lock()
+	if stewardToken := s.stewardTokenForEventLocked(sessionID, eventType); stewardToken != "" {
+		event["_stewardDispatchToken"] = stewardToken
+	}
 	// A detached subagent result can trigger a new Pi turn without passing
 	// through AgentService.Prompt. Establish the same change-capture lifecycle
 	// before the follow-up model starts using tools, so its integration edits are
@@ -273,6 +279,9 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 		// isBusy() 维持 true，exec_progress 继续 running），并让前端保持
 		// "运行中/等待" 表现，避免出现"会话已结束"的假象后又自动恢复。
 		waitingSubagents = runningSubagentCount(sessionDir) > 0
+		if waitingSubagents {
+			event["waitingSubagents"] = true
+		}
 		// 持久化等待状态，供终止路径强制收尾（forceSettleWaitingLocked）与
 		// 后续回合判定使用。
 		s.waitingSubagents = waitingSubagents
@@ -443,6 +452,21 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 // 内排队积压，最终 OOM。80ms 批量转发把消息数量压缩一到两个数量级，而人眼
 // 对打字机效果的感知阈值远高于此。
 const streamMergeWindow = 80 * time.Millisecond
+
+// stewardTokenForEventLocked advances correlation only at Pi's message_start
+// boundary. Until that boundary, delayed lifecycle events keep the previous
+// generation and therefore cannot release a newly queued steward event.
+func (s *AgentService) stewardTokenForEventLocked(sessionID int64, eventType string) string {
+	if s.activeSessionID != sessionID {
+		return ""
+	}
+	if eventType == "message_start" && s.stewardPromptPending {
+		s.activeStewardToken = s.pendingStewardToken
+		s.pendingStewardToken = ""
+		s.stewardPromptPending = false
+	}
+	return s.activeStewardToken
+}
 
 type pendingStreamEvent struct {
 	event map[string]any

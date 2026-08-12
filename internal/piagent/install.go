@@ -4,12 +4,24 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 )
 
 const PackageName = "@earendil-works/pi-coding-agent"
+
+func piInstallArgs() ([]string, error) {
+	args := []string{"install", "-g", "--ignore-scripts"}
+	if prefix := managedNpmPrefix(); prefix != "" {
+		if err := os.MkdirAll(prefix, 0o755); err != nil {
+			return nil, fmt.Errorf("create managed npm directory: %w", err)
+		}
+		args = append(args, "--prefix", prefix)
+	}
+	return append(args, PackageName), nil
+}
 
 // Install performs the same global npm installation advertised by the app,
 // without invoking a shell.
@@ -18,11 +30,15 @@ func Install() (string, error) {
 	if runtime.GOOS == "windows" {
 		npm = "npm.cmd"
 	}
-	path, err := exec.LookPath(npm)
+	path, err := commandPath(npm)
 	if err != nil {
 		return "", fmt.Errorf("npm is not installed or is not available on PATH")
 	}
-	cmd := exec.Command(path, "install", "-g", "--ignore-scripts", PackageName)
+	args, err := piInstallArgs()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(path, args...)
 	configureBackgroundProcess(cmd)
 	output, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(output))
@@ -57,7 +73,7 @@ func LatestVersion() (string, error) {
 	if runtime.GOOS == "windows" {
 		npm = "npm.cmd"
 	}
-	path, err := exec.LookPath(npm)
+	path, err := commandPath(npm)
 	if err != nil {
 		return "", fmt.Errorf("npm is not installed or is not available on PATH")
 	}
@@ -77,11 +93,15 @@ func InstallWithProgress(onLine func(string)) (string, error) {
 	if runtime.GOOS == "windows" {
 		npm = "npm.cmd"
 	}
-	path, err := exec.LookPath(npm)
+	path, err := commandPath(npm)
 	if err != nil {
 		return "", fmt.Errorf("npm is not installed or is not available on PATH")
 	}
-	cmd := exec.Command(path, "install", "-g", "--ignore-scripts", PackageName)
+	args, err := piInstallArgs()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(path, args...)
 	configureBackgroundProcess(cmd)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
@@ -104,12 +124,12 @@ func NpmInstalled() bool {
 	if runtime.GOOS == "windows" {
 		npm = "npm.cmd"
 	}
-	_, err := exec.LookPath(npm)
+	_, err := commandPath(npm)
 	return err == nil
 }
 
 // NodeInstalled reports whether the node runtime is discoverable on PATH.
 func NodeInstalled() bool {
-	_, err := exec.LookPath("node")
+	_, err := commandPath("node")
 	return err == nil
 }

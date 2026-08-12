@@ -86,6 +86,13 @@ type PromptRequest struct {
 	SessionID     int64             `json:"sessionId,omitempty"`
 	SessionPath   string            `json:"sessionPath,omitempty"`
 	Command       map[string]any    `json:"command,omitempty"`
+	// DisableDcg is a conversation-scoped switch: it only stops DCG
+	// interception for this conversation by writing the session marker, and
+	// never changes the agent's recommended.dcg extension configuration.
+	DisableDcg bool `json:"disableDcg,omitempty"`
+	// StewardDispatchToken correlates one durable resident-queue event with
+	// its lifecycle events. It is internal metadata and never crosses Wails.
+	StewardDispatchToken string `json:"-"`
 }
 
 // SaveBrowserProfileRequest keeps agent selection at the Wails boundary while
@@ -202,6 +209,13 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 			}
 		} else {
 			_ = piagent.RemoveRTKExtension(agent.DataDir)
+		}
+		if agent.Recommended["dcg"] {
+			if _, err := piagent.MaterializeDCGExtension(agent.DataDir); err != nil {
+				applog.Errorf("materialize DCG extension for %s: %v", agent.Name, err)
+			}
+		} else {
+			_ = piagent.RemoveDCGExtension(agent.DataDir)
 		}
 		if err := piagent.SyncFigmaMCPConfig(agent.DataDir, agent.Recommended["figma"]); err != nil {
 			applog.Errorf("sync Pi Figma for %s: %v", agent.Name, err)
@@ -395,7 +409,56 @@ func (a *App) DeleteAgent(id string) (AppConfig, error) {
 
 func (a *App) StartPrompt(req PromptRequest) error { return a.agent.StartPrompt(req) }
 func (a *App) AbortPrompt() error                  { return a.agent.AbortPrompt() }
-func (a *App) RestartAgent() error                 { return a.agent.Restart() }
+
+// AbortSession is the session-scoped stop boundary used by the frontend. It
+// returns the authoritative state after dispatching the abort so callers can
+// repair a missed lifecycle event immediately.
+func (a *App) AbortSession(id int64) (SessionRuntimeState, error) {
+	item, ok, err := a.store.Store().SessionByID(id)
+	if err != nil {
+		return SessionRuntimeState{}, err
+	} else if !ok {
+		return SessionRuntimeState{}, fmt.Errorf("conversation not found: %d", id)
+	}
+	// A live runtime fans out to all children while holding its lifecycle lock.
+	// If that runtime has already disappeared, still scan the durable session
+	// directory so stale frontend state cannot strand detached child processes.
+	if !a.agent.sessionRuntimeState(id).Known {
+		abortRunningSubagents(item.SessionDir, id)
+	}
+	if err := a.agent.AbortPrompt(id); err != nil {
+		return a.sessionRuntimeState(id), err
+	}
+	return a.sessionRuntimeState(id), nil
+}
+
+func (a *App) GetSessionRuntimeState(id int64) SessionRuntimeState {
+	return a.sessionRuntimeState(id)
+}
+
+func (a *App) sessionRuntimeState(id int64) SessionRuntimeState {
+	state := a.agent.sessionRuntimeState(id)
+	if !state.Known {
+		if item, ok, err := a.store.Store().SessionByID(id); err == nil && ok {
+			state.ExecDurationMs = item.ExecDurationMs
+		}
+	}
+	return state
+}
+
+func (a *App) RestartAgent() error { return a.agent.Restart() }
+
+// SetSessionDcgDisabled toggles DCG interception for a single conversation
+// (写入会话目录标记，实时生效），不会修改智能体的 recommended.dcg 配置。
+func (a *App) SetSessionDcgDisabled(sessionID int64, disabled bool) error {
+	return a.agent.SetSessionDcgDisabled(sessionID, disabled)
+}
+
+// GetSessionDcgDisabled reports the conversation-scoped DCG state used to
+// restore the bottom security menu when a historical conversation is opened.
+func (a *App) GetSessionDcgDisabled(sessionID int64) (bool, error) {
+	return a.agent.GetSessionDcgDisabled(sessionID)
+}
 
 // TestModel verifies a single model can be invoked through the Pi agent runtime.
 func (a *App) TestModel(req TestModelRequest) (TestModelResult, error) {

@@ -5,7 +5,7 @@ export const DEFAULT_STEWARD_PERSONA = Object.freeze({
   prompt: '准确理解用户意图，主动推进任务并及时同步关键进展；信息不足时先澄清，涉及风险或破坏性操作时先说明影响并征得确认。',
   provider: '',
   model: '',
-  compactAfterTurns: 20,
+  compactAfterTurns: 30,
   manageScope: 'butler',
   enabled: true
 })

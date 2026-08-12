@@ -9,11 +9,12 @@ import { Call } from '@wailsio/runtime'
 import { extensionIcon } from './extensionIcons'
 import {
   abortPrompt, chooseSessionDir, chooseWorkspace, closeWindow, createSession, deleteAgent,
-  getBootstrap, getSessionChanges, getSessionHistory, getStewardProfile, listSessions, minimise, onEvent,
+  getBootstrap, getSessionChanges, getSessionHistory, getSessionRuntimeState, getStewardProfile, listSessions, minimise, onEvent,
   getExtensions, getAgentExtensions, installPi, manageExtension, restartAgent, saveConfig,
   saveFigmaConfig, sendAgentCommand, startPrompt, testModel, toggleMaximise,
   saveBrowserProfile,
   respondSubagentUI, ackSubagentUI,
+  setSessionDcgDisabled, getSessionDcgDisabled,
   readAgentFile, writeAgentFile,
   listSkills, installSkills, previewSkillArchive, previewSkillUrl, editSkill, deleteSkill, updateSkill,
   installGlobalPackage as beInstallGlobalPackage,
@@ -30,7 +31,6 @@ import { buildT } from './i18n'
 import ChatView from './ChatView.vue'
 import logo from './assets/logo.png'
 import AppDialogs from './components/AppDialogs.vue'
-import InstallLogModal from './components/InstallLogModal.vue'
 import PiInstallGate from './components/PiInstallGate.vue'
 // 页面组件按需懒加载：每个菜单页独立 chunk，仅首次打开时加载，减小首屏主包体积。
 // 菜单页以模态浮层打开，本地文件加载开销可忽略，切换无感知。
@@ -174,6 +174,9 @@ watch(draft, value => {
 const pendingPromptsByTask = reactive(new Map())
 const mode = ref('execute')
 const thinkingLevel = ref('off')
+// 本次对话是否关闭命令拦截（会话级）。仅影响当前对话的 DCG 拦截，
+// 不修改智能体 recommended.dcg 配置。切换对话时依据会话标记恢复。
+const sessionDcgDisabled = ref(false)
 const selectedSkill = ref(null)
 const promptImages = ref([])
 const attachmentReadsPending = ref(0)
@@ -187,6 +190,11 @@ const running = ref(false)
 const runningTaskIds = reactive(new Set())
 const runtimeTaskIds = reactive(new Set())
 const stoppingTaskIds = reactive(new Set())
+// Per-conversation lifecycle generation. Session-list requests snapshot these
+// values so a response that started before a newer local event cannot overwrite
+// that event with an older backend snapshot.
+const taskRuntimeVersions = new Map()
+let sessionRefreshRequest = 0
 const connected = ref(false)
 // 当前会话累计的 token/上下文用量。运行时来自 Pi 的 get_session_stats 响应
 // （其 production 响应不带 command 字段，已在 handleAgentEvent 中按 data 形状路由），
@@ -496,6 +504,7 @@ const activeTaskStopping = computed(() => stoppingTaskIds.has(String(activeTaskI
 function setTaskRunning(id, live) {
   const key = String(id ?? '')
   if (!key) return
+  taskRuntimeVersions.set(key, (taskRuntimeVersions.get(key) || 0) + 1)
   if (live) runningTaskIds.add(key)
   else {
     runningTaskIds.delete(key)
@@ -503,6 +512,24 @@ function setTaskRunning(id, live) {
   }
   running.value = runningTaskIds.size > 0
   setTaskRuntimeStatus(id, live ? 'running' : 'active')
+}
+
+function applyTaskRuntimeState(id, state) {
+  if (!state || typeof state.running !== 'boolean') return
+  setTaskRunning(id, state.running)
+  if (typeof state.processRunning === 'boolean') {
+    setTaskRuntimeAvailable(id, state.processRunning)
+  }
+  const task = tasks.value.find(item => String(item.id) === String(id))
+  if (task && state.known !== false && Number.isFinite(Number(state.execDurationMs))) {
+    task.execDurationMs = Number(state.execDurationMs)
+  }
+  if (String(activeTaskId.value) === String(id)) {
+    executionRunning.value = state.running
+    if (state.known !== false && Number.isFinite(Number(state.execDurationMs))) {
+      executionElapsedMs.value = Number(state.execDurationMs)
+    }
+  }
 }
 
 // 当前会话是否仍有后台子 agent 在运行（含已请求中止但未终结的）。
@@ -683,8 +710,11 @@ async function load() {
     }
   }
   if (envAgentCacheChanged) persistEnvLastAgent()
+  const request = ++sessionRefreshRequest
+  const requestedVersions = new Map(taskRuntimeVersions)
   const initialTasks = (await listSessions()) || []
-  mergeTaskRuntimeStatus(initialTasks)
+  if (request !== sessionRefreshRequest) return
+  reconcileTaskRuntimeStatus(initialTasks, requestedVersions)
   tasks.value = initialTasks
   restorePendingAttentionState(initialTasks)
   // 仅首次加载时做一次全量扩展扫描；之后返回列表/编辑扩展都只静默刷新单个 agent。
@@ -802,7 +832,7 @@ function defaultAgent() {
     description: '',
     dataDir: '',
     builtin: defaultBuiltinSelection(),
-    recommended: {},
+    recommended: { dcg: true },
     subagents: [],
     piTools: { read: true, bash: true, edit: true, write: true },
     defaultProvider: config.defaultProvider,
@@ -819,6 +849,7 @@ function normalizeAgent(agent) {
     if (tool.required) agent.builtin[tool.key] = true
   }
   agent.recommended ||= {}
+  if (!Object.hasOwn(agent.recommended, 'dcg')) agent.recommended.dcg = true
   agent.subagents ||= []
   agent.piTools = { read: true, bash: true, edit: true, write: true, ...(agent.piTools || {}) }
   agent.defaultProvider ||= config.defaultProvider
@@ -1196,9 +1227,13 @@ function openAgentEditor() {
 
 // 点击列表“配置”按钮：editingAgentId 是配置页唯一目标。不要修改
 // activeAgentId，否则给另一个 Agent 安装扩展会意外切换当前聊天 Agent。
-function openAgentConfig(agent) {
+// Open agent config page with the initial tab (e.g. jump to extensions tab from the chat security-policy hint).
+const agentConfigInitialTab = ref('basics')
+
+function openAgentConfig(agent, initialTab = 'basics') {
   if (!agent) return
   editingAgentId.value = agent.id
+  agentConfigInitialTab.value = initialTab
   agentNotice.value = null
   activePage.value = 'agent-config'
 }
@@ -1288,28 +1323,31 @@ async function pickAgentDataDir() {
   if (selectedAgent.value.id !== newAgentId.value) await persist()
 }
 
-async function toggleAgentExtension(group, key, desiredState) {
-  const agent = selectedAgent.value
+// agentOverride 允许为任意智能体切换扩展（主菜单“插件”页的分配智能体对话框使用），
+// 不传时沿用原行为：操作当前选中的智能体。
+async function toggleAgentExtension(group, key, desiredState, agentOverride) {
+  const agent = agentOverride || selectedAgent.value
   if (!agent) return
   agent[group] ||= {}
   const previous = !!agent[group][key]
   const next = typeof desiredState === 'boolean' ? desiredState : !previous
-  // RTK needs its shared binary on PATH before it can be materialized per agent.
-  if (group === 'recommended' && key === 'rtk' && next) {
-    const rtk = (extensionSnapshot.value?.recommended?.[agent.id] || []).find(tool => tool.key === 'rtk')
-    if (rtk && !rtk.installed) {
-      pushToast('error', t.value.rtkNotInstalledHint)
+  if (next === previous) return
+  // Binary-backed recommended extensions need their shared runtime before an
+  // agent-local bridge can be enabled.
+  if (group === 'recommended' && ['rtk', 'dcg'].includes(key) && next) {
+    const runtime = (extensionSnapshot.value?.recommended?.[agent.id] || []).find(tool => tool.key === key)
+    if (runtime && !runtime.installed) {
+      pushToast('error', key === 'dcg' ? t.value.dcgNotInstalledHint : t.value.rtkNotInstalledHint)
       return
     }
   }
   agent[group][key] = next
-  const name = key === 'rtk'
-    ? 'RTK'
-    : (key === 'figma' ? t.value.piFigma : (key === 'pi-plugins' ? t.value.piPlugins : key.toUpperCase()))
+  const names = { rtk: 'RTK', dcg: 'DCG', figma: t.value.piFigma, 'pi-plugins': t.value.piPlugins }
+  const name = names[key] || key.toUpperCase()
   if (agent.id !== newAgentId.value) {
     const ok = await persist()
     if (ok) {
-      if (group === 'builtin' || key === 'rtk' || key === 'figma' || key === 'pi-plugins') {
+      if (group === 'builtin' || key === 'rtk' || key === 'dcg' || key === 'figma' || key === 'pi-plugins') {
         // These extensions are discovered by Pi at process startup. Reload the
         // current agent after its isolated extension state changes.
         extensionRestartPending.value = name
@@ -1339,6 +1377,71 @@ async function toggleAgentExtension(group, key, desiredState) {
   }
 }
 
+// 对话输入框盾牌菜单的 DCG 策略切换：
+// - 关闭危险命令检测：仅作用于本次对话（写会话标记、实时生效），
+//   不修改智能体 recommended.dcg 配置，不触发 Agent 重启；
+// - 切回危险命令拦截模式：清除会话标记恢复拦截；仅当智能体本身未开启
+//   DCG（此时拦截本来就不生效）才回退到开启智能体扩展配置。
+async function onChatDcgPolicyChange(enabled) {
+  const sessionId = Number(activeTaskId.value) || 0
+  if (enabled) {
+    sessionDcgDisabled.value = false
+    if (sessionId > 0) {
+      try { await setSessionDcgDisabled(sessionId, false) } catch (err) { pushToast('error', localizeError(String(err))) }
+    }
+    if (selectedAgent.value?.recommended?.dcg === false) {
+      await toggleAgentExtension('recommended', 'dcg', true)
+    }
+    return
+  }
+  sessionDcgDisabled.value = true
+  if (sessionId > 0) {
+    try { await setSessionDcgDisabled(sessionId, true) } catch (err) { pushToast('error', localizeError(String(err))) }
+  }
+}
+
+// 判断某个智能体当前是否已启用对应的推荐扩展。
+// RTK/DCG 的 status.installed 表示全局运行时二进制，per-agent 状态在 enabled 上；
+// Figma 的 installed 已包含 recommended 标记 + pi-mcp-adapter + mcp.json 配置。
+function agentRecommendedEnabled(agent, key) {
+  const status = (extensionSnapshot.value?.recommended?.[agent.id] || []).find(tool => tool.key === key)
+  if (!status) return false
+  return key === 'figma' ? !!status.installed : !!status.enabled
+}
+
+// 从主菜单“插件”页为指定智能体快速安装/卸载推荐扩展（RTK / DCG / Figma）。
+async function assignAgentExtension(agentId, key, install) {
+  const agent = (config.agents || []).find(item => item.id === agentId)
+  if (!agent) return
+  const names = { rtk: 'RTK', dcg: 'DCG', figma: t.value.piFigma }
+  const name = names[key] || key.toUpperCase()
+  const busyKey = `assign:${key}:${agentId}`
+  if (extensionBusy.value === busyKey) return
+  if (install === agentRecommendedEnabled(agent, key)) return
+  extensionBusy.value = busyKey
+  try {
+    // Figma 除了写入 recommended 标记，还需要先在目标智能体的数据目录安装
+    // pi-mcp-adapter，否则 mcp.json 里的 figma 条目不会被 Pi 加载。
+    if (install && key === 'figma') {
+      if (!figma.value.installed) {
+        pushToast('error', t.value.piFigmaGlobalMissing)
+        return
+      }
+      if (!figma.value.hasToken) {
+        pushToast('error', t.value.piFigmaAuthorizationMissing)
+        return
+      }
+      const result = await installAgentExtension(agentId, 'pi install npm:pi-mcp-adapter', { busyKey, name })
+      if (result?.success === false) return
+    }
+    await toggleAgentExtension('recommended', key, install, agent)
+    // 插件页展示的是所有智能体的分配情况，单智能体刷新不足以更新其他卡片。
+    await refreshExtensions()
+  } finally {
+    if (extensionBusy.value === busyKey) extensionBusy.value = ''
+  }
+}
+
 async function extensionAction(tool, action) {
   extensionBusy.value = tool.key
   extensionNotice.value = null
@@ -1349,8 +1452,9 @@ async function extensionAction(tool, action) {
       command: result?.command || '',
       output: result?.output || ''
     }
-    await refreshAgentExtensions(selectedAgent.value?.id)
+    await refreshExtensions()
     if (action === 'install') pushToast('success', t.value.toastInstalled.replace('{name}', tool.name))
+    else if (action === 'uninstall') pushToast('info', t.value.toastRemoved.replace('{name}', tool.name))
     else if (action === 'enable') pushToast('success', t.value.toastEnabled.replace('{name}', tool.name))
     else if (action === 'disable') pushToast('info', t.value.toastDisabled.replace('{name}', tool.name))
     else if (action === 'start') pushToast('success', t.value.toastStarted.replace('{name}', tool.name))
@@ -1518,8 +1622,9 @@ async function figmaAction(action) {
   extensionBusy.value = 'figma-' + action
   try {
     await manageExtension({ key: 'figma', action })
-    await refreshAgentExtensions(selectedAgent.value?.id)
+    await refreshExtensions()
     if (action === 'install') pushToast('success', t.value.toastInstalled.replace('{name}', t.value.figma))
+    else if (action === 'uninstall') pushToast('info', t.value.toastRemoved.replace('{name}', t.value.figma))
   } catch (err) {
     pushToast('error', t.value.toastExtensionError.replace('{error}', String(err)))
   } finally {
@@ -1735,22 +1840,39 @@ async function ensureConversation(title) {
   return task
 }
 
-// 后端会话列表的 status 恒为 DB 中的 'active'（创建时硬编码），不反映运行状态；
-// 运行状态完全由事件流维护在 runningTaskIds 内存集合中。整体替换 tasks 前
-// 先合并运行状态，否则并行运行的任务会因其它任务结束触发 refreshSessions
-// 而被覆盖掉 status，导致侧边栏转圈动画丢失。
-function mergeTaskRuntimeStatus(list) {
+// 后端列表已合并权威运行时状态，可用于修复漏收终态事件后残留的 running。
+// 但列表请求期间可能收到更新的本地生命周期事件，因此仅在对应版本未变化时
+// 应用列表状态；有新事件时保留较新的 runningTaskIds 状态，避免旧响应回退 UI。
+function reconcileTaskRuntimeStatus(list, requestedVersions) {
   for (const task of list) {
-    if (runningTaskIds.has(String(task.id))) task.status = 'running'
+    const key = String(task.id)
+    const requestedVersion = requestedVersions.get(key) || 0
+    const currentVersion = taskRuntimeVersions.get(key) || 0
+    if (currentVersion !== requestedVersion) {
+      task.status = runningTaskIds.has(key) ? 'running' : 'active'
+      continue
+    }
+    if (task.status === 'running') runningTaskIds.add(key)
+    else {
+      runningTaskIds.delete(key)
+      stoppingTaskIds.delete(key)
+    }
   }
+  running.value = runningTaskIds.size > 0
 }
 
 async function refreshSessions() {
+  const request = ++sessionRefreshRequest
+  const requestedVersions = new Map(taskRuntimeVersions)
   const latest = (await listSessions()) || []
-  mergeTaskRuntimeStatus(latest)
+  if (request !== sessionRefreshRequest) return
+  reconcileTaskRuntimeStatus(latest, requestedVersions)
   tasks.value = latest
   const active = latest.find(item => item.id === activeTaskId.value)
-  if (active) executionElapsedMs.value = Number(active.execDurationMs) || 0
+  if (active) {
+    executionElapsedMs.value = Number(active.execDurationMs) || 0
+    executionRunning.value = active.status === 'running'
+  }
 }
 
 function firstNumber(...values) {
@@ -2796,7 +2918,10 @@ async function runPrompt({ message, images, attachments: promptAttachments, skil
       images,
       attachments: toAttachmentInputs(promptAttachments || []),
       sessionId: task.id,
-      sessionPath: task.sessionPath || ''
+      sessionPath: task.sessionPath || '',
+      // 会话级 DCG 开关：新会话首次发送时由后端落盘会话标记，
+      // 运行中切换则已通过 setSessionDcgDisabled 实时生效。
+      disableDcg: sessionDcgDisabled.value
     })
     // StartPrompt has persisted the prompt node before returning. Refresh now
     // so the right sidebar shows the running node even before the first edit.
@@ -2917,9 +3042,22 @@ async function stop() {
   if (!activeTaskRunning.value || activeTaskStopping.value) return
   stoppingTaskIds.add(key)
   try {
-    await abortPrompt(taskId)
-    // 成功也立即清除转圈标记，不依赖后续 agent_settled/agent:state 事件链：
-    // 会话处于"等待子 agent"状态时 abort 只被 Pi 应答、不会再产生收尾事件。
+    const state = await abortPrompt(taskId)
+    applyTaskRuntimeState(taskId, state)
+    // agent_settled/agent:state normally settles the UI. Re-read the same
+    // authoritative state on a bounded backoff as a fallback for a terminal
+    // event that raced with WebView subscription or conversation switching.
+    const delays = [100, 200, 400, 800, 1000, 1000, 1000]
+    for (const delay of delays) {
+      if (!runningTaskIds.has(key)) break
+      await new Promise(resolve => setTimeout(resolve, delay))
+      try {
+        applyTaskRuntimeState(taskId, await getSessionRuntimeState(taskId))
+      } catch {
+        // The original abort was accepted; a transient fallback read must not
+        // turn it into a user-visible stop failure.
+      }
+    }
     stoppingTaskIds.delete(key)
   } catch (err) {
     stoppingTaskIds.delete(key)
@@ -2957,6 +3095,8 @@ async function chatNewSession() {
     config.defaultModel = first?.models?.[0]?.id || ''
   }
   thinkingLevel.value = defaultThinkingLevelForModel(selectedModel.value)
+  // 新建对话默认跟随智能体配置，会话级拦截开关复位。
+  sessionDcgDisabled.value = false
   changeRefreshRequest += 1
   messagesList.value = []
   sessionChanges.value = { root: '', nodes: [], files: [], added: 0, deleted: 0 }
@@ -3000,8 +3140,14 @@ async function selectTask(task) {
   loadingHistory.value = true
   messagesList.value = []
   try {
+    // 恢复该对话的会话级命令拦截状态（标记文件持久化在会话目录）。
+    try { sessionDcgDisabled.value = await getSessionDcgDisabled(task.id) } catch { sessionDcgDisabled.value = false }
     const history = await getSessionHistory(task.id)
     messagesList.value = initializeThinkingVisibility(safeClone(history?.messages || []))
+    // Re-entering a conversation reconciles the stop button/sidebar against
+    // the backend runtime instead of retaining a missed terminal event in the
+    // frontend's in-memory running set.
+    applyTaskRuntimeState(task.id, history?.runtime)
     // Token stats come from the backend aggregation (authoritative for history,
     // including sessions recorded before this fix). Fall back to the snapshot
     // saved on the task when no fresh aggregation is available.
@@ -3026,7 +3172,7 @@ async function selectTask(task) {
     restoreExecPlan(task.id)
     // 若存在待确认的计划，则隐藏上一轮残留的执行计划条，确保计划面板正常显示
     if (planItems.value.length) executionPlan.value = []
-    executionElapsedMs.value = Number(task.execDurationMs) || 0
+    executionElapsedMs.value = Number(history?.runtime?.execDurationMs ?? task.execDurationMs) || 0
     executionRunning.value = activeTaskRunning.value
     if (task.agentId && config.agents.some(agent => agent.id === task.agentId)) currentAgentId.value = task.agentId
     if (task.environmentId && config.environments.some(env => env.id === task.environmentId)) {
@@ -3042,7 +3188,7 @@ async function selectTask(task) {
       : null
     extensionDialog.value = null
     // 任务仍在进行（如等待用户确认计划）时，恢复持久化的扩展对话框，避免刷新后无对话框可操作
-    if (task.status === 'running') restoreExtDialog(task.id)
+    if (history?.runtime?.running) restoreExtDialog(task.id)
     error.value = ''
     // Browsing history must not mutate the shared Pi runtime. StartPrompt loads
     // this session path atomically when the user actually sends the next prompt.
@@ -3666,6 +3812,7 @@ provide(appContextKey, {
   agentEditorOpen,
   editingNewAgent,
   editingAgentId,
+  agentConfigInitialTab,
   openAgentConfig,
   backToAgentList,
   providerEditorOpen,
@@ -3705,6 +3852,7 @@ provide(appContextKey, {
   extensionAction,
   figmaAction,
   toggleAgentExtension,
+  assignAgentExtension,
   installGlobalPackage,
   removeGlobalPackage,
   installAgentMcp,
@@ -3995,6 +4143,8 @@ onBeforeUnmount(() => {
             :stopping="activeTaskStopping"
             :connected="connected"
             :selected-agent="selectedAgent"
+            :dcg-status="(extensionSnapshot?.recommended?.[selectedAgent?.id] || []).find(tool => tool.key === 'dcg') || null"
+            :session-dcg-disabled="sessionDcgDisabled"
             :tasks="tasks"
             :draft="draft"
             :pending-prompts="pendingPrompts"
@@ -4033,6 +4183,9 @@ onBeforeUnmount(() => {
             @stop="stop"
             @select-agent="chatSelectAgent"
             @open-agent-config="chatOpenAgentConfig"
+            @open-plugins="activePage = 'plugins'"
+            @open-agent-extensions="openAgentConfig($event, 'extensions')"
+            @update:dcg="onChatDcgPolicyChange($event)"
             @update:mode="mode = $event"
             @update:model="onModelChange"
             @add-images="onAddImages"
@@ -4059,7 +4212,6 @@ onBeforeUnmount(() => {
     </div>
 
     <AppDialogs />
-    <InstallLogModal />
 
     <div v-if="shuttingDown" class="shutdown-overlay" role="status" aria-live="polite">
       <div class="shutdown-overlay__card">

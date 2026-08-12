@@ -120,14 +120,7 @@ func (s *Service) launchChrome(ctx context.Context, l *lease) error {
 	}
 	activePortPath := filepath.Join(l.ProfileDir, "DevToolsActivePort")
 	_ = os.Remove(activePortPath)
-	cmd := exec.Command(chrome,
-		"--user-data-dir="+l.ProfileDir,
-		"--remote-debugging-port=0",
-		"--remote-allow-origins=*",
-		"--no-first-run",
-		"--no-default-browser-check",
-		l.TargetURL,
-	)
+	cmd := exec.Command(chrome, chromeCommandArgs(l)...)
 	configureChromeProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
@@ -152,6 +145,57 @@ func (s *Service) launchChrome(ctx context.Context, l *lease) error {
 		return fmt.Errorf("%w: %v", errCDPStartup, err)
 	}
 	return nil
+}
+
+func chromeCommandArgs(l *lease) []string {
+	args := []string{
+		"--user-data-dir=" + l.ProfileDir,
+		"--remote-debugging-port=0",
+		"--remote-allow-origins=*",
+		"--no-first-run",
+		"--no-default-browser-check",
+	}
+	if !l.Headed {
+		args = append(args, "--headless=new")
+	}
+	return append(args, l.TargetURL)
+}
+
+// restartChrome changes visibility without exposing profile paths or CDP data
+// to the extension. Callers hold l.opMu for the whole handoff.
+func (s *Service) restartChrome(ctx context.Context, l *lease, headed bool) error {
+	if err := s.stopChrome(l); err != nil {
+		return err
+	}
+	l.Headed = headed
+	return s.launchChrome(ctx, l)
+}
+
+// stopChrome stops only the process. It deliberately keeps the lease and its
+// profile lock so another runtime cannot claim the profile during a mode switch.
+func (s *Service) stopChrome(l *lease) error {
+	var stopErr error
+	if l.CDPPort > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = closeBrowser(ctx, l.CDPPort)
+		cancel()
+	}
+	if l.Chrome != nil && l.Chrome.Process != nil {
+		select {
+		case <-l.exit:
+		case <-time.After(3 * time.Second):
+			stopErr = l.Chrome.Process.Kill()
+			select {
+			case <-l.exit:
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}
+	l.Chrome = nil
+	l.ChromePID = 0
+	l.CDPPort = 0
+	l.exit = nil
+	return stopErr
 }
 
 func waitForDevToolsPort(ctx context.Context, path string, exited <-chan error) (int, error) {

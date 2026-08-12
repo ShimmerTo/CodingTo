@@ -29,6 +29,19 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 		s.cancel = nil
 		return fmt.Errorf("create agent session directory: %w", err)
 	}
+	// 会话级 DCG 开关：仅落盘会话目录内的标记，不动智能体 recommended.dcg
+	// 配置。首次发送时前端把 disableDcg 带过来写入标记；运行中切换则由
+	// SetSessionDcgDisabled 实时更新同一标记。
+	// 注意这里只「写」不「删」：Agent 因扩展重启等场景会重新进入本函数，
+	// req.DisableDcg 此时为默认 false，若无条件删除会丢失已持久化的会话级
+	// 关闭状态；恢复拦截只允许用户主动调用 SetSessionDcgDisabled(false)。
+	if req.DisableDcg {
+		if err := writeDcgDisabledMarker(sessionDir, true); err != nil {
+			cancel()
+			s.cancel = nil
+			return fmt.Errorf("write conversation DCG policy marker: %w", err)
+		}
+	}
 	if err := piagent.MaterializeSystemExtensions(profile.DataDir); err != nil {
 		cancel()
 		s.cancel = nil
@@ -80,6 +93,13 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 	} else {
 		_ = piagent.RemoveRTKExtension(profile.DataDir)
 	}
+	if profile.Recommended["dcg"] {
+		if _, err := piagent.MaterializeDCGExtension(profile.DataDir); err != nil {
+			return err
+		}
+	} else {
+		_ = piagent.RemoveDCGExtension(profile.DataDir)
+	}
 	sessionID := ""
 	if req.SessionPath == "" {
 		sessionID = fmt.Sprintf("codingto-session-%d", req.SessionID)
@@ -87,6 +107,9 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 	agentEnv := agentProcessEnv(cfg, profile)
 	agentEnv["CODINGTO_SESSION_DIR"] = sessionDir
 	agentEnv["CODINGTO_WORK_DIR"] = req.WorkDir
+	// 主 Agent 与子 Agent 的 DCG 扩展都通过该标记文件判断「本次对话是否关闭
+	// 命令拦截」，运行中写入即可实时生效，无需重启进程。
+	agentEnv["CODINGTO_DCG_DISABLE_MARKER"] = filepath.Join(sessionDir, dcgDisabledMarkerFile)
 	if selectedModel, found := piagent.FindModel(cfg.Providers, req.Provider, req.Model); found {
 		agentEnv["CODINGTO_MODEL_INPUT_MODALITIES"] = strings.Join(selectedModel.Input, ",")
 	}
@@ -267,6 +290,11 @@ func agentProcessEnv(cfg AppConfig, profile AgentProfile) map[string]string {
 	if profile.Recommended["rtk"] {
 		if rtkPath, err := extensions.RTKExecutable(); err == nil {
 			agentEnv["PATH"] = filepath.Dir(rtkPath) + string(os.PathListSeparator) + os.Getenv("PATH")
+		}
+	}
+	if profile.Recommended["dcg"] {
+		if dcgPath, err := extensions.DCGExecutable(); err == nil {
+			agentEnv["CODINGTO_DCG_BIN"] = dcgPath
 		}
 	}
 	if profile.Recommended["figma"] {

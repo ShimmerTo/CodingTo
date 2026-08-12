@@ -11,12 +11,14 @@ import {
   ListChecks,
   ListTree,
   Package,
+  ShieldAlert,
   Store,
 } from 'lucide-vue-next'
 
 // 关键扩展的固定图标，按含义选择且保证唯一。
 const fixedExtensionIcons = {
   rtk: Binary,
+  dcg: ShieldAlert,
   'pi-plugins': Store,
   'browser-native': Globe2,
   figma: Image,

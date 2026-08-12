@@ -7,7 +7,6 @@
 package connectors
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 
@@ -78,5 +77,3 @@ func channelIDFromConfig(config map[string]string) int64 {
 	}
 	return id
 }
-
-var _ = context.Background

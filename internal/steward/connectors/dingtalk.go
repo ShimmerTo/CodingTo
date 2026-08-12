@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	dingchatbot "github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	dingclient "github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
@@ -22,11 +23,11 @@ type dingtalk struct {
 	secrets   map[string]string
 	onMessage func(steward.InboundMessage)
 
-	mu          sync.Mutex
-	webhooks    map[string]string // threadID -> sessionWebhook
-	webhookTime map[string]int64
-	client      *dingclient.StreamClient
-	stop        chan struct{}
+	mu                 sync.Mutex
+	webhooks           map[string]string // threadID -> sessionWebhook
+	webhookTime        map[string]int64
+	lastWebhookCleanup time.Time
+	client             *dingclient.StreamClient
 }
 
 func dingtalkFactory(config, secrets map[string]string, onMessage func(steward.InboundMessage)) (steward.Connector, error) {
@@ -34,7 +35,6 @@ func dingtalkFactory(config, secrets map[string]string, onMessage func(steward.I
 		channelID: channelIDFromConfig(config),
 		config:    config, secrets: secrets, onMessage: onMessage,
 		webhooks: make(map[string]string), webhookTime: make(map[string]int64),
-		stop: make(chan struct{}),
 	}, nil
 }
 
@@ -73,7 +73,20 @@ func (d *dingtalk) Connect(ctx context.Context, ready func()) error {
 		return err
 	}
 	ready()
-	<-ctx.Done()
+	cleanupTicker := time.NewTicker(10 * time.Minute)
+	defer cleanupTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			goto stopped
+		case now := <-cleanupTicker.C:
+			d.mu.Lock()
+			d.cleanupExpiredWebhooksLocked(now)
+			d.mu.Unlock()
+		}
+	}
+
+stopped:
 	d.mu.Lock()
 	if d.client != nil {
 		d.client.Close()
@@ -91,8 +104,11 @@ func (d *dingtalk) handleMessage(ctx context.Context, data *dingchatbot.BotCallb
 		return
 	}
 	d.mu.Lock()
+	d.cleanupExpiredWebhooksLocked(time.Now())
 	d.webhooks[data.ConversationId] = data.SessionWebhook
-	d.webhookTime[data.ConversationId] = data.SessionWebhookExpiredTime
+	// Use a conservative local TTL instead of depending on the SDK field's
+	// timestamp unit. Session webhooks are documented as roughly two hours.
+	d.webhookTime[data.ConversationId] = time.Now().Add(90 * time.Minute).UnixMilli()
 	d.mu.Unlock()
 
 	text := data.Text.Content
@@ -105,6 +121,7 @@ func (d *dingtalk) handleMessage(ctx context.Context, data *dingchatbot.BotCallb
 		SenderID:   firstNonEmpty(data.SenderStaffId, data.SenderId),
 		SenderName: data.SenderNick,
 		ThreadID:   data.ConversationId,
+		MessageID:  data.MsgId,
 		Webhook:    data.SessionWebhook,
 		Text:       text,
 		Raw:        data,
@@ -114,6 +131,11 @@ func (d *dingtalk) handleMessage(ctx context.Context, data *dingchatbot.BotCallb
 func (d *dingtalk) Send(ctx context.Context, msg steward.OutboundMessage) error {
 	d.mu.Lock()
 	webhook := d.webhooks[msg.ThreadID]
+	if expiry := d.webhookTime[msg.ThreadID]; expiry > 0 && time.Now().UnixMilli() >= expiry {
+		delete(d.webhooks, msg.ThreadID)
+		delete(d.webhookTime, msg.ThreadID)
+		webhook = ""
+	}
 	d.mu.Unlock()
 	if webhook == "" {
 		return fmt.Errorf("钉钉：尚未收到会话 %s 的最近消息，暂时无法确定回复地址（请先给机器人发一条消息）", msg.ThreadID)
@@ -153,7 +175,22 @@ func (d *dingtalk) SeedWebhook(threadID, webhook string) {
 	}
 	d.mu.Lock()
 	d.webhooks[threadID] = webhook
+	d.webhookTime[threadID] = time.Now().Add(90 * time.Minute).UnixMilli()
 	d.mu.Unlock()
+}
+
+func (d *dingtalk) cleanupExpiredWebhooksLocked(now time.Time) {
+	if !d.lastWebhookCleanup.IsZero() && now.Sub(d.lastWebhookCleanup) < 10*time.Minute {
+		return
+	}
+	cutoff := now.UnixMilli()
+	for threadID, expiry := range d.webhookTime {
+		if expiry > 0 && expiry <= cutoff {
+			delete(d.webhookTime, threadID)
+			delete(d.webhooks, threadID)
+		}
+	}
+	d.lastWebhookCleanup = now
 }
 
 // stripDingTalkAt removes the @bot mention text from group messages.

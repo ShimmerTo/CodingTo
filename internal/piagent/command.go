@@ -17,6 +17,7 @@ import (
 // can be extremely slow (or blocked) on some networks, which makes installs
 // appear to hang for minutes with no output.
 func commandEnv(dataDir string) []string {
+	prepareCommandPath()
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, item := range os.Environ() {
 		key, _, found := strings.Cut(item, "=")

@@ -45,30 +45,33 @@ func toolExecutionTimeoutFromConfig(cfg AppConfig) time.Duration {
 // different conversations can execute concurrently while turns within the same
 // conversation remain serialized.
 type AgentService struct {
-	store             *ConfigStore
-	adapter           *piagent.Adapter
-	mu                sync.Mutex
-	prepareMu         sync.Mutex
-	sharedPrepareMu   *sync.Mutex
-	eventLogMu        sync.Mutex
-	runtimes          map[int64]*AgentService
-	cancel            context.CancelFunc
-	activeMode        string
-	activeAgent       string
-	activeDataDir     string
-	activeDir         string
-	activeTools       bool
-	activeSessionID   int64
-	activeSessionDir  string
-	activeSession     string
-	activeCatalog     string
-	activeProfile     string
-	activeSkill       string
-	activeSkillStamp  string
-	execAccumulatedMs int64
-	execTurnStart     time.Time
-	preparing         bool
-	prepareCanceled   bool
+	store                *ConfigStore
+	adapter              *piagent.Adapter
+	mu                   sync.Mutex
+	prepareMu            sync.Mutex
+	sharedPrepareMu      *sync.Mutex
+	eventLogMu           sync.Mutex
+	runtimes             map[int64]*AgentService
+	cancel               context.CancelFunc
+	activeMode           string
+	activeAgent          string
+	activeDataDir        string
+	activeDir            string
+	activeTools          bool
+	activeSessionID      int64
+	activeSessionDir     string
+	activeSession        string
+	activeCatalog        string
+	activeProfile        string
+	activeSkill          string
+	activeSkillStamp     string
+	activeStewardToken   string
+	pendingStewardToken  string
+	stewardPromptPending bool
+	execAccumulatedMs    int64
+	execTurnStart        time.Time
+	preparing            bool
+	prepareCanceled      bool
 	// pendingRestart holds a deferred restart request that should run only once
 	// the agent finishes its current task, so we never kill an in-flight turn
 	// (e.g. while materializing a new RTK extension).
@@ -240,9 +243,23 @@ func (s *AgentService) isBusy() bool {
 // turn settles, so consumers that need a live task list must merge this value
 // instead of treating the persisted duration/status as real-time state.
 type sessionExecutionSnapshot struct {
-	Running        bool
-	ExecDurationMs int64
-	StartedAt      int64
+	Running          bool
+	ProcessRunning   bool
+	WaitingSubagents bool
+	ExecDurationMs   int64
+	StartedAt        int64
+}
+
+// SessionRuntimeState is the authoritative conversation state returned to the
+// frontend. Known distinguishes an idle/unmaterialized conversation from a
+// runtime that is currently present in the pool.
+type SessionRuntimeState struct {
+	Known            bool  `json:"known"`
+	Running          bool  `json:"running"`
+	ProcessRunning   bool  `json:"processRunning"`
+	WaitingSubagents bool  `json:"waitingSubagents"`
+	ExecDurationMs   int64 `json:"execDurationMs"`
+	StartedAt        int64 `json:"startedAt"`
 }
 
 // sessionExecutionSnapshots returns a cheap point-in-time view of every
@@ -264,7 +281,9 @@ func (s *AgentService) sessionExecutionSnapshots() map[int64]sessionExecutionSna
 				startedAt = s.execTurnStart.UnixMilli()
 			}
 			result[s.activeSessionID] = sessionExecutionSnapshot{
-				Running: running, ExecDurationMs: total, StartedAt: startedAt,
+				Running: running, ProcessRunning: s.adapter.IsRunning(),
+				WaitingSubagents: s.waitingSubagents,
+				ExecDurationMs:   total, StartedAt: startedAt,
 			}
 		}
 		s.mu.Unlock()
@@ -293,11 +312,25 @@ func (s *AgentService) sessionExecutionSnapshots() map[int64]sessionExecutionSna
 			startedAt = runtime.execTurnStart.UnixMilli()
 		}
 		result[sessionID] = sessionExecutionSnapshot{
-			Running: running, ExecDurationMs: total, StartedAt: startedAt,
+			Running: running, ProcessRunning: runtime.adapter.IsRunning(),
+			WaitingSubagents: runtime.waitingSubagents,
+			ExecDurationMs:   total, StartedAt: startedAt,
 		}
 		runtime.mu.Unlock()
 	}
 	return result
+}
+
+func (s *AgentService) sessionRuntimeState(sessionID int64) SessionRuntimeState {
+	snapshot, ok := s.sessionExecutionSnapshots()[sessionID]
+	if !ok {
+		return SessionRuntimeState{}
+	}
+	return SessionRuntimeState{
+		Known: true, Running: snapshot.Running, ProcessRunning: snapshot.ProcessRunning,
+		WaitingSubagents: snapshot.WaitingSubagents,
+		ExecDurationMs:   snapshot.ExecDurationMs, StartedAt: snapshot.StartedAt,
+	}
 }
 
 func (s *AgentService) startPromptSingle(req PromptRequest) error {
@@ -561,11 +594,15 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 	}
 
 	s.execTurnStart = turnStartedAt
-	if err := s.appendEvent(session.SessionDir, map[string]any{
+	userEvent := map[string]any{
 		"type": "user_text", "message": req.Message, "displayMessage": displayMessage,
 		"images": displayImages, "attachments": archivedAttachments,
 		"changeNodeId": changeNodeID, "_recordedAt": turnStartedAt.UnixMilli(),
-	}); err != nil {
+	}
+	if req.StewardDispatchToken != "" {
+		userEvent["_stewardDispatchToken"] = req.StewardDispatchToken
+	}
+	if err := s.appendEvent(session.SessionDir, userEvent); err != nil {
 		_ = finishChangeNode(session.SessionDir, changeNodeID, "error", time.Now().UnixMilli())
 		s.activeChangeNode = ""
 		s.finishExecutionLocked("active")
@@ -579,7 +616,15 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 		s.finishExecutionLocked("active")
 		return fmt.Errorf("update conversation: %w", err)
 	}
+	// Bind the correlation token before writing the prompt command, but do not
+	// promote it to the active turn until Pi emits message_start. Keeping the
+	// previous turn token active across this boundary prevents a duplicated or
+	// delayed settled event from being relabelled with the new generation.
+	s.pendingStewardToken = req.StewardDispatchToken
+	s.stewardPromptPending = true
 	if err := s.sendPrompt(req, selectedModel); err != nil {
+		s.pendingStewardToken = ""
+		s.stewardPromptPending = false
 		_ = finishChangeNode(session.SessionDir, changeNodeID, "error", time.Now().UnixMilli())
 		s.activeChangeNode = ""
 		s.finishExecutionLocked("active")

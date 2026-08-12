@@ -5,6 +5,7 @@ import { formatDuration } from './chatFormatters.js'
 
 const props = defineProps({
   title: { type: String, default: '' },
+  sessionId: { type: Number, default: 0 },
   createdAt: { type: Number, default: 0 },
   connected: { type: Boolean, default: false },
   executionElapsedMs: { type: Number, default: 0 },
@@ -25,6 +26,7 @@ const createdAtTooltip = computed(() => createdAtLabel.value ? `${props.t.chatSe
 <template>
   <header class="chat-main__head">
     <div class="chat-main__title" :title="createdAtTooltip">
+      <small v-if="title && sessionId > 0">#{{ sessionId }}</small>
       <span>{{ title || t.chatSelectOrCreate }}</span>
     </div>
     <div class="chat-main__head-actions">

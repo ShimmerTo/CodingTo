@@ -82,6 +82,7 @@ type lease struct {
 	Chrome     *exec.Cmd
 	ChromePID  int
 	CDPPort    int
+	Headed     bool
 	State      LeaseState
 	CreatedAt  time.Time
 	LastUsedAt time.Time
@@ -94,16 +95,23 @@ type PrepareRequest struct {
 	CodingToSessionID int64  `json:"codingToSessionId"`
 	ProfileID         string `json:"profileId"`
 	TargetURL         string `json:"targetUrl"`
+	Headed            *bool  `json:"headed,omitempty"`
 }
 
 type ExecuteRequest struct {
 	Args      []string `json:"args"`
 	TimeoutMS int      `json:"timeoutMs"`
+	Headed    *bool    `json:"headed,omitempty"`
+}
+
+type VerifyRequest struct {
+	Headed *bool `json:"headed,omitempty"`
 }
 
 type Response struct {
 	Status  string `json:"status"`
 	LeaseID string `json:"leaseId,omitempty"`
+	Headed  *bool  `json:"headed,omitempty"`
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
 	Output  string `json:"output,omitempty"`
@@ -327,6 +335,13 @@ func (s *Service) prepare(ctx context.Context, req PrepareRequest, targetURL, or
 		if existing != nil && existing.AgentID == req.AgentID && existing.SessionID == req.CodingToSessionID {
 			s.mu.Unlock()
 			existing.opMu.Lock()
+			if req.Headed != nil && existing.Headed != *req.Headed {
+				if err := s.restartChrome(ctx, existing, *req.Headed); err != nil {
+					existing.opMu.Unlock()
+					_ = s.closeLease(existing.ID)
+					return Response{Status: "error", Code: "CHROME_LAUNCH_FAILED", Message: "could not switch browser visibility"}, http.StatusBadGateway
+				}
+			}
 			if existing.TargetURL != targetURL {
 				if err := navigate(ctx, existing.CDPPort, targetURL); err != nil {
 					existing.opMu.Unlock()
@@ -336,11 +351,16 @@ func (s *Service) prepare(ctx context.Context, req PrepareRequest, targetURL, or
 				existing.TargetURL, existing.Origin = targetURL, origin
 			}
 			response := s.assessResponseUntil(ctx, existing, 5*time.Second)
+			response = s.ensureLoginVisible(ctx, existing, response)
 			existing.opMu.Unlock()
-			if response.Code == "CHROME_EXITED" {
+			if shouldCloseAfterResponse(response) {
 				_ = s.closeLease(existing.ID)
 			}
-			return response, http.StatusOK
+			status := http.StatusOK
+			if response.Code == "CHROME_LAUNCH_FAILED" {
+				status = http.StatusBadGateway
+			}
+			return response, status
 		}
 		s.mu.Unlock()
 		_ = s.closeLease(existingID)
@@ -356,7 +376,7 @@ func (s *Service) prepare(ctx context.Context, req PrepareRequest, targetURL, or
 		ID: leaseID, AgentID: req.AgentID, SessionID: req.CodingToSessionID,
 		ProfileID: req.ProfileID, TargetURL: targetURL, Origin: origin,
 		ProfileDir: profileDir, LockPath: filepath.Join(filepath.Dir(profileDir), ".codingto.lock"),
-		State: StateWaiting, CreatedAt: now, LastUsedAt: now,
+		Headed: requestedHeaded(req.Headed, true), State: StateWaiting, CreatedAt: now, LastUsedAt: now,
 	}
 	if err := s.acquireProfileLock(l); err != nil {
 		s.mu.Unlock()
@@ -373,7 +393,12 @@ func (s *Service) prepare(ctx context.Context, req PrepareRequest, targetURL, or
 	err = s.launchChrome(ctx, l)
 	if err == nil {
 		response := s.assessResponseUntil(ctx, l, 8*time.Second)
+		response = s.ensureLoginVisible(ctx, l, response)
 		l.opMu.Unlock()
+		if response.Code == "CHROME_LAUNCH_FAILED" {
+			_ = s.closeLease(leaseID)
+			return response, http.StatusBadGateway
+		}
 		return response, http.StatusOK
 	}
 	l.opMu.Unlock()
@@ -391,7 +416,20 @@ func (s *Service) handleVerify(w http.ResponseWriter, r *http.Request, leaseID s
 		writeResponse(w, http.StatusNotFound, Response{Status: "error", Code: "LEASE_NOT_FOUND", Message: "browser lease not found"})
 		return
 	}
+	var req VerifyRequest
+	if err := decodeOptionalJSON(r, &req); err != nil {
+		writeResponse(w, http.StatusBadRequest, Response{Status: "error", Code: "INVALID_REQUEST", Message: err.Error()})
+		return
+	}
 	l.opMu.Lock()
+	if req.Headed != nil && l.Headed != *req.Headed {
+		if err := s.restartChrome(r.Context(), l, *req.Headed); err != nil {
+			l.opMu.Unlock()
+			_ = s.closeLease(l.ID)
+			writeResponse(w, http.StatusBadGateway, Response{Status: "error", Code: "CHROME_LAUNCH_FAILED", Message: "could not switch browser visibility"})
+			return
+		}
+	}
 	if l.Chrome == nil || l.Chrome.Process == nil || !processAlive(l.ChromePID) {
 		response := s.assessResponse(r.Context(), l)
 		l.opMu.Unlock()
@@ -402,17 +440,23 @@ func (s *Service) handleVerify(w http.ResponseWriter, r *http.Request, leaseID s
 		return
 	}
 	if err := ensureTarget(r.Context(), l.CDPPort, l.TargetURL, l.Origin); err != nil {
-		response := Response{Status: "not_ready", LeaseID: l.ID, Message: "目标页面尚未完成导航，请保留窗口并稍后重试。"}
+		response := responseForLease(l, "not_ready", "")
+		response.Message = "目标页面尚未完成导航，请稍后重试。"
 		l.opMu.Unlock()
 		writeResponse(w, http.StatusOK, response)
 		return
 	}
 	response := s.assessResponseUntil(r.Context(), l, 5*time.Second)
+	response = s.ensureLoginVisible(r.Context(), l, response)
 	l.opMu.Unlock()
-	if response.Code == "CHROME_EXITED" {
+	if shouldCloseAfterResponse(response) {
 		_ = s.closeLease(l.ID)
 	}
-	writeResponse(w, http.StatusOK, response)
+	status := http.StatusOK
+	if response.Code == "CHROME_LAUNCH_FAILED" {
+		status = http.StatusBadGateway
+	}
+	writeResponse(w, status, response)
 }
 
 func (s *Service) handleExecute(w http.ResponseWriter, r *http.Request, leaseID string) {
@@ -431,12 +475,25 @@ func (s *Service) handleExecute(w http.ResponseWriter, r *http.Request, leaseID 
 		return
 	}
 	l.opMu.Lock()
-	if assessment := s.assessResponse(r.Context(), l); assessment.Status != "ready" {
+	if req.Headed != nil && l.Headed != *req.Headed {
+		if err := s.restartChrome(r.Context(), l, *req.Headed); err != nil {
+			l.opMu.Unlock()
+			_ = s.closeLease(l.ID)
+			writeResponse(w, http.StatusBadGateway, Response{Status: "error", Code: "CHROME_LAUNCH_FAILED", Message: "could not switch browser visibility"})
+			return
+		}
+	}
+	assessment := s.assessResponseUntil(r.Context(), l, 5*time.Second)
+	if assessment = s.ensureLoginVisible(r.Context(), l, assessment); assessment.Status != "ready" {
 		l.opMu.Unlock()
-		if assessment.Code == "CHROME_EXITED" {
+		if shouldCloseAfterResponse(assessment) {
 			_ = s.closeLease(l.ID)
 		}
-		writeResponse(w, http.StatusConflict, assessment)
+		status := http.StatusConflict
+		if assessment.Code == "CHROME_LAUNCH_FAILED" {
+			status = http.StatusBadGateway
+		}
+		writeResponse(w, status, assessment)
 		return
 	}
 	timeout := time.Duration(req.TimeoutMS) * time.Millisecond
@@ -453,8 +510,9 @@ func (s *Service) handleExecute(w http.ResponseWriter, r *http.Request, leaseID 
 		return
 	}
 	s.touch(l)
+	response := responseForLease(l, "ok", output)
 	l.opMu.Unlock()
-	writeResponse(w, http.StatusOK, Response{Status: "ok", LeaseID: l.ID, Output: output})
+	writeResponse(w, http.StatusOK, response)
 }
 
 func (s *Service) handleClose(w http.ResponseWriter, r *http.Request, leaseID string) {
@@ -483,28 +541,74 @@ func (s *Service) ownedLease(r *http.Request, leaseID string) (*lease, bool) {
 
 func (s *Service) assessResponse(ctx context.Context, l *lease) Response {
 	if l.Chrome == nil || l.Chrome.Process == nil {
-		return Response{Status: "not_ready", LeaseID: l.ID, Message: "浏览器正在启动，请保留窗口并稍后重试。"}
+		response := responseForLease(l, "not_ready", "")
+		response.Message = "浏览器正在启动，请稍后重试。"
+		return response
 	}
 	if !processAlive(l.ChromePID) {
 		l.State = StateFailed
-		return Response{Status: "error", LeaseID: l.ID, Code: "CHROME_EXITED", Message: "browser window was closed"}
+		response := responseForLease(l, "error", "")
+		response.Code, response.Message = "CHROME_EXITED", "browser window was closed"
+		return response
 	}
 	assessment, err := assessPage(ctx, l.CDPPort, l.Origin)
 	s.touch(l)
 	if err != nil {
 		l.State = StateWaiting
-		return Response{Status: "not_ready", LeaseID: l.ID, Message: "浏览器页面尚未就绪，请保留窗口并稍后重试。"}
+		response := responseForLease(l, "not_ready", "")
+		response.Message = "浏览器页面尚未就绪，请稍后重试。"
+		return response
 	}
 	if assessment.status == "ready" {
 		l.State = StateReady
-		return Response{Status: "ready", LeaseID: l.ID}
+		return responseForLease(l, "ready", "")
 	}
 	l.State = StateWaiting
 	message := "浏览器页面尚未就绪，请在已打开的浏览器中完成登录后继续。"
 	if assessment.status == "not_ready" {
-		message = "浏览器页面尚未加载完成，请保留窗口并稍后重试。"
+		message = "浏览器页面尚未加载完成，请稍后重试。"
+		if l.Headed {
+			message = "浏览器页面尚未加载完成，请保留窗口并稍后重试。"
+		}
 	}
-	return Response{Status: assessment.status, LeaseID: l.ID, Message: message}
+	response := responseForLease(l, assessment.status, "")
+	response.Message = message
+	return response
+}
+
+// ensureLoginVisible enforces the security invariant that interactive login is
+// never left in a headless browser. The same persistent profile and lease are
+// retained while Chrome is restarted in headed mode.
+func (s *Service) ensureLoginVisible(ctx context.Context, l *lease, response Response) Response {
+	if response.Status != "login_required" || l.Headed {
+		return response
+	}
+	if err := s.restartChrome(ctx, l, true); err != nil {
+		return responseErrorForLease(l, "CHROME_LAUNCH_FAILED", "could not open a visible browser for login")
+	}
+	return s.assessResponseUntil(ctx, l, 5*time.Second)
+}
+
+func requestedHeaded(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func responseForLease(l *lease, status, output string) Response {
+	headed := l.Headed
+	return Response{Status: status, LeaseID: l.ID, Headed: &headed, Output: output}
+}
+
+func responseErrorForLease(l *lease, code, message string) Response {
+	response := responseForLease(l, "error", "")
+	response.Code, response.Message = code, message
+	return response
+}
+
+func shouldCloseAfterResponse(response Response) bool {
+	return response.Code == "CHROME_EXITED" || response.Code == "CHROME_LAUNCH_FAILED"
 }
 
 func (s *Service) assessResponseUntil(ctx context.Context, l *lease, wait time.Duration) Response {
@@ -546,23 +650,7 @@ func (s *Service) closeLease(id string) error {
 
 	l.opMu.Lock()
 	defer l.opMu.Unlock()
-	var closeErr error
-	if l.CDPPort > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = closeBrowser(ctx, l.CDPPort)
-		cancel()
-	}
-	if l.Chrome != nil && l.Chrome.Process != nil {
-		select {
-		case <-l.exit:
-		case <-time.After(3 * time.Second):
-			closeErr = l.Chrome.Process.Kill()
-			select {
-			case <-l.exit:
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}
+	closeErr := s.stopChrome(l)
 	raw, readErr := os.ReadFile(l.LockPath)
 	var record lockRecord
 	if readErr == nil && json.Unmarshal(raw, &record) == nil && record.InstanceID == s.instanceID && record.LeaseID == l.ID {
@@ -606,6 +694,15 @@ func decodeJSON(r *http.Request, target any) error {
 	decoder := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON request")
+	}
+	return nil
+}
+
+func decodeOptionalJSON(r *http.Request, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxRequestBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("invalid JSON request")
 	}
 	return nil
