@@ -1,0 +1,7 @@
+{
+  "name": "Memory",
+  "version": "1.2.0",
+  "tool_name": "codingto_memory",
+  "description": "三层轻量记忆：稳定的 User Memory、按需检索的 Project History，以及任务完成时去重追加到工作区 AGENTS.md 的 Project Rules。User Memory 支持保留现有内容的增删更新。",
+  "tool_description": "Persist stable user preferences with safe incremental updates, search or write project history on demand, and persist concise project rules to the workspace AGENTS.md."
+}

@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const DCG_DIALOG_PREFIX = '__CODINGTO_DCG_CONFIRM__:';
+const DCG_META_PREFIX = '__CODINGTO_DCG_META__:';
 const DCG_TIMEOUT_MS = 800;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const DCG_DISABLE_MARKER_FILE = 'dcg_disabled';
@@ -32,9 +33,20 @@ function sessionDcgDisabled(): boolean {
 type DCGDecision = {
   deny: boolean;
   reason: string;
+  explanation: string;
   ruleId: string;
+  packId: string;
+  patternName: string;
+  severity: string;
+  mode: string;
+  source: string;
   remediation: string;
 };
+
+const allowDecision = (): DCGDecision => ({
+  deny: false, reason: '', explanation: '', ruleId: '', packId: '',
+  patternName: '', severity: '', mode: '', source: '', remediation: '',
+});
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -63,7 +75,7 @@ function dcgDecision(binary: string, command: string): Promise<DCGDecision> {
       child.kill();
       // dcg is a guardrail rather than the command executor. A broken or slow
       // installation fails open so it cannot freeze every shell operation.
-      finish({ deny: false, reason: '', ruleId: '', remediation: '' });
+      finish(allowDecision());
     }, DCG_TIMEOUT_MS);
     timer.unref?.();
 
@@ -73,12 +85,12 @@ function dcgDecision(binary: string, command: string): Promise<DCGDecision> {
     });
     child.on('error', () => {
       clearTimeout(timer);
-      finish({ deny: false, reason: '', ruleId: '', remediation: '' });
+      finish(allowDecision());
     });
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code !== 1) {
-        finish({ deny: false, reason: '', ruleId: '', remediation: '' });
+        finish(allowDecision());
         return;
       }
       let parsed: any = {};
@@ -86,11 +98,36 @@ function dcgDecision(binary: string, command: string): Promise<DCGDecision> {
       finish({
         deny: true,
         reason: text(parsed?.reason) || text(parsed?.explanation) || 'dcg 将此命令识别为危险命令。',
+        explanation: text(parsed?.explanation),
         ruleId: text(parsed?.rule_id),
+        packId: text(parsed?.pack_id),
+        patternName: text(parsed?.pattern_name),
+        severity: text(parsed?.severity),
+        mode: text(parsed?.mode) || text(parsed?.decision),
+        source: text(parsed?.source),
         remediation: text(parsed?.remediation) || text(parsed?.suggestion),
       });
     });
   });
+}
+
+// severityAction returns the configured disposition for a dcg severity level
+// ("allow" | "ask" | "deny"; missing levels default to "ask"). The map lives
+// in a JSON file written by the CodingTo backend (CODINGTO_DCG_POLICY_FILE)
+// and is re-read on every bash call, so policy changes apply immediately.
+function severityAction(severity: string): string {
+  const file = text(process.env.CODINGTO_DCG_POLICY_FILE);
+  if (!file) return 'ask';
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    if (parsed && typeof parsed === 'object') {
+      const action = text(parsed[severity]);
+      if (action === 'allow' || action === 'deny' || action === 'ask') return action;
+    }
+  } catch {
+    /* missing or broken policy file falls back to ask */
+  }
+  return 'ask';
 }
 
 export default function codingToDCGGuard(pi: any) {
@@ -105,6 +142,15 @@ export default function codingToDCGGuard(pi: any) {
     const decision = await dcgDecision(binary, command);
     if (!decision.deny) return;
 
+    const action = severityAction(decision.severity);
+    if (action === 'allow') return;
+    if (action === 'deny') {
+      return {
+        block: true,
+        reason: `危险命令已被拒绝（${decision.severity || 'unknown'} 级策略）：${decision.reason}${decision.ruleId ? ` [${decision.ruleId}]` : ''}`,
+      };
+    }
+
     const details = [
       `危险命令：\n${commandPreview(command)}`,
       `检测原因：${decision.reason}`,
@@ -112,6 +158,18 @@ export default function codingToDCGGuard(pi: any) {
       decision.remediation ? `建议：${decision.remediation}` : '',
       '',
       '是否同意执行此命令？',
+      `${DCG_META_PREFIX}${JSON.stringify({
+        command: commandPreview(command),
+        reason: decision.reason,
+        explanation: decision.explanation,
+        ruleId: decision.ruleId,
+        packId: decision.packId,
+        patternName: decision.patternName,
+        severity: decision.severity,
+        mode: decision.mode,
+        source: decision.source,
+        remediation: decision.remediation,
+      })}`,
     ].filter(Boolean).join('\n\n');
     const approved = await ctx?.ui?.confirm?.(
       `${DCG_DIALOG_PREFIX}危险命令需要授权`,

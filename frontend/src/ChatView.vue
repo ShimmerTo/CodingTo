@@ -61,7 +61,7 @@ const emit = defineEmits([
   'compact', 'respond-extension', 'ack-extension', 'clear-error',
   'respond-subagent-dialog', 'ack-subagent-dialog',
   'update-thinking-open', 'refresh-session-changes', 'edit-pending', 'delete-pending',
-  'artifact-error'
+  'artifact-error', 'open-settings'
 ])
 
 const rightSidebarOpen = ref(false)
@@ -222,6 +222,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @open-change-file="openChangedFile"
         @open-git-diff="openFileDiff"
         @preview-image="previewImage = $event"
+        @open-settings="emit('open-settings', $event)"
       />
 
       <ChatComposer

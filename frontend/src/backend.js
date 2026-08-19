@@ -6,11 +6,12 @@ import { DEFAULT_STEWARD_PERSONA } from './stewardState.js'
 const fallback = {
   config: {
     configVersion: 5,
-    preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified' },
+    preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified', conciseChat: false },
     defaultProvider: 'openai',
     defaultModel: 'gpt-5.6-terra',
     lastEnvironment: '',
     sessionDir: 'C:\\Users\\asus\\.codingto\\sessions',
+    memory: { projectHistoryLimit: 100 },
     providers: [
       {
         name: 'openai',
@@ -37,11 +38,12 @@ const fallback = {
       figma: { enabled: false, activeAuthorizationId: '', authorizations: [] }
     },
     activeAgentId: 'default',
-    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
+    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, memory: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
     environments: [],
     activeEnvId: '',
     sshConfigs: [],
-    userProfile: { name: '', avatar: '' }
+    userProfile: { name: '', avatar: '' },
+    dcgSettings: { severityPolicy: { critical: 'ask', high: 'ask', medium: 'allow', low: 'allow' }, workspaceAllow: false }
   },
   providerPresets: [],
   os: 'browser',
@@ -101,7 +103,7 @@ export async function installPi() {
   fallback.piInstalled = true
   fallback.piPath = 'pi'
   if (!fallback.config.agents.length) {
-    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
+    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, memory: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
     fallback.config.activeAgentId = 'default'
   }
   if (!fallback.config.environments) fallback.config.environments = []
@@ -123,6 +125,64 @@ export async function saveConfig(config) {
   fallback.config = next
   saveDevConfig()
   return structuredClone(fallback.config)
+}
+
+let devUserMemory = ''
+const devDefaultPlanPrompt = `# CodingTo Plan Policy
+
+Before any operation that changes state, present the complete plan with codingto_plan_present and wait for confirmed === true. Update progress with codingto_plan_update.`
+const devDefaultMemoryPrompt = `# CodingTo Memory Policy
+
+Memory has three layers. Save User Memory only for inferred stable, cross-project preferences or preferences repeated across multiple tasks. Never save temporary requests, customer quotes, secrets, or facts readable from code. Prefer codingto_memory_patch_user so unrelated existing preferences are preserved; use full replacement only when the user explicitly asks for it. Project Rules in AGENTS.md remain for durable project caveats, pitfalls, and conventions.`
+let devPlanPrompt = null
+let devMemoryPrompt = null
+
+export async function getPlanConfig() {
+  if (isWails()) return App.GetPlanConfig()
+  return { prompt: devPlanPrompt ?? devDefaultPlanPrompt, defaultPrompt: devDefaultPlanPrompt, isDefault: devPlanPrompt === null, maxPromptBytes: 32768 }
+}
+
+export async function savePlanConfig(payload) {
+  if (isWails()) return App.SavePlanConfig(payload)
+  devPlanPrompt = payload?.restoreDefault ? null : String(payload?.prompt || '').trim()
+  return getPlanConfig()
+}
+
+export async function getMemoryConfig() {
+  if (isWails()) return App.GetMemoryConfig()
+  return {
+    userMemory: devUserMemory,
+    userMemoryPath: 'C:\\Users\\asus\\.codingto\\memory\\user-memory.md',
+    projectHistoryLimit: fallback.config.memory?.projectHistoryLimit || 100,
+    maxUserMemoryBytes: 8192,
+    prompt: devMemoryPrompt ?? devDefaultMemoryPrompt,
+    defaultPrompt: devDefaultMemoryPrompt,
+    promptIsDefault: devMemoryPrompt === null,
+    maxPromptBytes: 32768,
+  }
+}
+
+export async function saveMemoryConfig(payload) {
+  if (isWails()) return App.SaveMemoryConfig(payload)
+  devUserMemory = String(payload?.userMemory || '').trim()
+	devMemoryPrompt = payload?.restorePromptDefault ? null : String(payload?.prompt || '').trim()
+  fallback.config.memory = { projectHistoryLimit: Math.max(1, Math.min(10000, Number(payload?.projectHistoryLimit) || 100)) }
+  saveDevConfig()
+  return getMemoryConfig()
+}
+
+let devSessionStartupPrompt = null
+const devDefaultSessionStartupPrompt = '- 当开始执行任务以及确定或改变方向时，需要在思考结束后使用中文描述接下来的思路或方向\n- 主动加载项目根目录 AGENTS.md作为遵守的规则或注意项\n- 思考结果或过程请使用中文'
+
+export async function getSessionStartupPromptConfig() {
+  if (isWails()) return App.GetSessionStartupPromptConfig()
+  return { prompt: devSessionStartupPrompt ?? devDefaultSessionStartupPrompt, defaultPrompt: devDefaultSessionStartupPrompt, isDefault: devSessionStartupPrompt === null, maxPromptBytes: 32768 }
+}
+
+export async function saveSessionStartupPromptConfig(payload) {
+  if (isWails()) return App.SaveSessionStartupPromptConfig(payload)
+  devSessionStartupPrompt = payload?.restoreDefault ? null : String(payload?.prompt || '').trim()
+  return getSessionStartupPromptConfig()
 }
 
 const mockBrowserProfiles = new Map()
@@ -185,7 +245,7 @@ export async function renameBrowserProfile(profileId, newName) {
 
 export async function deleteAgent(id) {
   if (isWails()) return App.DeleteAgent(id)
-  if (fallback.config.activeAgentId === id) throw new Error('the default agent cannot be deleted')
+  if (fallback.config.agents.length <= 1) throw new Error('at least one agent is required')
   const index = fallback.config.agents.findIndex(agent => agent.id === id)
   if (index < 0) throw new Error(`agent not found: ${id}`)
   fallback.config.agents.splice(index, 1)
@@ -232,6 +292,21 @@ export async function startPrompt(request) {
       title: '__CODINGTO_PLAN_CONFIRM__:确认执行以上计划？',
       message: '计划：复现测试 共 6 步，请于底部计划面板核对后确认。',
     }), 400)
+    return
+  }
+  if (String(request.message || '').trim() === '__preview_dcg__') {
+    const dcgMeta = {
+      command: 'git reset --hard HEAD~1',
+      reason: "git reset --hard destroys uncommitted changes. Use 'git stash' first.",
+      explanation: "git reset --hard discards all uncommitted changes in the working directory and staging area. Changes that were never committed may not be recoverable.",
+      ruleId: 'core.git:reset-hard', packId: 'core.git', patternName: 'reset-hard',
+      severity: 'critical', mode: 'deny', source: 'pack', remediation: '先执行 git stash 保存修改，或使用 git reset --soft / --mixed。',
+    }
+    scheduleMockPromptEvent(sessionId, () => emitSessionEvent({
+      type: 'extension_ui_request', id: 'preview-dcg-confirm', method: 'confirm',
+      title: '__CODINGTO_DCG_CONFIRM__:危险命令需要授权',
+      message: `危险命令：\ngit reset --hard HEAD~1\n\n检测原因：${dcgMeta.reason}\n\n规则：${dcgMeta.ruleId}\n\n建议：${dcgMeta.remediation}\n\n是否同意执行此命令？\n\n__CODINGTO_DCG_META__:${JSON.stringify(dcgMeta)}`,
+    }), 200)
     return
   }
   const text = request.mode === 'plan'
@@ -344,6 +419,15 @@ export async function createSession(request) {
   mockSessions.unshift(session)
   mockSessionMessages.set(session.id, [])
   return structuredClone(session)
+}
+
+export async function updateSessionModel(sessionId, provider, model) {
+  if (isWails()) return App.UpdateSessionModel(sessionId, provider, model)
+  const session = mockSessions.find(item => item.id === sessionId)
+  if (session) {
+    session.provider = provider
+    session.model = model
+  }
 }
 
 export async function getSessionHistory(id) {
@@ -521,11 +605,11 @@ export async function stewardDeleteSession(sessionId) {
 }
 
 const mockBuiltinCatalog = [
-  { key: 'browser-profile', name: 'Browser Profile', description: 'Manage reusable authenticated browser profiles for this agent.', required: false, currentVersion: '6.0.0' },
-  { key: 'document', name: 'Document', description: 'Inspect, search, create, and distribute local documents.', required: false, currentVersion: '1.0.0' },
-  { key: 'plan', name: 'Plan Mode', description: 'Present and track an execution plan before making changes.', required: false, currentVersion: '1.0.1' },
-  { key: 'skills-list', name: 'Skills List', description: 'List every skill available to the current isolated agent.', required: true, currentVersion: '1.0.0' },
-  { key: 'subagent', name: 'Subagent', description: 'Run authorized CodingTo agents in the background and receive their results automatically.', required: false, currentVersion: '1.1.0' },
+  { key: 'browser-profile', name: 'Browser Profile', description: 'Manage reusable authenticated browser profiles for this agent.', currentVersion: '6.0.0' },
+  { key: 'document', name: 'Document', description: 'Inspect, search, create, and distribute local documents.', currentVersion: '1.0.0' },
+  { key: 'plan', name: 'Plan Mode', description: 'Present and track an execution plan before making changes.', currentVersion: '1.0.1' },
+  { key: 'skills-list', name: 'Skills List', description: 'List every skill available to the current isolated agent.', currentVersion: '1.0.0' },
+  { key: 'subagent', name: 'Subagent', description: 'Run authorized CodingTo agents in the background and receive their results automatically.', currentVersion: '1.1.0' },
 ]
 
 const mockExtensions = {
@@ -601,6 +685,22 @@ export async function getExtensions() {
     ]
   }
   return snapshot
+}
+
+const mockDcgSettings = {
+  severityPolicy: { critical: 'ask', high: 'ask', medium: 'allow', low: 'allow' },
+  workspaceAllow: false,
+}
+
+export async function getDcgSettings() {
+  if (isWails()) return App.GetDCGSettings()
+  return structuredClone(mockDcgSettings)
+}
+
+export async function saveDcgSettings(settings) {
+  if (isWails()) return App.SaveDCGSettings(settings || {})
+  Object.assign(mockDcgSettings, structuredClone(settings || {}))
+  return structuredClone(mockDcgSettings)
 }
 
 export async function getAgentExtensions(agentId) {
@@ -912,6 +1012,15 @@ export function openSessionArtifact(path) {
   if (url) return openExternal(url)
 }
 
+export function openSessionWorkspaceFile(path, sessionId) {
+  if (!path || !sessionId) return
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.OpenSessionWorkspaceFile', Number(sessionId), path)
+  }
+  const url = localFileURL(path)
+  if (url) return openExternal(url)
+}
+
 // Save the file into the OS Downloads folder and open it. The backend derives
 // trusted workspace and artifact roots from sessionId.
 export async function downloadSessionArtifact(path, sessionId) {
@@ -920,6 +1029,36 @@ export async function downloadSessionArtifact(path, sessionId) {
   const url = localFileURL(path)
   if (url) return openExternal(url)
   return null
+}
+
+// --- DB Security Gateway ---
+// 连接的增删改查随整体配置走 SaveConfig（密码已脱敏，空密码=不修改）；
+// 这里只提供测试连接与审计日志两个按需接口。
+export async function testDBConnection(connection) {
+  if (isWails()) return Call.ByName('codingto/internal/app.App.TestDBConnection', { connection })
+  return { ok: false, message: 'Browser dev mode does not support DB connections' }
+}
+
+// --- SSH 配置的按需接口 ---
+// SSH 配置增删改查随整体配置走 SaveConfig；测试连接与选择密钥文件是按需接口。
+export async function testSSHConnection(config) {
+  if (isWails()) {
+    console.log('[testSSHConnection] call.ByName start', config?.address)
+    const r = await Call.ByName('codingto/internal/app.App.TestSSHConnection', { config })
+    console.log('[testSSHConnection] call.ByName returned', r)
+    return r
+  }
+  return { ok: false, message: 'Browser dev mode does not support SSH connections' }
+}
+
+export async function chooseSSHKeyFile() {
+  if (isWails()) return Call.ByName('codingto/internal/app.App.ChooseSSHKeyFile')
+  return { path: '', content: '' }
+}
+
+export async function getDBAuditLogs(connectionId = '', limit = 20) {
+  if (isWails()) return Call.ByName('codingto/internal/app.App.GetDBAuditLogs', connectionId, limit)
+  return []
 }
 
 const mockListeners = new Map()

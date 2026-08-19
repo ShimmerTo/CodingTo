@@ -510,6 +510,33 @@ export function readToolMeta(message) {
   return { path, params }
 }
 
+// 基础 read/edit 工具的路径用于标题栏里的“打开文件”交互。只识别明确的
+// 文件工具，避免把 bash 的 cwd、浏览器 URL 等普通 path 参数误当成本地文件。
+export function toolFilePath(message) {
+  const name = toolName(message)
+  if (READ_TOOL_NAMES.test(name)) {
+    const input = normalizeReadInput(message)
+    return READ_PATH_KEYS.map(key => input[key]).find(value => typeof value === 'string' && value.trim())?.trim() || ''
+  }
+  if (!/(?:^|[_.:/-])edit(?:$|[_.:/-])/i.test(name)) return ''
+
+  const diff = toolEditDiff(message)
+  const diffPath = diff?.edits?.find(edit => edit.path)?.path
+  if (diffPath) return diffPath
+
+  let input = normalizedInput(message)
+  for (let depth = 0; depth < 3; depth += 1) {
+    input = asObject(input)
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return ''
+    const isGateway = ['tool', 'toolName', 'tool_name'].some(key => Object.hasOwn(input, key))
+    if (!isGateway || !Object.hasOwn(input, 'args')) break
+    input = input.args
+  }
+  input = asObject(input)
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return ''
+  return READ_PATH_KEYS.map(key => input[key]).find(value => typeof value === 'string' && value.trim())?.trim() || ''
+}
+
 // 读取工具的输出常被包成 { content: [{ type, text|data, ... }] } 的 JSON。
 // 这里把内容拆成文本块 / 图片块，避免把 JSON 骨架展示出来，
 // 也不会丢失调 type 为非 text 的内容（如 image）。

@@ -44,8 +44,10 @@ func composeResult(event map[string]any, title string) (string, string) {
 		lines = append(lines, "❓ 问题："+question)
 	}
 
-	switch eventType {
-	case "error":
+	// 会话最终失败（error 事件，或管家标记的 failed）：明确上报失败并附带真实
+	// 错误信息，绝不把最后一条可用文本当作成功结果回传。
+	failed := eventType == "error" || str(event["status"]) == "failed" || str(event["errorMessage"]) != ""
+	if failed {
 		status = "failed"
 		lines = append(lines, "❌ 任务失败")
 		if msg := str(event["errorMessage"]); msg != "" {
@@ -53,15 +55,11 @@ func composeResult(event map[string]any, title string) (string, string) {
 		} else if msg := str(event["message"]); msg != "" {
 			lines = append(lines, msg)
 		}
-	case "agent_settled":
+	} else {
 		lines = append(lines, "✅ 任务完成")
-		// fall through to extract the final message text if present
-	default:
-		lines = append(lines, "✅ 任务完成")
-	}
-
-	if text := extractFinalMessage(event); text != "" {
-		lines = append(lines, text)
+		if text := extractFinalMessage(event); text != "" {
+			lines = append(lines, text)
+		}
 	}
 
 	summary := strings.TrimSpace(strings.Join(lines, "\n"))

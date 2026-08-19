@@ -1,4 +1,21 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { readFile } from 'node:fs/promises';
+
+const DEFAULT_PLAN_PROMPT = `# CodingTo Plan Policy
+
+在执行任何会修改系统状态的操作之前，必须先征求用户确认。
+
+- 涉及改动的操作包括但不限于：编辑或写入文件、执行会产生副作用的终端命令、git 写入，以及调用会改变外部状态的接口。
+- 执行前先调用 codingto_plan_present，把完整有序的执行计划展示到计划面板，并等待 confirmed === true。
+- 不要在聊天回复中重复输出编号计划；计划由工具统一渲染。
+- confirmed === false 表示用户取消：立即停止，不继续执行，也不要自动再次展示计划。
+- 每完成或重新打开一个步骤，调用 codingto_plan_update，使计划面板与实际进度一致。`;
+
+async function planPrompt() {
+  const file = String(process.env.CODINGTO_PLAN_PROMPT_PATH || '').trim();
+  if (!file) return DEFAULT_PLAN_PROMPT;
+  try { return (await readFile(file, 'utf8')).trim(); } catch { return DEFAULT_PLAN_PROMPT; }
+}
 
 // =============================================================================
 // Plan Mode（CodingTo 内置扩展）
@@ -65,12 +82,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'codingto_plan_present',
     description: [
-      '在执行任何「会产生改动」的操作前，先向用户展示执行计划并等待确认。',
-      '行为约束：在调用任何会修改状态的工具（文件编辑/写入、bash 命令、git 写入、接口写入等）之前，',
-      '你必须先调用 codingto_plan_present 给出完整有序步骤，并等待用户确认（confirmed === true）。',
-      '不要在聊天回复里用编号列表重复打印计划——工具会把它渲染到底部计划面板。',
-      '仅在 confirmed === true 时继续逐步执行；若用户拒绝，应停下来询问修订后的需求。',
-      '返回 { confirmed: boolean, plan: PlanStep[] }。',
+      '展示有序计划并等待用户确认。',
+      '返回 { confirmed: boolean, plan: PlanStep[] }；confirmed === false 时还会返回 cancelled: true。',
     ].join(' '),
     parameters: {
       type: 'object',
@@ -158,8 +171,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'codingto_plan_update',
     description: [
-      '某一步骤执行完成后，更新底部计划面板的完成状态。',
-      '每完成（或重开）一个计划步骤都应调用本工具，使面板进度与实际情况一致。',
+      '更新已有计划中一个步骤的完成状态。',
       'status 传 "done" 标记该步为已完成（☑），传 "pending" 重新置为待办（☐）。',
     ].join(' '),
     parameters: {
@@ -195,23 +207,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---------------------------------------------------------------------------
-  // 每次请求（agent 运行）前自动注入行为约束：改动前必须出计划并经用户确认。
-  // before_agent_start 在每轮用户输入触发 agent 前都会触发，因此提示词对每一次
-  // 请求都生效，不依赖模型是否“主动”调用工具。
+  // 每次请求前读取全局行为提示词；覆盖文件不存在时使用内置默认值。
+  // 工具参数和返回格式仍固定在上面的 schema / execute 中，用户配置不会破坏协议。
   // ---------------------------------------------------------------------------
   pi.on('before_agent_start', async () => {
+	const prompt = await planPrompt();
+	if (!prompt) return;
     return {
       message: {
         customType: 'codingto-plan-policy',
         display: false,
-        content: [
-          '[计划策略 / Plan Policy]',
-          '在执行任何会修改系统状态的操作之前，你必须先征求用户确认：',
-          '- 涉及改动的操作包括但不限于：编辑或写入文件、执行 bash/终端命令、git 提交或推送、调用会产生副作用的接口等。',
-          '- 执行前请先调用 codingto_plan_present 工具，把完整有序的执行计划展示到底部计划面板，并等待用户确认（confirmed === true）。',
-          '- 切勿在未经确认的情况下直接执行改动；若 confirmed === false，表示用户取消了本次对话，必须立即停止，不得解释为继续，也不得再次展示计划。',
-          '- 每完成一个计划步骤，调用 codingto_plan_update 将其标记为已完成（☑），保持底部计划面板进度与实际情况一致。',
-        ].join('\n'),
+        content: prompt,
       },
     };
   });

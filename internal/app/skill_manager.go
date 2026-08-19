@@ -273,6 +273,9 @@ func (a *App) InstallSkills(req InstallSkillsRequest) ([]SkillInfo, error) {
 				return nil, fmt.Errorf("package %s contains no valid SKILL.md", source)
 			}
 		}
+		if err := a.enableBuiltinForAgents(ids, "skills-list"); err != nil {
+			return nil, fmt.Errorf("enable Skills List extension: %w", err)
+		}
 		return a.ListSkills()
 	}
 	var data []byte
@@ -335,6 +338,9 @@ func (a *App) InstallSkills(req InstallSkillsRequest) ([]SkillInfo, error) {
 			}
 		}
 	}
+	if err := a.enableBuiltinForAgents(ids, "skills-list"); err != nil {
+		return nil, fmt.Errorf("enable Skills List extension: %w", err)
+	}
 	return a.ListSkills()
 }
 
@@ -369,6 +375,9 @@ func (a *App) EditSkill(req EditSkillRequest) ([]SkillInfo, error) {
 				_, _ = a.UninstallAgentExtension(AgentExtensionKeyRequest{AgentID: agent.ID, Key: item.Source})
 			}
 		}
+		if err := a.enableBuiltinForAgents(ids, "skills-list"); err != nil {
+			return nil, fmt.Errorf("enable Skills List extension: %w", err)
+		}
 		return a.ListSkills()
 	}
 	// managed（zip/url）：以中央仓库为准，更新元数据后重新部署到各 agent。
@@ -402,6 +411,9 @@ func (a *App) EditSkill(req EditSkillRequest) ([]SkillInfo, error) {
 		if err := copyManagedSkill(rdir, profile, req.LoadMode, req.SkillID); err != nil {
 			return nil, err
 		}
+	}
+	if err := a.enableBuiltinForAgents(ids, "skills-list"); err != nil {
+		return nil, fmt.Errorf("enable Skills List extension: %w", err)
 	}
 	return a.ListSkills()
 }

@@ -2,7 +2,8 @@
    name (hover -> directory), source badge and description stay in sync. */
 
 .skill-card__body { flex: 1; min-width: 0; }
-.skill-card__body header { display: flex; align-items: center; gap: 8px; }
+.skill-card__body header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.skill-card__title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .skill-card__name {
   margin: 0;
   font-size: var(--fs-14);

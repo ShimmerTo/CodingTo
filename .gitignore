@@ -34,6 +34,10 @@ frontend/bindings/
 # information for Eclipse / Flash Builder.
 *test.go
 *test.js
+# Keep focused runtime/security regressions that are part of the application source.
+!internal/app/agent_watchdog_test.go
+!internal/app/open_workspace_file_test.go
+!internal/app/session_cleanup_test.go
 /.workbuddy/
 /.codebuddy/
 /test/

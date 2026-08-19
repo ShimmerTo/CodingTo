@@ -103,10 +103,8 @@ type AgentService struct {
 	// still-running bash command is aborted via Pi's abort_bash RPC so a wedged
 	// command cannot stall the agent forever. If the runtime fails to report the
 	// tool end promptly, a short escalation grace period kills the Pi process tree.
-	toolWatchdogTimer    *time.Timer
+	toolWatchdogs        map[string]*toolWatchdogState
 	toolWatchdogToken    uint64
-	toolWatchdogName     string
-	toolWatchdogToolID   string
 	toolExecutionTimeout time.Duration
 	// toolWatchdogAbortGrace is injectable for tests; production uses the
 	// package default. It allows abort_bash to complete normally before the

@@ -112,6 +112,7 @@
 .security-menu__item strong { font-size: var(--fs-13); font-weight: 600; }
 .security-menu__item small { color: var(--faint); font-size: var(--fs-12); line-height: 1.35; }
 .security-menu__hint { margin: 0; padding: 4px 6px; color: var(--muted); font-size: var(--fs-12); line-height: 1.55; }
+.security-menu__workspace-allow { margin: 0 0 3px; padding: 6px 9px; border: 1px solid color-mix(in srgb, var(--success) 30%, transparent); border-radius: 7px; color: var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); font-size: var(--fs-12); line-height: 1.5; }
 .security-menu__link { color: var(--link); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .security-menu__link:hover { color: var(--accent); }
 .selected-skill-chip { display: inline-flex; align-items: center; gap: 6px; max-width: calc(100% - 24px); margin: 8px 12px 0; padding: 5px 7px 5px 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); background: var(--surface-2); font-size: var(--fs-12); }

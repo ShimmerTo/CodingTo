@@ -9,8 +9,37 @@ const markdownRenderer = new MarkdownIt({
 // 文件名误判为网址（.md/.zip 均为真实 TLD），点击后跳到无效地址。
 markdownRenderer.linkify.set({ fuzzyLink: false })
 
-export function renderMarkdown(content) {
-  return markdownRenderer.render(String(content || ''))
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[character])
+}
+
+const codeCopyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>'
+
+function addCodeCopyButtons(html, labels) {
+  const copyLabel = escapeHtml(labels?.copy || 'Copy')
+  const copiedLabel = escapeHtml(labels?.copied || 'Copied')
+  // markdown-it escapes code content, so a generated code block cannot contain
+  // an unescaped </code>. Wrapping the rendered fence keeps this compatible
+  // with the existing v-html renderer and avoids reparsing Markdown per block.
+  return html.replace(/<pre><code(?: class="[^"]*")?>[\s\S]*?<\/code><\/pre>/g, block => (
+    `<div class="message-code-block">` +
+      `<button class="message-code-copy" type="button" data-code-copy ` +
+        `data-copy-label="${copyLabel}" data-copied-label="${copiedLabel}" ` +
+        `title="${copyLabel}" aria-label="${copyLabel}">${codeCopyIcon}</button>` +
+      block +
+    `</div>`
+  ))
+}
+
+export function renderMarkdown(content, options = {}) {
+  const html = markdownRenderer.render(String(content || ''))
+  return options.codeCopy ? addCodeCopyButtons(html, options.codeCopy) : html
 }
 
 export function imageSrc(image) {

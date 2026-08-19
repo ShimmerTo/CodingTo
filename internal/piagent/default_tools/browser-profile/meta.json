@@ -2,7 +2,6 @@
   "name": "Browser Profile",
   "version": "6.0.0",
   "tool_name": "codingto_browser_prepare",
-  "required": true,
   "description": "Browser Profile 登录态管理器：在需要登录的目标页面上，让用户选择同域 Profile 或由 Go 服务启动并持有可见 Chrome；支持内联新建 Profile（最多展示 20 个）。",
   "tool_description": "Browser Profile manager: select a same-origin Profile or create one inline, then let the Go service launch and hold a visible Chrome for login."
 }

@@ -15,16 +15,20 @@
 .plugin-icon { width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center; border: 1px solid var(--border-soft); border-radius: 10px; color: var(--muted); background: var(--surface-2); }
 .plugin-copy { flex: 1; min-width: 0; }
 .plugin-name { display: flex; align-items: center; gap: 7px; }
+.plugins-page .plugin-name { position: relative; justify-content: space-between; }
+.plugin-name__main { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .plugin-name strong { font-size: var(--fs-13); }
 .plugin-name small { color: var(--muted); font-size: var(--fs-13); }
+.plugin-name__label--installed { display: inline-flex; align-items: center; padding: 3px 8px; border: 1px solid var(--installed-tag-border); border-radius: 6px; color: var(--installed-tag-fg); background: var(--installed-tag-bg); }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #c5c5bf; }
 .status-dot.active { background: #39a56c; box-shadow: 0 0 0 3px rgba(57,165,108,.12); }
 .status-dot.missing { background: #d19a42; }
-.plugin-copy p { max-width: 640px; margin: 6px 0 0; color: var(--muted); font-size: var(--fs-13); line-height: 1.5; }
-.plugin-copy code { display: block; max-width: 620px; margin-top: 5px; overflow: hidden; color: var(--faint); font: var(--fs-12) "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-copy p { margin: 6px 0 0; color: var(--muted); font-size: var(--fs-13); line-height: 1.5; }
+.plugin-copy code { display: block; margin-top: 5px; overflow: hidden; color: var(--faint); font: var(--fs-12) "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .plugin-copy .plugin-error { color: var(--danger); }
-.plugin-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
-.plugin-actions button { white-space: nowrap; }
+.plugin-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.plugins-page .plugin-actions { position: absolute; right: 0; top: 50%; transform: translateY(-50%); visibility: hidden; opacity: 0; transition: opacity .15s; }
+.plugins-page .plugin-row:hover .plugin-actions { visibility: visible; opacity: 1; }
 .plugin-actions > a { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: var(--muted); }
 .plugin-actions > a:hover { color: var(--text); background: var(--hover); }
 .plugin-config { padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }

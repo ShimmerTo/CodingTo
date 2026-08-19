@@ -277,6 +277,23 @@ func (a *App) CreateSession(req CreateSessionRequest) (Session, error) {
 	return sessionFromStore(item), nil
 }
 
+// UpdateSessionModel 更新会话落库的 provider/model。用户在对话详情切换模型后
+// 同步会话模型，使旧会话续写（前端以 task.model 优先）与重新进入回显都使用
+// 新模型，而不是停留在创建会话时的默认模型。
+func (a *App) UpdateSessionModel(sessionID int64, provider, model string) error {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return fmt.Errorf("provider and model are required")
+	}
+	item, ok, err := a.store.Store().SessionByID(sessionID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("session not found")
+	}
+	return a.store.Store().UpdateSession(item.ID, map[string]any{"provider": provider, "model": model})
+}
+
 func (a *App) GetSessionHistory(id int64) (SessionHistory, error) {
 	item, ok, err := a.store.Store().SessionByID(id)
 	if err != nil {
@@ -907,6 +924,7 @@ func readSessionMessages(sessionDir string) []map[string]any {
 					messages = append(messages, map[string]any{
 						"id":   fmt.Sprintf("history-assistant-%d", len(messages)),
 						"role": "assistant", "content": "", "thinkingContent": "",
+						"thinking":  stringValue(update["type"]) != "text_delta",
 						"createdAt": recordedAt,
 					})
 					activeAssistant = len(messages) - 1
@@ -914,8 +932,10 @@ func readSessionMessages(sessionDir string) []map[string]any {
 				if stringValue(update["type"]) == "text_delta" {
 					messages[activeAssistant]["content"] = stringValue(messages[activeAssistant]["content"]) + stringValue(update["delta"])
 				} else if stringValue(update["type"]) == "thinking_delta" {
+					messages[activeAssistant]["thinking"] = true
 					messages[activeAssistant]["thinkingContent"] = stringValue(messages[activeAssistant]["thinkingContent"]) + stringValue(update["delta"])
 				} else if stringValue(update["type"]) == "thinking_start" {
+					messages[activeAssistant]["thinking"] = true
 					thinkingStartMs[activeAssistant] = recordedAt
 				}
 			case "toolcall_start", "tool_call_start", "toolcall_delta", "tool_call_delta", "toolcall_end", "tool_call_end":
@@ -989,7 +1009,7 @@ func readSessionMessages(sessionDir string) []map[string]any {
 				messages = append(messages, map[string]any{
 					"id":   fmt.Sprintf("history-assistant-%d", len(messages)),
 					"role": "assistant", "content": text, "thinkingContent": thinking,
-					"createdAt": recordedAt,
+					"thinking": thinking != "", "createdAt": recordedAt,
 				})
 				activeAssistant = len(messages) - 1
 			} else if activeAssistant >= 0 {
@@ -997,11 +1017,12 @@ func readSessionMessages(sessionDir string) []map[string]any {
 					messages[activeAssistant]["content"] = text
 				}
 				if thinking != "" {
+					messages[activeAssistant]["thinking"] = true
 					messages[activeAssistant]["thinkingContent"] = thinking
 				}
 			}
 			activeAssistant = -1
-			if msg := stringValue(event["errorMessage"]); msg != "" {
+			if msg := eventErrorMessage(event); msg != "" {
 				messages = append(messages, map[string]any{
 					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
 					"content": msg, "createdAt": recordedAt,
@@ -1010,7 +1031,7 @@ func readSessionMessages(sessionDir string) []map[string]any {
 		case "turn_end":
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
-			if msg := stringValue(event["errorMessage"]); msg != "" {
+			if msg := eventErrorMessage(event); msg != "" {
 				messages = append(messages, map[string]any{
 					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
 					"content": msg, "createdAt": recordedAt,
@@ -1026,7 +1047,7 @@ func readSessionMessages(sessionDir string) []map[string]any {
 			}
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
-			if msg := stringValue(event["errorMessage"]); msg != "" {
+			if msg := eventErrorMessage(event); msg != "" {
 				messages = append(messages, map[string]any{
 					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
 					"content": msg, "createdAt": recordedAt,
@@ -1052,6 +1073,72 @@ func readSessionMessages(sessionDir string) []map[string]any {
 		messages[activeAssistant]["live"] = true
 	}
 	return messages
+}
+
+// eventErrorMessage 提取终止性事件携带的模型/Provider 错误。Pi 把
+// message_end / turn_end 的错误写在 event["message"]["errorMessage"]，
+// 把 agent_end 的错误写在 messages[].errorMessage（或 changeSummary.status），
+// 顶层 errorMessage 也可能存在（error 事件）。只看顶层会漏掉真实失败，导致
+// 对话详情与机器人通知把失败会话当成成功。
+func eventErrorMessage(event map[string]any) string {
+	if msg := stringValue(event["errorMessage"]); msg != "" {
+		return msg
+	}
+	if msg := stringValue(mapValue(event["message"])["errorMessage"]); msg != "" {
+		return msg
+	}
+	if msgs, ok := event["messages"].([]any); ok {
+		for i := len(msgs) - 1; i >= 0; i-- {
+			m := mapValue(msgs[i])
+			if stringValue(m["role"]) != "assistant" {
+				continue
+			}
+			if msg := stringValue(m["errorMessage"]); msg != "" {
+				return msg
+			}
+		}
+	}
+	if msg := stringValue(event["error"]); msg != "" {
+		return msg
+	}
+	if msg := stringValue(mapValue(event["error"])["message"]); msg != "" {
+		return msg
+	}
+	switch stringValue(mapValue(event["changeSummary"])["status"]) {
+	case "error":
+		return "模型调用失败"
+	case "timeout":
+		return "执行超时"
+	case "interrupted":
+		return "会话被中断"
+	}
+	return ""
+}
+
+// lastSessionError 返回会话在 agent_settled 之前最后一次终止性事件
+// （message_end / turn_end / agent_end / error）携带的错误。只看最后一条
+// 终止记录，避免把中途失败、随后自动重试或后续回合成功恢复的会话误判为失败；
+// 会话正常结束时返回空串。供管家在会话收尾时区分"成功完成"与"最终失败"。
+func lastSessionError(sessionDir string) string {
+	file, err := os.Open(filepath.Join(sessionDir, sessionEventFile))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 160*1024*1024)
+	lastErr := ""
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		switch stringValue(event["type"]) {
+		case "message_end", "turn_end", "agent_end", "error":
+			lastErr = eventErrorMessage(event)
+		}
+	}
+	return lastErr
 }
 
 // lastAssistantContent 返回会话对话中最后一条 assistant 文本消息的正文，

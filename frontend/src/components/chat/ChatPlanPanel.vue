@@ -3,6 +3,8 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { CheckCircle2, ChevronDown, ChevronUp, KeyRound, ListTodo, ShieldAlert } from 'lucide-vue-next'
 import {
   browserProfileCreateTarget,
+  dcgDialogDetails,
+  dcgRulePresentation,
   extensionDialogTitle,
   isBrowserProfileCreateOption,
   isDCGConfirmationDialog,
@@ -32,6 +34,8 @@ const visibleDialogTitle = computed(() => extensionDialogTitle(props.dialog))
 // 计划确认弹窗：用于在 plan-todos 未就绪时展示缺失提示区，并禁用批准按钮。
 const isPlanDialog = computed(() => isPlanConfirmationDialog(props.dialog))
 const isDCGDialog = computed(() => isDCGConfirmationDialog(props.dialog))
+const dcgDetails = computed(() => dcgDialogDetails(props.dialog))
+const dcgPresentation = computed(() => dcgRulePresentation(dcgDetails.value, props.t.dcgApproveCommand === '同意执行' ? 'zh-CN' : 'en-US'))
 
 watch(() => props.dialog?.id, () => {
   responseValue.value = props.dialog?.prefill || ''
@@ -108,7 +112,7 @@ function selectOption(option, index) {
 </script>
 
 <template>
-  <section class="plan-panel">
+  <section class="plan-panel" :class="{ 'plan-panel--danger': isDCGDialog }">
     <div v-if="items.length && !isDCGDialog" class="plan-proposal">
       <div class="plan-proposal__head">
         <ListTodo :size="14" />
@@ -164,6 +168,28 @@ function selectOption(option, index) {
           <button v-else :disabled="dialog.saving" @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
         </div>
       </template>
+      <template v-else-if="isDCGDialog">
+        <strong><ShieldAlert :size="15" />{{ visibleDialogTitle }}</strong>
+        <div class="dcg-prompt__strategy">
+          <span class="dcg-prompt__badge">{{ dcgPresentation.severityLabel }}</span>
+          <span class="dcg-prompt__badge dcg-prompt__badge--mode">{{ dcgPresentation.modeLabel }}</span>
+          <div>
+            <strong>{{ dcgPresentation.ruleLabel }}</strong>
+            <small>{{ dcgPresentation.packLabel }}</small>
+          </div>
+        </div>
+        <dl class="dcg-prompt__details">
+          <div v-if="dcgDetails?.command" class="dcg-prompt__command"><dt>{{ t.dcgCommandLabel || '待执行命令' }}</dt><dd><code>{{ dcgDetails.command }}</code></dd></div>
+          <div v-if="dcgDetails?.reason"><dt>{{ t.dcgReasonLabel || 'DCG 原始判定原因' }}</dt><dd>{{ dcgDetails.reason }}</dd></div>
+          <div v-if="dcgDetails?.explanation && dcgDetails.explanation !== dcgDetails.reason"><dt>{{ t.dcgExplanationLabel || '规则说明' }}</dt><dd>{{ dcgDetails.explanation }}</dd></div>
+          <div v-if="dcgDetails?.remediation"><dt>{{ t.dcgRemediationLabel || '安全建议' }}</dt><dd>{{ dcgDetails.remediation }}</dd></div>
+          <div v-if="dcgDetails?.ruleId"><dt>{{ t.dcgRuleIdLabel || '规则 ID' }}</dt><dd><code>{{ dcgDetails.ruleId }}</code></dd></div>
+        </dl>
+        <div class="extension-prompt__actions">
+          <button class="primary primary--danger" @click="emit('respond', { confirmed: true })">{{ t.dcgApproveCommand }}</button>
+          <button @click="emit('respond', { confirmed: false })">{{ t.dcgRejectCommand }}</button>
+        </div>
+      </template>
       <template v-else>
       <strong><ShieldAlert v-if="isDCGDialog" :size="15" />{{ visibleDialogTitle }}</strong>
       <p v-if="dialog.message">{{ dialog.message }}</p>
@@ -178,8 +204,8 @@ function selectOption(option, index) {
         <button @click="emit('respond', { cancelled: true })">{{ t.cancel }}</button>
       </div>
       <div v-else-if="dialog.method === 'confirm'" class="extension-prompt__actions">
-        <button class="primary" :class="{ 'primary--danger': isDCGDialog }" :disabled="dialog.planMissing" @click="emit('respond', { confirmed: true })">{{ isDCGDialog ? t.dcgApproveCommand : (t.confirm || 'Confirm') }}</button>
-        <button @click="emit('respond', { confirmed: false })">{{ isDCGDialog ? t.dcgRejectCommand : t.cancel }}</button>
+        <button class="primary" :disabled="dialog.planMissing" @click="emit('respond', { confirmed: true })">{{ t.confirm || 'Confirm' }}</button>
+        <button @click="emit('respond', { confirmed: false })">{{ t.cancel }}</button>
       </div>
       <template v-else>
         <textarea v-model="responseValue" :placeholder="dialog.placeholder || ''" rows="4"></textarea>

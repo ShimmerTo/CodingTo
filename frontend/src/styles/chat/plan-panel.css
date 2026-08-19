@@ -1,9 +1,22 @@
 .plan-panel { width: fit-content; max-width: 60%; max-height: min(36vh, 320px); margin: 0 auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(20,20,18,.1); }
+.plan-panel--danger { width: min(760px, 92%); max-width: 92%; max-height: min(52vh, 520px); }
 .extension-prompt { flex: 0 0 auto; padding: 13px 14px; border-top: 1px solid var(--border-soft); background: var(--surface); }
 .extension-prompt > strong { display: block; margin-bottom: 5px; font-size: var(--fs-13); }
 .extension-prompt--danger { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; border-top: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 4%, var(--surface)); }
 .extension-prompt--danger > strong { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; color: var(--danger); }
 .extension-prompt--danger > p { min-height: 0; flex: 1 1 auto; overflow-y: auto; scrollbar-gutter: stable; white-space: pre-line; overflow-wrap: anywhere; }
+.dcg-prompt__strategy { display: flex; align-items: center; gap: 7px; margin: 4px 0 10px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.dcg-prompt__strategy > div { min-width: 0; display: grid; gap: 2px; }
+.dcg-prompt__strategy strong { overflow: hidden; color: var(--text); font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
+.dcg-prompt__strategy small { color: var(--muted); font-size: var(--fs-11); }
+.dcg-prompt__badge { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; color: #fff; background: var(--danger); font-size: var(--fs-11); font-weight: 650; }
+.dcg-prompt__badge--mode { color: color-mix(in srgb, var(--danger) 75%, var(--text)); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 30%, transparent); }
+.dcg-prompt__details { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; margin: 0; padding-right: 4px; overflow-y: auto; scrollbar-gutter: stable; }
+.dcg-prompt__details > div { display: grid; gap: 3px; }
+.dcg-prompt__details dt { color: var(--faint); font-size: var(--fs-11); font-weight: 650; }
+.dcg-prompt__details dd { margin: 0; color: var(--muted); font-size: var(--fs-12); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dcg-prompt__details code { padding: 2px 5px; border-radius: 5px; color: var(--text); background: var(--surface-2); font: var(--fs-11)/1.5 "SFMono-Regular", Consolas, monospace; }
+.dcg-prompt__command dd code { display: block; max-height: 90px; padding: 7px 8px; overflow: auto; white-space: pre-wrap; }
 .extension-prompt--danger > .extension-prompt__actions { flex: 0 0 auto; }
 .extension-prompt--credential { max-height: min(62vh, 600px); overflow-y: auto; }
 .extension-prompt--credential > strong { display: flex; align-items: center; gap: 7px; }

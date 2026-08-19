@@ -1,7 +1,6 @@
 {
   "name": "Skills List",
   "version": "1.0.0",
-  "required": true,
   "tool_name": "skills_list",
   "description": "列出当前隔离 Agent 可使用的全部 Skills，返回绝对路径、名称和描述。",
   "tool_description": "List every skill available to the current isolated agent with its absolute SKILL.md path, name, and description.",

@@ -95,6 +95,9 @@ const dcgPolicyEnabled = computed(() => {
 // 无法反映「该智能体是否开启 DCG」，会导致未开启的智能体被误判为已安装。
 const dcgActive = computed(() => Boolean(props.dcgStatus?.enabled))
 const dcgNotInstalled = computed(() => !dcgActive.value)
+// 「工作目录放行」开启时，当前工作空间内的危险命令被 allowlist 直接放行，
+// 在拦截菜单顶部提示，避免用户误以为拦截失效。
+const workspaceAllowActive = computed(() => Boolean(props.config?.dcgSettings?.workspaceAllow))
 
 function openPluginsPage() {
   emit('open-plugins')
@@ -512,6 +515,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
                   {{ t.securityPolicyMissingHint1 }}<a class="security-menu__link" @click.prevent="openPluginsPage">{{ t.securityPolicyMissingPlugin }}</a>{{ t.securityPolicyMissingHint2 }}<a class="security-menu__link" @click.prevent="openAgentExtensions">{{ t.securityPolicyMissingDcg }}</a>{{ t.securityPolicyMissingHint3 }}
                 </p>
                 <template v-else>
+                  <p v-if="workspaceAllowActive" class="security-menu__workspace-allow">{{ t.dcgWorkspaceAllowActive }}</p>
                   <button class="security-menu__item security-menu__item--protect" :class="{ 'security-menu__item--active': dcgPolicyEnabled }" @click="selectDCGPolicy(true)">
                     <Shield :size="14" />
                     <span><strong>{{ t.dcgInterceptionMode }}</strong><small>{{ t.dcgInterceptionModeHint }}</small></span>

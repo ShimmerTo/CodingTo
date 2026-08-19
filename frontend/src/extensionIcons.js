@@ -3,6 +3,7 @@
 import {
   Award,
   Binary,
+  BrainCircuit,
   Blocks,
   FileText,
   Globe2,
@@ -27,6 +28,7 @@ const fixedExtensionIcons = {
   subagent: Blocks,
   'browser-profile': KeyRound,
   'skills-list': ListTree,
+  memory: BrainCircuit,
 }
 
 // 其它第三方/自定义扩展的回退图标，按 key 语义映射，仍保证互不相同。

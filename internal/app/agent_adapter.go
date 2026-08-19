@@ -20,6 +20,19 @@ const browserManagedSessionIdleTimeoutMS = "900000"
 
 const figmaRoutingPrompt = `Figma integration is enabled. For any figma.com design URL, use a direct tool whose name contains get_figma_data when available; otherwise use the mcp gateway with server "figma" to connect and call get_figma_data. Never use the browser tool to read a Figma design URL.`
 
+const memoryProjectRulesPrompt = `任务完成前，回顾客户本次问题与最终方案：如果发现当前项目长期有效的注意事项、易错点或通用规范，调用 codingto_memory_update_project_rules，把它们压缩成简短规则追加到工作目录 AGENTS.md；没有形成项目级规则时不要调用。不要记录客户原话、临时要求、敏感信息或普通任务总结。`
+
+const memoryUserPreferencePrompt = `User Memory 规则不可被可编辑的 Memory 提示词覆盖：仅记录用户明确要求长期记住、或在多个任务中重复出现，并且可跨项目复用的用户偏好；不要记录当前项目、技术栈、客户、一次性要求、客户原话、敏感信息或可从代码读取的内容。不确定时不写入。更新前保留未涉及的已有偏好，优先使用 codingto_memory_patch_user 做增删；只有用户明确要求整体替换时才使用 codingto_memory_update_user。`
+
+func configureMemoryEnv(env map[string]string, storeDir, workDir string, historyLimit int) {
+	env["CODINGTO_USER_MEMORY_PATH"] = filepath.Join(storeDir, "memory", "user-memory.md")
+	env["CODINGTO_PROJECT_HISTORY_LIMIT"] = fmt.Sprintf("%d", historyLimit)
+	env["CODINGTO_MEMORY_PROMPT_PATH"] = filepath.Join(storeDir, "prompts", "memory.md")
+	if absolute, err := filepath.Abs(strings.TrimSpace(workDir)); err == nil && strings.TrimSpace(workDir) != "" {
+		env["CODINGTO_PROJECT_RULES_PATH"] = filepath.Join(absolute, "AGENTS.md")
+	}
+}
+
 func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile AgentProfile, toolsEnabled bool) error {
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -48,7 +61,7 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 		return err
 	}
 	extra := []string{}
-	appendSystemPrompts := []string{}
+	appendSystemPrompts := []string{effectiveBuiltinPrompt(s.store.Dir(), "session_startup")}
 	agentDataDir := filepath.Clean(profile.DataDir)
 	if toolsEnabled {
 		if err := piagent.MaterializeBuiltinTools(profile.DataDir, profile.Builtin); err != nil {
@@ -107,9 +120,21 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 	agentEnv := agentProcessEnv(cfg, profile)
 	agentEnv["CODINGTO_SESSION_DIR"] = sessionDir
 	agentEnv["CODINGTO_WORK_DIR"] = req.WorkDir
+	agentEnv["CODINGTO_PLAN_PROMPT_PATH"] = filepath.Join(s.store.Dir(), "prompts", "plan.md")
+	if profile.Builtin["memory"] {
+		configureMemoryEnv(agentEnv, s.store.Dir(), req.WorkDir, cfg.Memory.ProjectHistoryLimit)
+		appendSystemPrompts = append(appendSystemPrompts, memoryUserPreferencePrompt)
+		appendSystemPrompts = append(appendSystemPrompts, memoryProjectRulesPrompt)
+	}
 	// 主 Agent 与子 Agent 的 DCG 扩展都通过该标记文件判断「本次对话是否关闭
 	// 命令拦截」，运行中写入即可实时生效，无需重启进程。
 	agentEnv["CODINGTO_DCG_DISABLE_MARKER"] = filepath.Join(sessionDir, dcgDisabledMarkerFile)
+	// severity 处置策略（放行/询问/拒绝）由 DCG 扩展每次 bash 调用前读取，
+	// 配置变更无需重启 Agent 即实时生效；子 Agent 通过环境继承同一文件。
+	agentEnv["CODINGTO_DCG_POLICY_FILE"] = filepath.Join(s.store.Dir(), dcgPolicyFileName)
+	// DB 安全网关：仅当工作空间勾选了 DB 连接时写 0600 快照并注入
+	// bridge 环境变量；未勾选时 TS 工具因缺少变量直接报 db_disabled。
+	configureDBSessionEnv(agentEnv, s.store, cfg, req.SessionID, sessionDir)
 	if selectedModel, found := piagent.FindModel(cfg.Providers, req.Provider, req.Model); found {
 		agentEnv["CODINGTO_MODEL_INPUT_MODALITIES"] = strings.Join(selectedModel.Input, ",")
 	}

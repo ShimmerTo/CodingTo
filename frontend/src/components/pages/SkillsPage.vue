@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { Archive, Check, ExternalLink, Pencil, RefreshCw, Sparkles, Trash2, Upload, X } from 'lucide-vue-next'
+import { Archive, Check, ExternalLink, RefreshCw, Settings, Sparkles, Trash2, Upload, X } from 'lucide-vue-next'
 import SkillCard from '../SkillCard.vue'
 import { useAppContext, agentAvatar, isImageAvatar } from '../../composables/appContext'
 import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
@@ -197,14 +197,16 @@ async function confirmRemove() {
       <article v-for="skill in filteredSkills" :key="skill.id" class="skill-card">
         <div class="skill-card__icon"><Sparkles :size="19" /></div>
             <SkillCard :skill="skill">
+              <template #actions>
+                <div class="skill-card__actions">
+                  <button class="icon-button" :title="t.edit" @click="openEdit(skill)"><Settings :size="14" /></button>
+                  <button v-if="skill.sourceType === 'pi'" class="icon-button" :title="t.skillsUpgrade || '升级'" @click="openUpdate(skill)"><RefreshCw :size="14" /></button>
+                  <button v-else class="icon-button" :title="t.skillsUpdate || '更新'" @click="openUpdate(skill)"><RefreshCw :size="14" /></button>
+                  <button class="icon-button danger" :title="t.delete" @click="remove(skill)"><Trash2 :size="14" /></button>
+                </div>
+              </template>
               <div class="skill-agents"><span>{{ t.skillsAgents || '安装 Agent' }}</span><b v-for="agent in skill.agents" :key="agent.id">{{ agent.name }}</b></div>
             </SkillCard>
-        <div class="skill-card__actions">
-          <button class="secondary-button compact" @click="openEdit(skill)"><Pencil :size="13" />{{ t.edit }}</button>
-          <button v-if="skill.sourceType === 'pi'" class="secondary-button compact" @click="openUpdate(skill)"><RefreshCw :size="13" />{{ t.skillsUpgrade || '升级' }}</button>
-          <button v-else class="secondary-button compact" @click="openUpdate(skill)"><RefreshCw :size="13" />{{ t.skillsUpdate || '更新' }}</button>
-          <button class="danger-button compact" @click="remove(skill)"><Trash2 :size="13" />{{ t.delete }}</button>
-        </div>
       </article>
     </div>
 

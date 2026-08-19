@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"time"
+	"unsafe"
 
 	"github.com/pressly/goose/v3"
 	"github.com/w896736588/go-tool/gsdb"
@@ -52,6 +54,22 @@ func Open(dir string) (*Store, error) {
 // Dir returns the directory the database lives in.
 func (s *Store) Dir() string { return s.dir }
 
+// Close releases the underlying SQLite connection. gsdb does not expose its
+// handle, so the *sql.DB is reached via reflection; used by tests and on
+// application shutdown.
+func (s *Store) Close() error {
+	field := reflect.ValueOf(s.db).Elem().FieldByName("db")
+	if !field.IsValid() || field.IsNil() {
+		return nil
+	}
+	field = reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	raw, ok := field.Interface().(*sql.DB)
+	if !ok {
+		return nil
+	}
+	return raw.Close()
+}
+
 // runMigrations executes embedded goose migrations against the SQLite file using
 // the same driver the runtime uses.
 func runMigrations(dbPath string) error {
@@ -75,23 +93,26 @@ func runMigrations(dbPath string) error {
 // --- Setting (single global row) ---
 
 type Setting struct {
-	Theme               string
-	Language            string
-	AccentColor         string
-	DefaultProvider     string
-	DefaultModel        string
-	LastEnvironment     string
-	SessionDir          string
-	Figma               string // JSON of extensions.FigmaConfig
-	GlobalMCP           string // JSON of []extensions.GlobalPackage
-	GlobalPlugins       string // JSON of []extensions.GlobalPackage
-	UserName            string // end-user display name shown in the chat UI
-	UserAvatar          string // end-user avatar (data-URL or emoji), shown in the chat UI
-	ChatLayout          string // 'left' (default) or 'side' conversation layout
-	ShowIdentity        bool   // show agent/user avatar + name in conversation
-	DiffMode            string // 'unified' (default) or 'split' code diff layout
-	FontSize            string // 'small' (default), 'medium' or 'large' UI font size
-	SubagentConcurrency int    // maximum child Agent runs within one parent conversation
+	Theme           string
+	Language        string
+	AccentColor     string
+	DefaultProvider string
+	DefaultModel    string
+	LastEnvironment string
+	SessionDir      string
+	Figma           string // JSON of extensions.FigmaConfig
+	GlobalMCP       string // JSON of []extensions.GlobalPackage
+	GlobalPlugins   string // JSON of []extensions.GlobalPackage
+	UserName        string // end-user display name shown in the chat UI
+	UserAvatar      string // end-user avatar (data-URL or emoji), shown in the chat UI
+	ChatLayout      string // 'left' (default) or 'side' conversation layout
+	ShowIdentity    bool   // show agent/user avatar + name in conversation
+	DiffMode        string // 'unified' (default) or 'split' code diff layout
+	FontSize        string // 'small' (default), 'medium' or 'large' UI font size
+	// ConciseChat folds thinking steps and tool calls in conversation details
+	// into single-line summary blocks (default off).
+	ConciseChat         bool
+	SubagentConcurrency int // maximum child Agent runs within one parent conversation
 	// SystemNotificationEnabled gates desktop system notifications for plan
 	// approval requests and conversation completion (on by default).
 	SystemNotificationEnabled bool
@@ -99,15 +120,31 @@ type Setting struct {
 	// Zero means the application default (10); values are clamped to 1..60 in
 	// the AppConfig layer so a corrupted row cannot disable the watchdog.
 	ToolExecutionTimeoutMinutes int
+	// ProjectHistoryLimit is the maximum number of project memory records kept
+	// under each workspace's .codingto/history directory.
+	ProjectHistoryLimit int
+	// DBConfig is the JSON of dbsecurity.DBConfig: the global database
+	// connection inventory (each connection carries its own policy).
+	DBConfig string
+	// DCGPolicy is the JSON of app.DCGSettings: the per-severity dcg
+	// disposition map and the workspace allow switch.
+	DCGPolicy string
+	// SessionCleanupEnabled gates startup auto-cleanup of expired session
+	// data (database rows plus their on-disk session directories).
+	SessionCleanupEnabled bool
+	// SessionCleanupDays is the retention cutoff in days for the cleanup;
+	// sessions whose last update is older than this many days are removed.
+	// Clamped to 1..100 by the AppConfig layer.
+	SessionCleanupDays int
 }
 
 func (s *Store) GetSetting() (Setting, error) {
-	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode, font_size, subagent_concurrency, system_notification_enabled, tool_execution_timeout", map[string]any{"id": 1}).One()
+	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode, font_size, concise_chat, subagent_concurrency, system_notification_enabled, tool_execution_timeout, project_history_limit, db_config, dcg_policy, session_cleanup_enabled, session_cleanup_days", map[string]any{"id": 1}).One()
 	if err != nil {
 		return Setting{}, err
 	}
 	if len(row) == 0 {
-		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small", SubagentConcurrency: 2, SystemNotificationEnabled: true, ToolExecutionTimeoutMinutes: 10}, nil
+		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small", SubagentConcurrency: 2, SystemNotificationEnabled: true, ToolExecutionTimeoutMinutes: 10, ProjectHistoryLimit: 100, SessionCleanupDays: 14}, nil
 	}
 	return Setting{
 		Theme:                       asString(row["theme"]),
@@ -126,9 +163,15 @@ func (s *Store) GetSetting() (Setting, error) {
 		ShowIdentity:                asString(row["show_identity"]) != "0",
 		DiffMode:                    asString(row["diff_mode"]),
 		FontSize:                    asString(row["font_size"]),
+		ConciseChat:                 asString(row["concise_chat"]) != "0",
 		SubagentConcurrency:         int(asInt(row["subagent_concurrency"])),
 		SystemNotificationEnabled:   asString(row["system_notification_enabled"]) != "0",
 		ToolExecutionTimeoutMinutes: int(asInt(row["tool_execution_timeout"])),
+		ProjectHistoryLimit:         int(asInt(row["project_history_limit"])),
+		DBConfig:                    asString(row["db_config"]),
+		DCGPolicy:                   asString(row["dcg_policy"]),
+		SessionCleanupEnabled:       asString(row["session_cleanup_enabled"]) != "0",
+		SessionCleanupDays:          int(asInt(row["session_cleanup_days"])),
 	}, nil
 }
 
@@ -155,9 +198,15 @@ func (s *Store) SaveSetting(set Setting) error {
 			"show_identity":               boolToInt(set.ShowIdentity),
 			"diff_mode":                   set.DiffMode,
 			"font_size":                   set.FontSize,
+			"concise_chat":                boolToInt(set.ConciseChat),
 			"subagent_concurrency":        set.SubagentConcurrency,
 			"system_notification_enabled": boolToInt(set.SystemNotificationEnabled),
 			"tool_execution_timeout":      set.ToolExecutionTimeoutMinutes,
+			"project_history_limit":       set.ProjectHistoryLimit,
+			"db_config":                   set.DBConfig,
+			"dcg_policy":                  set.DCGPolicy,
+			"session_cleanup_enabled":     boolToInt(set.SessionCleanupEnabled),
+			"session_cleanup_days":        set.SessionCleanupDays,
 		}).Exec()
 		return err
 	}
@@ -178,9 +227,15 @@ func (s *Store) SaveSetting(set Setting) error {
 		"show_identity":               boolToInt(set.ShowIdentity),
 		"diff_mode":                   set.DiffMode,
 		"font_size":                   set.FontSize,
+		"concise_chat":                boolToInt(set.ConciseChat),
 		"subagent_concurrency":        set.SubagentConcurrency,
 		"system_notification_enabled": boolToInt(set.SystemNotificationEnabled),
 		"tool_execution_timeout":      set.ToolExecutionTimeoutMinutes,
+		"project_history_limit":       set.ProjectHistoryLimit,
+		"db_config":                   set.DBConfig,
+		"dcg_policy":                  set.DCGPolicy,
+		"session_cleanup_enabled":     boolToInt(set.SessionCleanupEnabled),
+		"session_cleanup_days":        set.SessionCleanupDays,
 	}).Exec()
 	return err
 }
@@ -324,30 +379,36 @@ func (s *Store) DeleteAgent(id string) error {
 // --- SSHConfig ---
 
 type SSHConfig struct {
-	ID       string
-	Name     string
-	Address  string
-	Port     int
-	Username string
-	Password string
-	Remark   string
+	ID                   string
+	Name                 string
+	Address              string
+	Port                 int
+	Username             string
+	AuthMode             string // "password" | "key"
+	Password             string
+	PrivateKey           string
+	PrivateKeyPassphrase string
+	Remark               string
 }
 
 func (s *Store) ListSSHConfigs() ([]SSHConfig, error) {
-	rows, err := s.db.QueryBySql("SELECT ssh_id, name, address, port, username, password, remark FROM tbl_ssh_config ORDER BY id ASC").All()
+	rows, err := s.db.QueryBySql("SELECT ssh_id, name, address, port, username, auth_mode, password, private_key, private_key_passphrase, remark FROM tbl_ssh_config ORDER BY id ASC").All()
 	if err != nil {
 		return nil, err
 	}
 	items := make([]SSHConfig, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, SSHConfig{
-			ID:       asString(r["ssh_id"]),
-			Name:     asString(r["name"]),
-			Address:  asString(r["address"]),
-			Port:     int(asInt(r["port"])),
-			Username: asString(r["username"]),
-			Password: asString(r["password"]),
-			Remark:   asString(r["remark"]),
+			ID:                   asString(r["ssh_id"]),
+			Name:                 asString(r["name"]),
+			Address:              asString(r["address"]),
+			Port:                 int(asInt(r["port"])),
+			Username:             asString(r["username"]),
+			AuthMode:             asString(r["auth_mode"]),
+			Password:             asString(r["password"]),
+			PrivateKey:           asString(r["private_key"]),
+			PrivateKeyPassphrase: asString(r["private_key_passphrase"]),
+			Remark:               asString(r["remark"]),
 		})
 	}
 	return items, nil
@@ -366,13 +427,16 @@ func (s *Store) SaveSSHConfigs(items []SSHConfig) error {
 		}
 		if _, exists := row["id"]; exists {
 			_, err = s.db.QuickUpdate("tbl_ssh_config", map[string]any{"ssh_id": item.ID}, map[string]any{
-				"name":        item.Name,
-				"address":     item.Address,
-				"port":        item.Port,
-				"username":    item.Username,
-				"password":    item.Password,
-				"remark":      item.Remark,
-				"update_time": now,
+				"name":                   item.Name,
+				"address":                item.Address,
+				"port":                   item.Port,
+				"username":               item.Username,
+				"auth_mode":              item.AuthMode,
+				"password":               item.Password,
+				"private_key":            item.PrivateKey,
+				"private_key_passphrase": item.PrivateKeyPassphrase,
+				"remark":                 item.Remark,
+				"update_time":            now,
 			}).Exec()
 			if err != nil {
 				return err
@@ -380,15 +444,18 @@ func (s *Store) SaveSSHConfigs(items []SSHConfig) error {
 			continue
 		}
 		_, err = s.db.QuickCreate("tbl_ssh_config", map[string]any{
-			"ssh_id":      item.ID,
-			"name":        item.Name,
-			"address":     item.Address,
-			"port":        item.Port,
-			"username":    item.Username,
-			"password":    item.Password,
-			"remark":      item.Remark,
-			"create_time": now,
-			"update_time": now,
+			"ssh_id":                 item.ID,
+			"name":                   item.Name,
+			"address":                item.Address,
+			"port":                   item.Port,
+			"username":               item.Username,
+			"auth_mode":              item.AuthMode,
+			"password":               item.Password,
+			"private_key":            item.PrivateKey,
+			"private_key_passphrase": item.PrivateKeyPassphrase,
+			"remark":                 item.Remark,
+			"create_time":            now,
+			"update_time":            now,
 		}).Exec()
 		if err != nil {
 			return err
@@ -421,24 +488,32 @@ type Environment struct {
 	Description string
 	Remotes     string
 	Active      bool
+	// DBConnections is a JSON []string of DB connection IDs authorized for
+	// this workspace's sessions.
+	DBConnections string
+	// DefaultAgentID is the agent used when opening a new conversation in
+	// this workspace; empty means fall back to the first agent.
+	DefaultAgentID string
 }
 
 // ListEnvironments returns all stored environments. Remotes are persisted as a
 // JSON string and rehydrated by the caller.
 func (s *Store) ListEnvironments() ([]Environment, error) {
-	rows, err := s.db.QueryBySql("SELECT environment_id, name, path, description, remotes, active FROM tbl_environment ORDER BY id ASC").All()
+	rows, err := s.db.QueryBySql("SELECT environment_id, name, path, description, remotes, active, db_connections, default_agent_id FROM tbl_environment ORDER BY id ASC").All()
 	if err != nil {
 		return nil, err
 	}
 	items := make([]Environment, 0, len(rows))
 	for _, r := range rows {
 		items = append(items, Environment{
-			ID:          asString(r["environment_id"]),
-			Name:        asString(r["name"]),
-			Path:        asString(r["path"]),
-			Description: asString(r["description"]),
-			Remotes:     asString(r["remotes"]),
-			Active:      asInt(r["active"]) != 0,
+			ID:             asString(r["environment_id"]),
+			Name:           asString(r["name"]),
+			Path:           asString(r["path"]),
+			Description:    asString(r["description"]),
+			Remotes:        asString(r["remotes"]),
+			Active:         asInt(r["active"]) != 0,
+			DBConnections:  asString(r["db_connections"]),
+			DefaultAgentID: asString(r["default_agent_id"]),
 		})
 	}
 	return items, nil
@@ -457,12 +532,14 @@ func (s *Store) SaveEnvironments(items []Environment) error {
 		}
 		if _, exists := row["id"]; exists {
 			_, err = s.db.QuickUpdate("tbl_environment", map[string]any{"environment_id": item.ID}, map[string]any{
-				"name":        item.Name,
-				"path":        item.Path,
-				"description": item.Description,
-				"remotes":     item.Remotes,
-				"active":      boolToInt(item.Active),
-				"update_time": now,
+				"name":             item.Name,
+				"path":             item.Path,
+				"description":      item.Description,
+				"remotes":          item.Remotes,
+				"active":           boolToInt(item.Active),
+				"db_connections":   item.DBConnections,
+				"default_agent_id": item.DefaultAgentID,
+				"update_time":      now,
 			}).Exec()
 			if err != nil {
 				return err
@@ -470,14 +547,16 @@ func (s *Store) SaveEnvironments(items []Environment) error {
 			continue
 		}
 		_, err = s.db.QuickCreate("tbl_environment", map[string]any{
-			"environment_id": item.ID,
-			"name":           item.Name,
-			"path":           item.Path,
-			"description":    item.Description,
-			"remotes":        item.Remotes,
-			"active":         boolToInt(item.Active),
-			"create_time":    now,
-			"update_time":    now,
+			"environment_id":   item.ID,
+			"name":             item.Name,
+			"path":             item.Path,
+			"description":      item.Description,
+			"remotes":          item.Remotes,
+			"active":           boolToInt(item.Active),
+			"db_connections":   item.DBConnections,
+			"default_agent_id": item.DefaultAgentID,
+			"create_time":      now,
+			"update_time":      now,
 		}).Exec()
 		if err != nil {
 			return err
@@ -575,6 +654,13 @@ func (s *Store) CreateSession(item Session) (Session, error) {
 func (s *Store) UpdateSession(id int64, values map[string]any) error {
 	values["update_time"] = time.Now().UnixMilli()
 	_, err := s.db.QuickUpdate("tbl_session", map[string]any{"id": id}, values).Exec()
+	return err
+}
+
+// SetSessionUpdateTime backdates a session's update_time directly (used by
+// cleanup tests and retention tooling; normal flows go through UpdateSession).
+func (s *Store) SetSessionUpdateTime(id int64, ts int64) error {
+	_, err := s.db.ExecBySql("UPDATE tbl_session SET update_time = ? WHERE id = ?", ts, id).Exec()
 	return err
 }
 

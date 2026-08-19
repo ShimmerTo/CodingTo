@@ -160,7 +160,7 @@
 
 /* Agents list (table rows, mirroring plugin-row) */
 .agent-list-table { display: flex; flex-direction: column; }
-.agent-row { min-height: 96px; display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--border); border-bottom: 0; background: var(--surface); }
+.agent-row { position: relative; min-height: 96px; display: flex; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--border); border-bottom: 0; background: var(--surface); }
 .agent-row:first-of-type { border-radius: 10px 10px 0 0; }
 .agent-row:last-child { border-bottom: 1px solid var(--border); border-radius: 0 0 10px 10px; }
 .agent-avatar { width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center; border-radius: 10px; color: var(--accent); background: var(--surface-2); border: 1px solid var(--border); }
@@ -170,29 +170,47 @@
 .agent-subagent-option__img {
   width: 100%; height: 100%; object-fit: cover; border-radius: inherit; display: block;
 }
-.agent-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.agent-name { display: flex; align-items: center; gap: 8px; }
+.agent-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; padding-right: 56px; }
+.agent-name { position: relative; display: flex; align-items: center; gap: 8px; }
 .agent-name strong { font-size: var(--fs-14); }
 .agent-name small { color: var(--faint); font-size: var(--fs-12); }
 .agent-copy p { margin: 0; max-width: 640px; color: var(--muted); font-size: var(--fs-13); line-height: 1.5; }
 .agent-dir { display: flex; align-items: center; gap: 8px; max-width: 640px; }
 .agent-dir span { color: var(--faint); font-size: var(--fs-12); white-space: nowrap; }
 .agent-dir code { min-width: 0; overflow: hidden; padding: 4px 8px; border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text); background: var(--surface-2); font: var(--fs-12) "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.agent-exts { display: flex; align-items: center; gap: 7px; }
+.agent-exts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.agent-exts__label { flex: 0 0 auto; color: var(--faint); font-size: var(--fs-12); white-space: nowrap; }
 .agent-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.agent-ext-tag { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border: 1px solid color-mix(in srgb, #34d399 38%, var(--border-soft)); border-radius: 999px; background: color-mix(in srgb, #34d399 12%, var(--surface-2)); color: color-mix(in srgb, #34d399 55%, var(--text)); font-size: var(--fs-12); }
+/* 已安装扩展标签：与子智能体 badge 视觉一致（surface-2 底 + 胶囊圆角） */
+.agent-ext-tag { display: inline-flex; align-items: center; gap: 5px; max-width: 180px; padding: 2px 9px; border: 1px solid var(--border-soft); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: var(--fs-12); }
 .agent-ext-tag--missing { border-color: color-mix(in srgb, var(--danger) 45%, var(--border-soft)); background: color-mix(in srgb, var(--danger) 12%, var(--surface-2)); color: color-mix(in srgb, var(--danger) 70%, var(--text)); }
 .agent-ext-tag em { font-style: normal; opacity: .8; font-size: var(--fs-12); }
-.agent-ext-tag__name { max-width: 0; overflow: hidden; white-space: nowrap; opacity: 0; transition: max-width .15s ease, opacity .15s ease, margin .15s ease; }
-.agent-ext-tag:hover .agent-ext-tag__name { max-width: 160px; opacity: 1; margin-right: 2px; }
+.agent-ext-tag__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-no-ext { color: var(--faint); font-size: var(--fs-12); }
+/* 卡片内子智能体标签：仅展示名称，随卡片内容换行 */
+.agent-subagents { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.agent-subagents__label { color: var(--faint); font-size: var(--fs-12); }
+.agent-subagent-badge { display: inline-flex; align-items: center; max-width: 180px; overflow: hidden; padding: 2px 9px; border: 1px solid var(--border-soft); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: var(--fs-12); text-overflow: ellipsis; white-space: nowrap; }
 .agent-loading { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: var(--fs-12); }
 .agent-loading .spin { color: var(--accent); }
-.agent-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; }
-.agent-actions button { white-space: nowrap; }
-.agent-default-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--fs-12); cursor: pointer; }
-.agent-default-toggle:has(input:disabled) { cursor: default; }
+/* 卡片操作按钮：置于卡片右上角，默认隐藏、鼠标移入卡片渐显；
+   position:absolute 脱离布局避免占位。 */
+.agent-actions { position: absolute; right: 12px; top: 12px; z-index: 2; display: flex; align-items: center; gap: 4px; opacity: 0; visibility: hidden; transition: opacity .15s; }
+.agent-row:hover .agent-actions { opacity: 1; visibility: visible; }
 .agent-row--new { box-shadow: inset 0 0 0 1px color-mix(in srgb, #d19a42 55%, var(--border)); }
+
+/* 已启用扩展标签：默认显示 3 个，超出显示 “+N” 更多按钮 */
+.agent-ext-more { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 8px; border: 1px solid var(--border-soft); border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: var(--fs-12); cursor: pointer; transition: color .12s, border-color .12s; }
+.agent-ext-more:hover { color: var(--accent); border-color: var(--accent); }
+
+/* “全部已安装扩展”弹窗 */
+.agent-ext-dialog { width: min(480px, 100%); max-height: 72vh; }
+.agent-ext-dialog-list { display: flex; flex-direction: column; gap: 6px; }
+.agent-ext-dialog-row { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 11px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface-2); }
+.agent-ext-dialog-row__name { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--fs-13); text-overflow: ellipsis; white-space: nowrap; }
+.agent-ext-dialog-row__state { flex: 0 0 auto; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border-soft); color: var(--faint); background: var(--surface); font-size: var(--fs-12); white-space: nowrap; }
+.agent-ext-dialog-row__state--on { border-color: var(--installed-tag-border); background: var(--installed-tag-bg); color: var(--installed-tag-fg); }
+.agent-ext-dialog-empty { margin: 0; padding: 24px 0; color: var(--faint); font-size: var(--fs-13); text-align: center; }
 
 /* Agent config page */
 .agent-config-page { scrollbar-gutter: stable; }
@@ -254,7 +272,6 @@
   outline: none;
   box-shadow: none;
 }
-.agent-basics-default-toggle { display: inline-flex !important; flex-direction: row !important; align-items: center; gap: 9px; color: var(--muted) !important; font-size: var(--fs-12) !important; }
 .agent-subagent-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .agent-subagent-option { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; min-width: 0; }
 .agent-subagent-option input { width: 15px; height: 15px; margin: 0; padding: 0; flex: 0 0 15px; accent-color: var(--accent); }

@@ -4,7 +4,7 @@ import {
   AlertCircle, ArrowUpRight, Bot, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, File,
   FileAudio, FileCode2, FilePlus2, FileText, FileVideo, FileX2, GitBranch, Image, LoaderCircle, User
 } from 'lucide-vue-next'
-import { openExternal, openSessionArtifact } from '../../backend.js'
+import { openExternal, openSessionArtifact, openSessionWorkspaceFile } from '../../backend.js'
 import { localFileURL } from '../../localFileUrl.js'
 import { formatDetail, formatDuration, imageSrc, renderMarkdown } from './chatFormatters.js'
 import SubAgentCard from './SubAgentCard.vue'
@@ -12,9 +12,10 @@ import DocumentDownloadList from './DocumentDownloadList.vue'
 import EditDiff from './EditDiff.vue'
 import {
   toolDuration, toolIcon, toolInput, toolOutput, toolStatus,
-  isReadTool, readToolMeta, readToolBlocks, isSubagentRunTool, toolEditDiff, toolLineChanges, toolName, toolSummary, toolUrl, toolUrlTitle
+  isReadTool, readToolMeta, readToolBlocks, isSubagentRunTool, toolEditDiff, toolFilePath, toolLineChanges, toolName, toolSummary, toolUrl, toolUrlTitle
 } from './chatToolPresentation.js'
 import { compactionMessageText } from './compactionMessages.js'
+import { hasThinkingTrace } from './conciseChat.js'
 import { isImageAvatar } from '../../composables/appContext.js'
 
 const props = defineProps({
@@ -33,7 +34,11 @@ const props = defineProps({
   agentName: { type: String, default: '' },
   userAvatar: { type: String, default: '' },
   chatLayout: { type: String, default: 'left' },
-  showIdentity: { type: Boolean, default: true }
+  showIdentity: { type: Boolean, default: true },
+  // 精简对话模式：思考过程已折叠到独立摘要块中，单独渲染本条消息时跳过思考块。
+  hideThinking: { type: Boolean, default: false },
+  // 精简对话模式：本条消息的内容/占位气泡已在摘要块外单独渲染，块内只保留思考块或工具调用。
+  hideContent: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'open-subagent-details', 'preview-image'])
@@ -66,9 +71,45 @@ async function openAttachment(att) {
   }
 }
 
+// 模型在发起工具调用前常先输出一段仅含空白的 text（如 "\n\n"），
+// 若直接渲染会得到一个空段落造成页面空白行。仅当存在非空白文本时才视为有可见内容。
+const hasVisibleText = computed(() => {
+  const c = props.message.content
+  if (Array.isArray(c)) {
+    return c.some(part => {
+      if (typeof part === 'string') return part.trim().length > 0
+      const text = part?.type === 'text'
+        ? String(part.text ?? '')
+        : String(part?.content ?? '')
+      return text.trim().length > 0
+    })
+  }
+  return String(c || '').trim().length > 0
+})
+
+// 判断整条消息是否有任一个可见的展示分支；否则该消息只是纯空白的空壳
+// （例如模型工具调用前留下的 "\n\n" 文本被拆成独立 tool 消息后剩余的空壳），
+// 继续渲染会占据一行空白，故在 article 层整条隐藏。
+const hasVisibleMessage = computed(() => {
+  const m = props.message
+  if (m.role === 'compaction' || m.role === 'error' || m.role === 'tool') return true
+  if (m.role === 'changes') return true // 空 changes 已由 isEmptyChangeMessage 拦截
+  if (m.live) return true // 运行中保留状态/占位
+  if (m.images?.length || m.attachments?.length) return true
+  if (isSubagentTool.value && !props.disableSubagentCard) return true
+  if (!props.hideThinking && hasThinkingTrace(m)) return true
+  if (!props.hideContent && m.role !== 'tool' && m.role !== 'compaction' && hasVisibleText.value) return true
+  if (m.role === 'user' && m.content) return true
+  return false
+})
+
 // `now` changes while a live message/tool is running. Cache markdown by the
 // actual message content so duration ticks never re-parse an unchanged answer.
-const renderedContent = computed(() => renderMarkdown(props.message.content))
+const renderedContent = computed(() => renderMarkdown(props.message.content, {
+  codeCopy: props.message.role === 'assistant'
+    ? { copy: props.t.copyCode, copied: props.t.copiedCode }
+    : null
+}))
 const lineChanges = computed(() => toolLineChanges(props.message))
 const editDiff = computed(() => toolEditDiff(props.message))
 const documentDownloadList = computed(() => {
@@ -114,10 +155,48 @@ async function copyUserMessage() {
     // 剪贴板不可用时静默失败，不打断阅读。
   }
 }
-onBeforeUnmount(() => { clearTimeout(copyResetTimer) })
+onBeforeUnmount(() => {
+  clearTimeout(copyResetTimer)
+  clearTimeout(codeCopyResetTimer)
+})
+
+// Markdown 使用 v-html 渲染，代码块复制按钮通过事件委托保持对流式更新有效。
+const codeCopyState = ref(null)
+let codeCopyResetTimer = 0
+async function copyCodeBlock(event) {
+  const button = event.target.closest?.('[data-code-copy]')
+  if (!button) return
+  const code = button.parentElement?.querySelector('pre code')
+  if (!code) return
+  try {
+    await navigator.clipboard.writeText(code.textContent || '')
+    if (codeCopyState.value && codeCopyState.value !== button) {
+      const previous = codeCopyState.value
+      previous.classList.remove('is-copied')
+      previous.title = previous.dataset.copyLabel || props.t.copyCode
+      previous.setAttribute('aria-label', previous.dataset.copyLabel || props.t.copyCode)
+    }
+    codeCopyState.value = button
+    button.classList.add('is-copied')
+    button.title = button.dataset.copiedLabel || props.t.copiedCode
+    button.setAttribute('aria-label', button.dataset.copiedLabel || props.t.copiedCode)
+    clearTimeout(codeCopyResetTimer)
+    codeCopyResetTimer = window.setTimeout(() => {
+      if (codeCopyState.value === button) {
+        button.classList.remove('is-copied')
+        button.title = button.dataset.copyLabel || props.t.copyCode
+        button.setAttribute('aria-label', button.dataset.copyLabel || props.t.copyCode)
+        codeCopyState.value = null
+      }
+    }, 1600)
+  } catch {
+    // 剪贴板不可用时静默失败，不打断阅读。
+  }
+}
 const readTool = computed(() => isReadTool(props.message))
 const readMeta = computed(() => readToolMeta(props.message) || { path: '', params: [] })
 const readBlocks = computed(() => readToolBlocks(props.message) || [])
+const toolPath = computed(() => toolFilePath(props.message))
 const toolNameSlug = computed(() => {
   const raw = toolName(props.message).toLowerCase().replace(/[^a-z0-9]+/g, '-')
   return raw.replace(/^-+|-+$/g, '') || 'tool'
@@ -181,6 +260,15 @@ function openGitDiff(file) {
   })
 }
 
+async function openToolFile() {
+  if (!toolPath.value || !props.sessionId) return
+  try {
+    await openSessionWorkspaceFile(toolPath.value, props.sessionId)
+  } catch (err) {
+    emit('artifact-error', String(err?.message || err))
+  }
+}
+
 function thinkingDuration() {
   const message = props.message
   if (message.thinkingDurationMs) return message.thinkingDurationMs
@@ -219,11 +307,15 @@ watch(() => props.message.thinkingContent, async () => {
 
 <template>
   <article
-    v-if="!isEmptyChangeMessage"
+    v-if="!isEmptyChangeMessage && hasVisibleMessage"
     class="message"
     :class="[
       `message--${message.role}`,
-      { 'message--live': message.live, 'message--subagent': isSubagentTool, 'message--user-right': chatLayout === 'side' && message.role === 'user' }
+      {
+        'message--live': message.live,
+        'message--subagent': isSubagentTool,
+        'message--user-right': chatLayout === 'side' && message.role === 'user'
+      }
     ]"
   >
     <div
@@ -266,7 +358,7 @@ watch(() => props.message.thinkingContent, async () => {
         </span>
       </div>
       <details
-        v-if="message.thinkingContent && message.thinkingContent.replace(/\u200B/g, '').trim()"
+        v-if="!hideThinking && hasThinkingTrace(message)"
         class="thinking-block"
         :class="{ 'thinking-live': !!message.live }"
         :open="!!message.thinkingOpen"
@@ -281,16 +373,16 @@ watch(() => props.message.thinkingContent, async () => {
           <small v-if="thinkingTimeText()" :title="thinkingTimeText()">{{ thinkingTimeText() }}</small>
           <ChevronDown class="details-chevron" :size="13" />
         </summary>
-        <pre ref="thinkingPreRef">{{ message.thinkingContent.replace(/\u200B/g, '') }}</pre>
+        <pre ref="thinkingPreRef">{{ (message.thinkingContent || '').replace(/\u200B/g, '') }}</pre>
       </details>
-      <div v-if="message.role !== 'compaction' && message.role !== 'tool' && message.content" class="message-bubble">
-        <div class="message-markdown" v-html="renderedContent"></div>
+      <div v-if="message.role !== 'compaction' && message.role !== 'tool' && !hideContent && hasVisibleText" class="message-bubble">
+        <div class="message-markdown" v-html="renderedContent" @click="copyCodeBlock"></div>
       </div>
-      <div v-else-if="message.role === 'assistant' && message.live && message.preparing" class="message-bubble message-bubble--pending">
+      <div v-else-if="message.role === 'assistant' && message.live && message.preparing && !hideContent" class="message-bubble message-bubble--pending">
         <LoaderCircle class="spin" :size="14" />
         <span>{{ t.preparingSession }}</span>
       </div>
-      <div v-else-if="message.role === 'assistant' && message.live" class="message-bubble message-bubble--pending">
+      <div v-else-if="message.role === 'assistant' && message.live && !hideContent" class="message-bubble message-bubble--pending">
         <LoaderCircle class="spin" :size="14" />
         <span>{{ t.statusRunning }}</span>
       </div>
@@ -388,6 +480,14 @@ watch(() => props.message.thinkingContent, async () => {
             <span v-if="toolUrlTitle(message)" class="tool-call__link-title">{{ toolUrlTitle(message) }}</span>
             <span class="tool-call__link-url">{{ toolUrl(message) }}</span>
           </a>
+          <button
+            v-else-if="toolPath"
+            class="tool-call__file tool-call__file--open"
+            type="button"
+            :disabled="!sessionId"
+            :title="`${t.openOutputArtifact}: ${toolPath}`"
+            @click.stop.prevent="openToolFile"
+          >{{ toolPath }}</button>
           <span v-else-if="toolSummary(message)" class="tool-call__summary">{{ toolSummary(message) }}</span>
           <span v-if="lineChanges" class="tool-call__changes" :aria-label="`${lineChanges.files} ${t.fileUnit}, +${lineChanges.added} ${t.lineUnit}, -${lineChanges.deleted} ${t.lineUnit}`">
             <b class="is-files">{{ lineChanges.files }} {{ t.fileUnit }}</b>
@@ -417,7 +517,13 @@ watch(() => props.message.thinkingContent, async () => {
           </span>
           <span class="tool-call__icon"><component :is="toolIcon(message)" :size="13" /></span>
           <span v-if="!hideToolName" class="tool-call__name">{{ toolName(message) }}</span>
-          <span class="tool-call__file" :title="readMeta.path">{{ readMeta.path }}</span>
+          <button
+            class="tool-call__file tool-call__file--open"
+            type="button"
+            :disabled="!readMeta.path || !sessionId"
+            :title="readMeta.path ? `${t.openOutputArtifact}: ${readMeta.path}` : ''"
+            @click.stop.prevent="openToolFile"
+          >{{ readMeta.path }}</button>
           <span v-if="readMeta.params.length" class="tool-call__params">{{ readMeta.params.join(', ') }}</span>
           <ChevronDown class="details-chevron" :size="13" />
         </summary>

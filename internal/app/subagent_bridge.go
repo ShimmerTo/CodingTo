@@ -105,6 +105,9 @@ func (s *AgentService) prepareSubagentRuntime(
 			return fmt.Errorf("write subagent %s models.json: %w", child.Name, err)
 		}
 		childEnv := agentProcessEnv(cfg, child)
+		if child.Builtin["memory"] {
+			configureMemoryEnv(childEnv, s.store.Dir(), req.WorkDir, cfg.Memory.ProjectHistoryLimit)
+		}
 		if child.Recommended["dcg"] {
 			if _, err := piagent.MaterializeDCGExtension(child.DataDir); err != nil {
 				return fmt.Errorf("materialize DCG extension for subagent %s: %w", child.Name, err)
@@ -135,6 +138,14 @@ func (s *AgentService) prepareSubagentRuntime(
 				return fmt.Errorf("prepare document bridge for subagent %s: %w", child.Name, err)
 			}
 			agents[index].Env["CODINGTO_DOCUMENT_BRIDGE_BIN"] = documentBinary
+		}
+		// 子 Agent 沿用主会话的 DB 快照（不二次过滤）：环境变量已在
+		// configureDBSessionEnv 写入 agentEnv，此处原样透传给子进程。
+		if child.Builtin["db"] {
+			if bin := agentEnv["CODINGTO_DB_BRIDGE_BIN"]; bin != "" {
+				agents[index].Env["CODINGTO_DB_BRIDGE_BIN"] = bin
+				agents[index].Env["CODINGTO_DB_CONFIG_PATH"] = agentEnv["CODINGTO_DB_CONFIG_PATH"]
+			}
 		}
 		if s.runtimeEnv != nil {
 			for key, value := range s.runtimeEnv(child.ID, req.SessionID) {

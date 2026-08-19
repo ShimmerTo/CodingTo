@@ -1,6 +1,5 @@
 <script setup>
 import { computed, ref } from 'vue'
-import IconTrash from '../icons/IconTrash.vue'
 import IconPlus from '../icons/IconPlus.vue'
 import IconPlay from '../icons/IconPlay.vue'
 import IconImage from '../icons/IconImage.vue'
@@ -57,7 +56,7 @@ function openAddModel() {
     baseUrl: '',
     contextWindow: 128000,
     maxTokens: 16384,
-    reasoning: false,
+    reasoning: true,
     defaultThinkingLevel: 'high',
     input: ['text'],
     capabilities: { toolCall: true },
@@ -173,8 +172,8 @@ function formatTokenCount(value) {
             <div class="provider-info-card__sub">{{ selectedProvider.name }}</div>
           </div>
           <div class="provider-info-card__actions">
-            <button class="secondary-button" @click="openProviderEdit(selectedProvider)"><Settings :size="14" />{{ t.editProvider }}</button>
-            <button class="danger-button" @click="requestDeleteProvider(selectedProvider)"><Trash2 :size="14" />{{ t.delete }}</button>
+            <button class="icon-button" :title="t.editProvider" :aria-label="t.editProvider" @click="openProviderEdit(selectedProvider)"><Settings :size="14" /></button>
+            <button class="icon-button danger" :title="t.delete" :aria-label="t.delete" @click="requestDeleteProvider(selectedProvider)"><Trash2 :size="14" /></button>
           </div>
         </div>
         <div class="provider-info-grid">
@@ -215,6 +214,20 @@ function formatTokenCount(value) {
 
         <div v-if="selectedProvider.models.length" class="model-list">
           <div v-for="model in selectedProvider.models" :key="model.id" class="model-card">
+            <div class="model-card__actions">
+              <button
+                class="icon-button"
+                :title="t.test"
+                :aria-label="t.test"
+                :disabled="testingModels[testModelKey(selectedProvider, model)]"
+                @click="runModelTestFor(selectedProvider, model)"
+              >
+                <IconPlay v-if="!testingModels[testModelKey(selectedProvider, model)]" />
+                <LoaderCircle v-else class="spin" :size="14" />
+              </button>
+              <button class="icon-button" :title="t.edit" :aria-label="t.edit" @click="openEditModel(model)"><Settings :size="14" /></button>
+              <button class="icon-button danger" :title="t.delete" :aria-label="t.delete" @click="deleteModel(model)"><Trash2 :size="14" /></button>
+            </div>
             <div class="model-card__main">
               <div class="model-card__title">{{ model.name }}</div>
               <div class="model-card__id">{{ model.id }}</div>
@@ -225,23 +238,10 @@ function formatTokenCount(value) {
                 <span v-if="model.maxTokens" class="badge">输出 {{ formatTokenCount(model.maxTokens) }}</span>
               </div>
               <div class="model-card__caps">
-                <span class="cap-tag" :class="{ 'cap-tag--off': !model.input?.includes('image') }"><IconImage /> 图片输入</span>
-                <span class="cap-tag" :class="{ 'cap-tag--off': !model.reasoning }"><IconBrain /> 思考模式</span>
-                <span class="cap-tag" :class="{ 'cap-tag--off': !model.capabilities?.toolCall }"><IconWrench /> 工具调用</span>
+                <span class="cap-tag" :class="{ 'cap-tag--off': !model.input?.includes('image') }" :title="t.imageInput"><IconImage /></span>
+                <span class="cap-tag" :class="{ 'cap-tag--off': !model.reasoning }" :title="t.reasoning"><IconBrain /></span>
+                <span class="cap-tag" :class="{ 'cap-tag--off': !model.capabilities?.toolCall }" :title="t.toolCalling"><IconWrench /></span>
               </div>
-            </div>
-            <div class="model-card__actions">
-              <button class="secondary-button" @click="openEditModel(model)"><Settings :size="14" />{{ t.edit }}</button>
-              <button
-                class="secondary-button"
-                :disabled="testingModels[testModelKey(selectedProvider, model)]"
-                @click="runModelTestFor(selectedProvider, model)"
-              >
-                <IconPlay v-if="!testingModels[testModelKey(selectedProvider, model)]" />
-                <LoaderCircle v-else class="spin" :size="18" />
-                {{ t.test }}
-              </button>
-              <button class="danger-button" @click="deleteModel(model)"><IconTrash />{{ t.delete }}</button>
             </div>
               <div
               v-if="modelTestResult(selectedProvider, model)"

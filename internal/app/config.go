@@ -28,6 +28,9 @@ type Preferences struct {
 	ShowIdentity bool   `json:"showIdentity"`
 	DiffMode     string `json:"diffMode"`
 	FontSize     string `json:"fontSize"`
+	// ConciseChat folds thinking steps and tool calls in conversation details
+	// into single-line summary blocks (default off).
+	ConciseChat bool `json:"conciseChat"`
 }
 
 // AppConfig is the in-memory shape exchanged with the frontend. It is assembled
@@ -55,7 +58,35 @@ type AppConfig struct {
 	ToolExecutionTimeoutMinutes int `json:"toolExecutionTimeoutMinutes"`
 	// SystemNotificationEnabled gates desktop system notifications for plan
 	// approval requests and conversation completion (default on).
-	SystemNotificationEnabled bool `json:"systemNotificationEnabled"`
+	SystemNotificationEnabled bool         `json:"systemNotificationEnabled"`
+	Memory                    MemoryConfig `json:"memory"`
+	// DCGSettings controls how CodingTo disposes of dcg detections: per-severity
+	// action (allow/ask/deny) and the workspace-wide allow switch.
+	DCGSettings DCGSettings `json:"dcgSettings"`
+	// SessionCleanupEnabled gates the startup auto-cleanup of expired session
+	// data: database rows plus their on-disk session directories.
+	SessionCleanupEnabled bool `json:"sessionCleanupEnabled"`
+	// SessionCleanupDays is the retention window in days; sessions whose last
+	// update is older than this many days are removed at startup. Clamped to
+	// 1..100 in Normalize.
+	SessionCleanupDays int `json:"sessionCleanupDays"`
+}
+
+// DCGSettings controls CodingTo's disposition of dcg detections.
+// SeverityPolicy maps dcg severity levels (critical/high/medium/low) to one of
+// allow (直接放行), ask (请求确认) or deny (直接拒绝); a missing level defaults
+// to ask. WorkspaceAllow, when enabled, syncs every workspace directory into
+// the dcg user config as allowed paths.
+type DCGSettings struct {
+	SeverityPolicy map[string]string `json:"severityPolicy,omitempty"`
+	WorkspaceAllow bool              `json:"workspaceAllow,omitempty"`
+}
+
+// MemoryConfig controls the small global portion of the Memory built-in. User
+// memory itself lives in a normal Markdown file and is intentionally not kept
+// inside the application database.
+type MemoryConfig struct {
+	ProjectHistoryLimit int `json:"projectHistoryLimit"`
 }
 
 // UserProfile holds the end-user's personal identity shown in the chat UI: a
@@ -75,21 +106,24 @@ type RemoteGitDir struct {
 	SSHConfigID string `json:"sshConfigId"`
 }
 
-// SSHConfig is a reusable password-authenticated SSH connection profile that
-// remote working directories reference.
+// SSHConfig is a reusable SSH connection profile that remote working
+// directories and DB tunnels reference. AuthMode is "password" or "key";
+// key mode carries the PEM private key (optionally passphrase-protected).
 type SSHConfig struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Address  string `json:"address"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Remark   string `json:"remark"`
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Address              string `json:"address"`
+	Port                 int    `json:"port"`
+	Username             string `json:"username"`
+	AuthMode             string `json:"authMode,omitempty"`
+	Password             string `json:"password,omitempty"`
+	PrivateKey           string `json:"privateKey,omitempty"`
+	PrivateKeyPassphrase string `json:"privateKeyPassphrase,omitempty"`
+	Remark               string `json:"remark"`
 }
 
-// Environment (环境) is one workspace: one local directory, one remote server
-// directory, and one global SSH profile. Remotes remains a slice for storage
-// compatibility, but Normalize limits it to one entry.
+// Environment (环境) is one workspace: one local directory and zero or more
+// remote server directories, each backed by a reusable global SSH profile.
 type Environment struct {
 	ID          string         `json:"id"`
 	Name        string         `json:"name"`
@@ -97,6 +131,12 @@ type Environment struct {
 	Description string         `json:"description"`
 	Active      bool           `json:"active"`
 	Remotes     []RemoteGitDir `json:"remotes"`
+	// DBConnections lists the DB connection IDs authorized for this
+	// workspace's sessions; only these connections enter the runtime snapshot.
+	DBConnections []string `json:"dbConnections,omitempty"`
+	// DefaultAgentID is the agent picked when a new conversation starts in
+	// this workspace; empty falls back to the first agent.
+	DefaultAgentID string `json:"defaultAgentId,omitempty"`
 }
 
 // AgentProfile is a named Pi workspace configuration. Every agent is a Pi agent
@@ -208,10 +248,7 @@ func (a *AgentProfile) Normalize(index int) {
 	if a.Builtin == nil {
 		a.Builtin = map[string]bool{}
 	}
-	for name := range piagent.RequiredBuiltinTools() {
-		a.Builtin[name] = true
-	}
-	for _, retired := range []string{"api", "db", "git"} {
+	for _, retired := range []string{"api", "git"} {
 		delete(a.Builtin, retired)
 	}
 	if a.Recommended == nil {
@@ -298,6 +335,9 @@ func DefaultConfig() AppConfig {
 		SubagentConcurrency:         subagentbridge.DefaultConcurrency,
 		SystemNotificationEnabled:   true,
 		ToolExecutionTimeoutMinutes: 10,
+		Memory:                      MemoryConfig{ProjectHistoryLimit: 100},
+		SessionCleanupEnabled:       false,
+		SessionCleanupDays:          14,
 	}
 }
 
@@ -322,6 +362,25 @@ func (c *AppConfig) Normalize() {
 		c.Providers[i].Normalize()
 	}
 	c.Extensions.Normalize()
+	// Referential integrity: workspace DB authorizations may only reference
+	// existing connections; stale IDs (deleted connections) are dropped here
+	// so every save path stays consistent.
+	dbIDs := make(map[string]bool, len(c.Extensions.DB.Connections))
+	for _, conn := range c.Extensions.DB.Connections {
+		dbIDs[conn.ID] = true
+	}
+	for i := range c.Environments {
+		env := &c.Environments[i]
+		seen := make(map[string]bool, len(env.DBConnections))
+		kept := make([]string, 0, len(env.DBConnections))
+		for _, id := range env.DBConnections {
+			if dbIDs[id] && !seen[id] {
+				seen[id] = true
+				kept = append(kept, id)
+			}
+		}
+		env.DBConnections = kept
+	}
 	c.SubagentConcurrency = subagentbridge.NormalizeConcurrency(c.SubagentConcurrency)
 	// Tool execution timeout: 0 means the 10 minute default; clamp to 1..60
 	// minutes so a corrupted value can never disable or unbounded the watchdog.
@@ -331,6 +390,21 @@ func (c *AppConfig) Normalize() {
 	if c.ToolExecutionTimeoutMinutes > 60 {
 		c.ToolExecutionTimeoutMinutes = 60
 	}
+	if c.Memory.ProjectHistoryLimit <= 0 {
+		c.Memory.ProjectHistoryLimit = 100
+	}
+	if c.Memory.ProjectHistoryLimit > 10000 {
+		c.Memory.ProjectHistoryLimit = 10000
+	}
+	// Session auto-cleanup retention: clamp to 1..100 days, and require the
+	// explicit enable switch so a corrupted row can never trigger deletion.
+	if c.SessionCleanupDays <= 0 {
+		c.SessionCleanupDays = 14
+	}
+	if c.SessionCleanupDays > 100 {
+		c.SessionCleanupDays = 100
+	}
+	c.DCGSettings = normalizeDCGSettings(c.DCGSettings)
 	activeFound := false
 	for i := range c.Agents {
 		c.Agents[i].Normalize(i)
@@ -352,15 +426,26 @@ func (c *AppConfig) Normalize() {
 		if c.SSHConfigs[i].Port < 1 || c.SSHConfigs[i].Port > 65535 {
 			c.SSHConfigs[i].Port = 22
 		}
+		if c.SSHConfigs[i].AuthMode != "key" {
+			c.SSHConfigs[i].AuthMode = "password"
+		}
 	}
 
-	// A workspace has exactly one remote slot. Keep the first legacy entry when
-	// older data contains several remote directories.
+	// Keep one empty remote slot for the editor when a workspace has no SSH
+	// association yet. Existing entries are deliberately preserved: a workspace
+	// may connect to several remote servers through different SSH profiles.
+	agentIDs := make(map[string]bool, len(c.Agents))
+	for _, agent := range c.Agents {
+		agentIDs[agent.ID] = true
+	}
 	for i := range c.Environments {
 		if len(c.Environments[i].Remotes) == 0 {
 			c.Environments[i].Remotes = []RemoteGitDir{{}}
-		} else if len(c.Environments[i].Remotes) > 1 {
-			c.Environments[i].Remotes = c.Environments[i].Remotes[:1]
+		}
+		// DefaultAgentID must reference an existing agent; stale IDs (deleted
+		// agents) are cleared so new conversations fall back to the first agent.
+		if c.Environments[i].DefaultAgentID != "" && !agentIDs[c.Environments[i].DefaultAgentID] {
+			c.Environments[i].DefaultAgentID = ""
 		}
 	}
 
@@ -446,6 +531,7 @@ func (s *ConfigStore) assemble() AppConfig {
 			cfg.Preferences.FontSize = setting.FontSize
 		}
 		cfg.Preferences.ShowIdentity = setting.ShowIdentity
+		cfg.Preferences.ConciseChat = setting.ConciseChat
 		cfg.DefaultProvider = setting.DefaultProvider
 		cfg.DefaultModel = setting.DefaultModel
 		cfg.LastEnvironment = setting.LastEnvironment
@@ -462,6 +548,12 @@ func (s *ConfigStore) assemble() AppConfig {
 		if setting.GlobalPlugins != "" {
 			_ = json.Unmarshal([]byte(setting.GlobalPlugins), &cfg.Extensions.GlobalPlugins)
 		}
+		if setting.DBConfig != "" {
+			_ = json.Unmarshal([]byte(setting.DBConfig), &cfg.Extensions.DB)
+		}
+		if setting.DCGPolicy != "" {
+			_ = json.Unmarshal([]byte(setting.DCGPolicy), &cfg.DCGSettings)
+		}
 		cfg.UserProfile = UserProfile{
 			Name:   setting.UserName,
 			Avatar: setting.UserAvatar,
@@ -469,6 +561,9 @@ func (s *ConfigStore) assemble() AppConfig {
 		cfg.SubagentConcurrency = setting.SubagentConcurrency
 		cfg.SystemNotificationEnabled = setting.SystemNotificationEnabled
 		cfg.ToolExecutionTimeoutMinutes = setting.ToolExecutionTimeoutMinutes
+		cfg.Memory.ProjectHistoryLimit = setting.ProjectHistoryLimit
+		cfg.SessionCleanupEnabled = setting.SessionCleanupEnabled
+		cfg.SessionCleanupDays = setting.SessionCleanupDays
 	}
 
 	providers, err := s.st.ListProviders()
@@ -525,13 +620,16 @@ func (s *ConfigStore) assemble() AppConfig {
 		cfgs := make([]SSHConfig, 0, len(sshConfigs))
 		for _, item := range sshConfigs {
 			cfgs = append(cfgs, SSHConfig{
-				ID:       item.ID,
-				Name:     item.Name,
-				Address:  item.Address,
-				Port:     item.Port,
-				Username: item.Username,
-				Password: item.Password,
-				Remark:   item.Remark,
+				ID:                   item.ID,
+				Name:                 item.Name,
+				Address:              item.Address,
+				Port:                 item.Port,
+				Username:             item.Username,
+				AuthMode:             item.AuthMode,
+				Password:             item.Password,
+				PrivateKey:           item.PrivateKey,
+				PrivateKeyPassphrase: item.PrivateKeyPassphrase,
+				Remark:               item.Remark,
 			})
 		}
 		cfg.SSHConfigs = cfgs
@@ -548,13 +646,19 @@ func (s *ConfigStore) assemble() AppConfig {
 			if item.Remotes != "" {
 				_ = json.Unmarshal([]byte(item.Remotes), &remotes)
 			}
+			dbConnections := []string{}
+			if item.DBConnections != "" {
+				_ = json.Unmarshal([]byte(item.DBConnections), &dbConnections)
+			}
 			spaces = append(spaces, Environment{
-				ID:          item.ID,
-				Name:        item.Name,
-				Path:        item.Path,
-				Description: item.Description,
-				Active:      item.Active,
-				Remotes:     remotes,
+				ID:             item.ID,
+				Name:           item.Name,
+				Path:           item.Path,
+				Description:    item.Description,
+				Active:         item.Active,
+				Remotes:        remotes,
+				DBConnections:  dbConnections,
+				DefaultAgentID: item.DefaultAgentID,
 			})
 			if item.Active {
 				activeEnvID = item.ID
@@ -595,6 +699,9 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 	figma, _ := json.Marshal(cfg.Extensions.Figma)
 	globalMCP, _ := json.Marshal(cfg.Extensions.GlobalMCP)
 	globalPlugins, _ := json.Marshal(cfg.Extensions.GlobalPlugins)
+	// 存储流剔除派生隧道字段：隧道参数只在写快照时由 SSHConfigID 解析。
+	dbConfig, _ := json.Marshal(cfg.Extensions.DB.WithoutTunnels())
+	dcgPolicy, _ := json.Marshal(cfg.DCGSettings)
 	if err := s.st.SaveSetting(store.Setting{
 		Theme:                       cfg.Preferences.Theme,
 		Language:                    cfg.Preferences.Language,
@@ -603,6 +710,7 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 		ShowIdentity:                cfg.Preferences.ShowIdentity,
 		DiffMode:                    cfg.Preferences.DiffMode,
 		FontSize:                    cfg.Preferences.FontSize,
+		ConciseChat:                 cfg.Preferences.ConciseChat,
 		DefaultProvider:             cfg.DefaultProvider,
 		DefaultModel:                cfg.DefaultModel,
 		LastEnvironment:             cfg.LastEnvironment,
@@ -615,6 +723,11 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 		SubagentConcurrency:         cfg.SubagentConcurrency,
 		SystemNotificationEnabled:   cfg.SystemNotificationEnabled,
 		ToolExecutionTimeoutMinutes: cfg.ToolExecutionTimeoutMinutes,
+		ProjectHistoryLimit:         cfg.Memory.ProjectHistoryLimit,
+		DBConfig:                    string(dbConfig),
+		DCGPolicy:                   string(dcgPolicy),
+		SessionCleanupEnabled:       cfg.SessionCleanupEnabled,
+		SessionCleanupDays:          cfg.SessionCleanupDays,
 	}); err != nil {
 		return err
 	}
@@ -650,13 +763,16 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 	sshItems := make([]store.SSHConfig, 0, len(cfg.SSHConfigs))
 	for _, item := range cfg.SSHConfigs {
 		sshItems = append(sshItems, store.SSHConfig{
-			ID:       item.ID,
-			Name:     item.Name,
-			Address:  item.Address,
-			Port:     item.Port,
-			Username: item.Username,
-			Password: item.Password,
-			Remark:   item.Remark,
+			ID:                   item.ID,
+			Name:                 item.Name,
+			Address:              item.Address,
+			Port:                 item.Port,
+			Username:             item.Username,
+			AuthMode:             item.AuthMode,
+			Password:             item.Password,
+			PrivateKey:           item.PrivateKey,
+			PrivateKeyPassphrase: item.PrivateKeyPassphrase,
+			Remark:               item.Remark,
 		})
 	}
 	if err := s.st.SaveSSHConfigs(sshItems); err != nil {
@@ -668,13 +784,16 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 	envItems := make([]store.Environment, 0, len(cfg.Environments))
 	for _, item := range cfg.Environments {
 		remotes, _ := json.Marshal(item.Remotes)
+		dbConnections, _ := json.Marshal(item.DBConnections)
 		envItems = append(envItems, store.Environment{
-			ID:          item.ID,
-			Name:        item.Name,
-			Path:        item.Path,
-			Description: item.Description,
-			Remotes:     string(remotes),
-			Active:      item.ID == cfg.ActiveEnvID,
+			ID:             item.ID,
+			Name:           item.Name,
+			Path:           item.Path,
+			Description:    item.Description,
+			Remotes:        string(remotes),
+			Active:         item.ID == cfg.ActiveEnvID,
+			DBConnections:  string(dbConnections),
+			DefaultAgentID: item.DefaultAgentID,
 		})
 	}
 	if err := s.st.SaveEnvironments(envItems); err != nil {
@@ -686,6 +805,20 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 func (s *ConfigStore) Dir() string         { return s.st.Dir() }
 func (s *ConfigStore) PiDir() string       { return filepath.Join(s.st.Dir(), "pi") }
 func (s *ConfigStore) Store() *store.Store { return s.st }
+
+// SaveProjectHistoryLimit updates only the global setting row. Memory's
+// configuration dialog must not rewrite providers, agents, MCP files or other
+// unrelated runtime state just to change one retention number.
+func (s *ConfigStore) SaveProjectHistoryLimit(limit int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	setting, err := s.st.GetSetting()
+	if err != nil {
+		return err
+	}
+	setting.ProjectHistoryLimit = limit
+	return s.st.SaveSetting(setting)
+}
 
 func (s *ConfigStore) EnsureAgentDataDirs(cfg *AppConfig) {
 	for i := range cfg.Agents {
@@ -848,9 +981,6 @@ func (s *ConfigStore) DeleteAgent(id string) (AppConfig, error) {
 	cfg := s.Get()
 	if len(cfg.Agents) <= 1 {
 		return AppConfig{}, errors.New("at least one agent is required")
-	}
-	if cfg.ActiveAgentID == id {
-		return AppConfig{}, errors.New("the default agent cannot be deleted")
 	}
 	found := false
 	remaining := make([]AgentProfile, 0, len(cfg.Agents)-1)

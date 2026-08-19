@@ -1,10 +1,11 @@
 <script setup>
 import { computed } from 'vue'
-import { Bot, Brain, Check, Eye, EyeOff, Folder, Image, KeyRound, Plus, RefreshCw, Trash2, Wrench, X, Zap } from 'lucide-vue-next'
+import { Bot, Brain, Check, Database, Eye, EyeOff, Folder, Image, KeyRound, Plus, RefreshCw, Trash2, Wrench, X, Zap } from 'lucide-vue-next'
 import { useAppContext } from '../composables/appContext'
 import ConfirmDeleteDialog from './ConfirmDeleteDialog.vue'
+import DBConnectionForm from './DBConnectionForm.vue'
 
-const { t, pendingDeleteAgent, agentDeleteBusy, confirmDeleteAgent, pendingDeleteProvider, saving, confirmDeleteProvider, agentEditorOpen, closeAgentEditor, editingNewAgent, selectedAgent, agentList, modelOptions, newAgentId, defaultAgentId, setDefaultAgent, persistAgentChange, pickAgentDataDir, cancelNewAgent, saveNewAgent, providerEditorOpen, closeProviderEditor, providerDraft, editingNewProvider, showProviderApiKey, apiKeyVisibilityLabel, piCompatBooleanFields, formatCompat, updateCompatJson, addModel, modelRequestRoute, toggleImageInput, confirmAddProvider, confirmSaveProvider, pendingDeleteSsh, sshBusy, confirmDeleteSsh, pendingExtensionDelete, extensionDeleteBusy, confirmDeleteExtension, pendingDeleteWs, wsBusy, confirmDeleteWs, sshEditorOpen, closeSshEditor, editingNewSsh, sshDraft, persistSshChange, saveNewSsh, wsEditorOpen, closeWsEditor, editingNewWs, wsDraft, persistWsChange, saveNewWs, pickWorkspacePath, config, handleWorkspaceSshChange, handleWsPathChange, toasts, extensionBusy, showFigmaConfig, figmaAuthorizationsDraft, figmaActiveAuthorizationIdDraft, addFigmaAuthorization, removeFigmaAuthorization, persistFigma } = useAppContext()
+const { t, pendingDeleteAgent, agentDeleteBusy, confirmDeleteAgent, pendingDeleteProvider, saving, confirmDeleteProvider, agentEditorOpen, closeAgentEditor, editingNewAgent, selectedAgent, agentList, modelOptions, newAgentId, persistAgentChange, pickAgentDataDir, cancelNewAgent, saveNewAgent, providerEditorOpen, closeProviderEditor, providerDraft, editingNewProvider, showProviderApiKey, apiKeyVisibilityLabel, piCompatBooleanFields, formatCompat, updateCompatJson, addModel, modelRequestRoute, toggleImageInput, confirmAddProvider, confirmSaveProvider, pendingDeleteSsh, sshBusy, confirmDeleteSsh, pendingDeleteDb, dbBusy, confirmDeleteDb, dbEditorOpen, closeDbEditor, editingNewDb, dbDraft, persistDbChange, saveNewDb, pendingExtensionDelete, extensionDeleteBusy, confirmDeleteExtension, pendingDeleteWs, wsBusy, confirmDeleteWs, sshEditorOpen, closeSshEditor, editingNewSsh, sshDraft, persistSshChange, saveNewSsh, pickSshKeyFile, wsEditorOpen, closeWsEditor, editingNewWs, wsDraft, persistWsChange, saveNewWs, pickWorkspacePath, config, handleWorkspaceSshChange, addWorkspaceSsh, removeWorkspaceSsh, handleWsPathChange, toggleWorkspaceDb, toasts, extensionBusy, showFigmaConfig, figmaAuthorizationsDraft, figmaActiveAuthorizationIdDraft, addFigmaAuthorization, removeFigmaAuthorization, persistFigma } = useAppContext()
 
 const piToolOptions = ['read', 'bash', 'edit', 'write']
 const availableSubagents = computed(() =>
@@ -76,18 +77,6 @@ const selectedAgentDefaultModel = computed({
                   <option v-for="option in modelOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
                 </select>
               </label>
-              <fieldset class="agent-create-options agent-create-form__wide">
-                <legend>{{ t.agentDefault }}</legend>
-                <label class="agent-create-option agent-create-option--default">
-                  <input
-                    type="checkbox"
-                    :checked="selectedAgent.id === defaultAgentId"
-                    :disabled="selectedAgent.id === defaultAgentId && selectedAgent.id !== newAgentId"
-                    @change="setDefaultAgent(selectedAgent, $event.target.checked)"
-                  />
-                  <span><strong>{{ t.agentDefaultEnabled }}</strong><small>{{ t.agentDefaultHint }}</small></span>
-                </label>
-              </fieldset>
               <label class="agent-data-dir agent-create-form__wide"><span>{{ t.agentDataDir }}</span><div><input v-model="selectedAgent.dataDir" :placeholder="t.agentDataDirDefault" @change="persistAgentChange(selectedAgent)" /><button class="secondary-button" @click="pickAgentDataDir"><Folder :size="14" />{{ t.choose }}</button></div><small>{{ t.agentDataDirHint }}</small></label>
               <fieldset class="agent-create-options agent-create-form__wide">
                 <legend>{{ t.agentSubagents }}</legend>
@@ -197,6 +186,16 @@ const selectedAgentDefaultModel = computed({
     />
 
     <ConfirmDeleteDialog
+      :model-value="!!pendingDeleteDb"
+      :title="t.deleteItem"
+      :description="t.dbDeleteConfirm"
+      :busy="dbBusy"
+      :confirm-label="t.deleteItem"
+      @cancel="pendingDeleteDb = null"
+      @confirm="confirmDeleteDb"
+    />
+
+    <ConfirmDeleteDialog
       :model-value="!!pendingDeleteWs"
       :title="t.deleteItem"
       :description="t.confirmDeleteItem"
@@ -218,10 +217,24 @@ const selectedAgentDefaultModel = computed({
             <label><span>{{ t.sshAddress }}</span><input v-model="sshDraft.address" @change="persistSshChange" placeholder="192.168.1.10" /></label>
             <label><span>{{ t.sshPort }}</span><input v-model.number="sshDraft.port" type="number" min="1" max="65535" step="1" @change="persistSshChange" placeholder="22" /></label>
             <label><span>{{ t.sshUsername }}</span><input v-model="sshDraft.username" autocomplete="username" @change="persistSshChange" placeholder="root" /></label>
-            <label><span>{{ t.sshPassword }}</span><input v-model="sshDraft.password" type="password" autocomplete="current-password" @change="persistSshChange" /></label>
+            <label><span>{{ t.sshAuthMode }}</span>
+              <select v-model="sshDraft.authMode" @change="persistSshChange">
+                <option value="password">{{ t.sshPasswordMode }}</option>
+                <option value="key">{{ t.sshKeyMode }}</option>
+              </select>
+            </label>
+            <template v-if="sshDraft.authMode === 'key'">
+              <label class="db-form-wide"><span class="ssh-key-field__label">{{ t.sshPrivateKey }}
+                <button type="button" class="secondary-button" :disabled="sshBusy" @click="pickSshKeyFile"><Folder :size="13" />{{ t.sshChooseKeyFile }}</button>
+              </span><textarea v-model="sshDraft.privateKey" rows="6" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" @change="persistSshChange"></textarea></label>
+              <label><span>{{ t.sshPrivateKeyPassphrase }}</span><input v-model="sshDraft.privateKeyPassphrase" type="password" autocomplete="new-password" @change="persistSshChange" /></label>
+            </template>
+            <template v-else>
+              <label class="db-form-wide"><span>{{ t.sshPassword }}</span><input v-model="sshDraft.password" type="password" autocomplete="current-password" @change="persistSshChange" /></label>
+            </template>
             <label><span>{{ t.sshRemark }}</span><input v-model="sshDraft.remark" @change="persistSshChange" /></label>
           </div>
-          <p class="ssh-auth-hint"><KeyRound :size="14" />{{ t.sshPasswordModeHint }}</p>
+          <p class="ssh-auth-hint"><KeyRound :size="14" />{{ sshDraft.authMode === 'key' ? t.sshKeyModeHint : t.sshPasswordModeHint }}</p>
         </div>
         <footer class="agent-editor-dialog__footer">
           <div class="agent-draft-actions">
@@ -249,16 +262,33 @@ const selectedAgentDefaultModel = computed({
               <span><b>1</b>{{ t.wsLocalDirectory }}</span>
               <div><input v-model="wsDraft.path" :placeholder="t.chooseWorkspace" @change="handleWsPathChange" @paste="handleWsPathChange" /><button class="secondary-button" @click="pickWorkspacePath"><Folder :size="14" />{{ t.choose }}</button></div>
             </label>
-            <label class="workspace-editor-field">
-              <span><b>2</b>{{ t.wsSshConfigOptional }}</span>
-              <select v-model="wsDraft.remotes[0].sshConfigId" @change="handleWorkspaceSshChange">
-                <option value="">{{ config.sshConfigs.length ? t.envNoSsh : t.wsCreateSshFirst }}</option>
-                <option v-for="ssh in config.sshConfigs" :key="ssh.id" :value="ssh.id">{{ ssh.name }}</option>
+            <div class="workspace-editor-field workspace-ssh-field">
+              <span class="workspace-ssh-field__title"><b>2</b>{{ t.wsSshConfigsOptional }}</span>
+              <div v-for="(remote, index) in wsDraft.remotes" :key="remote.id" class="workspace-ssh-row">
+                <select v-model="remote.sshConfigId" :aria-label="t.wsSshConfig" @change="handleWorkspaceSshChange(remote)">
+                  <option value="">{{ config.sshConfigs.length ? t.envNoSsh : t.wsCreateSshFirst }}</option>
+                  <option v-for="ssh in config.sshConfigs" :key="ssh.id" :value="ssh.id" :disabled="wsDraft.remotes.some((item, itemIndex) => itemIndex !== index && item.sshConfigId === ssh.id)">{{ ssh.name }}</option>
+                </select>
+                <input v-if="remote.sshConfigId" v-model="remote.remotePath" :aria-label="t.wsRemoteDirectory" :placeholder="t.wsRemotePlaceholder" @change="persistWsChange" />
+                <button v-if="wsDraft.remotes.length > 1" class="icon-button danger" :aria-label="t.removeSshAssociation" @click="removeWorkspaceSsh(index)"><Trash2 :size="14" /></button>
+              </div>
+              <button class="secondary-button workspace-ssh-add" :disabled="!config.sshConfigs.length || wsDraft.remotes.length >= config.sshConfigs.length" @click="addWorkspaceSsh"><Plus :size="14" />{{ t.addSshAssociation }}</button>
+            </div>
+            <div class="workspace-editor-field workspace-db-field">
+              <span class="workspace-db-field__title"><b>3</b>{{ t.wsDbConnectionsOptional }}</span>
+              <div v-if="(config.extensions?.db?.connections || []).length" class="workspace-db-list">
+                <label v-for="conn in config.extensions.db.connections" :key="conn.id" class="workspace-db-option">
+                  <input type="checkbox" :checked="(wsDraft.dbConnections || []).includes(conn.id)" @change="toggleWorkspaceDb(conn.id, $event.target.checked)" />
+                  <span><strong>{{ conn.name }}</strong><small><Database :size="12" />{{ conn.kind }}</small></span>
+                </label>
+              </div>
+              <p v-else class="workspace-db-empty">{{ t.wsDbEmptyHint }}</p>
+            </div>
+            <label><span>{{ t.wsDefaultAgent }}</span>
+              <select v-model="wsDraft.defaultAgentId" @change="persistWsChange">
+                <option value="">{{ t.wsDefaultAgentAuto }}</option>
+                <option v-for="agent in config.agents" :key="agent.id" :value="agent.id">{{ agent.name }}</option>
               </select>
-            </label>
-            <label v-if="wsDraft.remotes[0].sshConfigId" class="workspace-editor-field">
-              <span><b>3</b>{{ t.wsRemoteDirectory }}</span>
-              <input v-model="wsDraft.remotes[0].remotePath" :placeholder="t.wsRemotePlaceholder" @change="persistWsChange" />
             </label>
           </div>
           <p class="workspace-editor-hint"><KeyRound :size="14" />{{ t.workspaceRule }}</p>
@@ -270,6 +300,27 @@ const selectedAgentDefaultModel = computed({
               <RefreshCw v-if="wsBusy" class="spin" :size="14" /><Check v-else :size="14" />{{ wsBusy ? t.savingItem : t.saveWs }}
             </button>
             <button v-else class="primary-button" @click="closeWsEditor">{{ t.closeDialog }}</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="dbEditorOpen" class="modal-backdrop" @pointerdown.self="closeDbEditor">
+      <section class="agent-editor-dialog db-editor-dialog" role="dialog" aria-modal="true">
+        <header class="agent-editor-dialog__head">
+          <h2>{{ editingNewDb ? t.createDb : t.openEditor }}</h2>
+          <button class="icon-button" :aria-label="t.closeDialog" @click="closeDbEditor"><X :size="16" /></button>
+        </header>
+        <div v-if="dbDraft" class="agent-editor-dialog__body">
+          <DBConnectionForm :conn="dbDraft" :is-new="editingNewDb" @persist="persistDbChange" />
+        </div>
+        <footer class="agent-editor-dialog__footer">
+          <div class="agent-draft-actions">
+            <button v-if="editingNewDb" class="secondary-button" :disabled="dbBusy" @click="closeDbEditor">{{ t.cancel }}</button>
+            <button v-if="editingNewDb" class="primary-button" :disabled="dbBusy" @click="saveNewDb">
+              <RefreshCw v-if="dbBusy" class="spin" :size="14" /><Check v-else :size="14" />{{ dbBusy ? t.savingItem : t.saveDb }}
+            </button>
+            <button v-else class="primary-button" @click="closeDbEditor">{{ t.closeDialog }}</button>
           </div>
         </footer>
       </section>

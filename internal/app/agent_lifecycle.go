@@ -371,7 +371,7 @@ func (s *AgentService) closeSingle() error {
 // cumulative value. The caller must hold s.mu.
 func (s *AgentService) finishExecutionLocked(status string) {
 	s.disarmFirstResponseWatchdogLocked()
-	s.disarmToolWatchdogLocked()
+	s.disarmAllToolWatchdogsLocked()
 	// Follow-up suppression is scoped to one failed model turn. Every path that
 	// finishes, stops, restarts, or observes an exited adapter funnels through
 	// this method, so clearing it here prevents a missing agent_settled event

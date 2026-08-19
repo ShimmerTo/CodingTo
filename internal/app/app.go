@@ -33,6 +33,9 @@ type App struct {
 	// windowCloseHook wires the frameless window's close button to the
 	// application-level shutdown flow owned by cmd/codingto (see WindowClose).
 	windowCloseHook func()
+	// cleanupMu guards lastCleanup shared with the frontend's one-shot fetch.
+	cleanupMu   sync.Mutex
+	lastCleanup *SessionCleanupResult
 	// shutdownOnce makes ServiceShutdown idempotent: it can be reached from
 	// wails' own shutdownServices (when the message loop exits) and from the
 	// background shutdown goroutine started by cmd/codingto, but the real
@@ -222,6 +225,8 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 		}
 	}
 	a.reconcileOrphanedSubagents()
+	// 会话数据自动清理：启动后异步执行，不阻塞窗口渲染；结果供前端拉取展示。
+	a.startSessionCleanup()
 	applog.Infof("CodingTo %s started", appVersion)
 	return nil
 }
@@ -295,6 +300,19 @@ func (a *App) GetBootstrap() Bootstrap {
 	// became available after the application started.
 	_, _ = a.store.EnsureDefaultAgent()
 	cfg := a.store.Get()
+	// 启动时把已保存的 DCG 处置策略与工作目录放行规则同步到运行时产物
+	// （策略文件、dcg 用户配置），即使上次退出前同步失败也能自愈。
+	if err := a.writeDCGPolicyFile(cfg); err != nil {
+		applog.Warnf("write dcg policy file: %v", err)
+	}
+	if cfg.DCGSettings.WorkspaceAllow {
+		if err := syncDCGWorkspaceAllow(cfg); err != nil {
+			applog.Warnf("sync dcg workspace allow: %v", err)
+		}
+	}
+	// 凭据隔离：密码仅存 App 存储与 0600 快照，bootstrap 下发前脱敏；
+	// 前端保存时空密码由 SaveConfig 沿用已存密码。
+	cfg.Extensions.DB = cfg.Extensions.DB.Masked()
 	return Bootstrap{
 		Config:          cfg,
 		ProviderPresets: piagent.ProviderPresets(),
@@ -307,7 +325,21 @@ func (a *App) GetBootstrap() Bootstrap {
 }
 
 func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
+	previous := a.store.Get()
 	cfg.Normalize()
+	// DB 连接密码不回显（GetBootstrap 已脱敏）：提交的空密码沿用已存密码，
+	// 避免普通配置保存把既有凭据清空。
+	previousPasswords := make(map[string]string, len(previous.Extensions.DB.Connections))
+	for _, conn := range previous.Extensions.DB.Connections {
+		previousPasswords[conn.ID] = conn.Password
+	}
+	for i := range cfg.Extensions.DB.Connections {
+		conn := &cfg.Extensions.DB.Connections[i]
+		if conn.Password == "" {
+			conn.Password = previousPasswords[conn.ID]
+		}
+	}
+	enableSubagentExtensionForNewAssignments(&cfg, previous)
 	a.store.EnsureAgentDataDirs(&cfg)
 	seenAgents := make(map[string]bool, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
@@ -356,7 +388,74 @@ func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 	if err := a.store.Save(cfg); err != nil {
 		return AppConfig{}, err
 	}
+	// 工作空间 DB 勾选可能随本次保存变更：重写活动会话快照，
+	// bridge 在下次请求时按 mtime 懒重载。
+	if a.agent != nil {
+		a.agent.refreshActiveDBSnapshot()
+	}
+	// DCG 处置策略或工作空间列表变化时同步策略文件与 dcg 放行规则。
+	a.ensureDCGRuntime(cfg, previous)
 	return a.store.Get(), nil
+}
+
+// enableSubagentExtensionForNewAssignments enables the parent-side bridge when
+// a user grants an agent access to a new subagent. It intentionally reacts only
+// to a new assignment: users may still remove the extension afterwards.
+func enableSubagentExtensionForNewAssignments(cfg *AppConfig, previous AppConfig) {
+	previousAssignments := make(map[string]map[string]bool, len(previous.Agents))
+	for _, agent := range previous.Agents {
+		assignments := make(map[string]bool, len(agent.SubAgents))
+		for _, id := range agent.SubAgents {
+			assignments[id] = true
+		}
+		previousAssignments[agent.ID] = assignments
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		for _, id := range agent.SubAgents {
+			if previousAssignments[agent.ID][id] {
+				continue
+			}
+			agent.Builtin["subagent"] = true
+			break
+		}
+	}
+}
+
+// enableBuiltinForAgents persists a builtin extension after a feature that
+// depends on it has been installed for the selected agents.
+func (a *App) enableBuiltinForAgents(agentIDs []string, key string) error {
+	wanted := make(map[string]bool, len(agentIDs))
+	for _, id := range agentIDs {
+		wanted[id] = true
+	}
+	cfg := a.store.Get()
+	found := make(map[string]bool, len(wanted))
+	changed := false
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if !wanted[agent.ID] {
+			continue
+		}
+		found[agent.ID] = true
+		if agent.Builtin == nil {
+			agent.Builtin = map[string]bool{}
+		}
+		if !agent.Builtin[key] {
+			agent.Builtin[key] = true
+			changed = true
+		}
+	}
+	for _, id := range agentIDs {
+		if !found[id] {
+			return fmt.Errorf("agent not found: %s", id)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	_, err := a.SaveConfig(cfg)
+	return err
 }
 
 // sanitizeStewardToolset enforces that the steward toolset is enabled on the

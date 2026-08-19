@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"codingto/internal/applog"
+	"codingto/internal/dbsecurity"
 )
 
 // FigmaPackage is installed once as a global runtime dependency. Individual Pi
@@ -43,6 +44,9 @@ type Config struct {
 	Figma         FigmaConfig     `json:"figma"`
 	GlobalMCP     []GlobalPackage `json:"globalMcp"`
 	GlobalPlugins []GlobalPackage `json:"globalPlugins"`
+	// DB is the global database connection inventory; each connection carries
+	// its own permission policy (preset + overrides). No global policy layer.
+	DB dbsecurity.DBConfig `json:"db"`
 }
 
 type GlobalPackage struct {
@@ -110,7 +114,6 @@ type BuiltinToolStatus struct {
 	Key              string `json:"key"`
 	Name             string `json:"name"`
 	Description      string `json:"description"`
-	Required         bool   `json:"required"`
 	Installed        bool   `json:"installed"`
 	CurrentVersion   string `json:"currentVersion"`
 	InstalledVersion string `json:"installedVersion"`
@@ -224,6 +227,7 @@ func DefaultConfig() Config {
 		},
 		GlobalMCP:     []GlobalPackage{},
 		GlobalPlugins: []GlobalPackage{},
+		DB:            dbsecurity.DBConfig{Connections: []dbsecurity.ConnectionConfig{}},
 	}
 }
 
@@ -231,6 +235,7 @@ func (c *Config) Normalize() {
 	c.Figma.Normalize()
 	c.GlobalMCP = normalizeGlobalPackages(c.GlobalMCP)
 	c.GlobalPlugins = normalizeGlobalPackages(c.GlobalPlugins)
+	c.DB.Normalize()
 }
 
 func normalizeGlobalPackages(packages []GlobalPackage) []GlobalPackage {

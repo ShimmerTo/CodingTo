@@ -1,12 +1,13 @@
 <script setup>
-import { ref, watch, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { Download, FolderOpen, Globe2, Moon, RefreshCw, Sun, Upload, User } from 'lucide-vue-next'
 import { Call, Events } from '@wailsio/runtime'
 import { useAppContext } from '../../composables/appContext'
+import { conciseToggleFocus } from '../../utils/settingsNav'
 import InstallDialog from '../../components/InstallDialog.vue'
 import { renderMarkdown } from '../../components/chat/chatFormatters.js'
 
-const { t, config, bootstrap, pickSessionDirectory, persist, appUpdateAvailable } = useAppContext()
+const { t, config, bootstrap, pickSessionDirectory, persist, appUpdateAvailable, openGlobalPromptConfig } = useAppContext()
 const piVersion = ref('')
 const checkingUpdate = ref(false)
 const updating = ref(false)
@@ -91,7 +92,26 @@ async function checkAppUpdate() {
 // 保证"检测到新版 → 菜单红点常驻提醒"这一预期行为。
 onMounted(() => {
   if (!appStatus.value) void checkAppUpdate()
+  // 聊天区「精简模式」提示跳转：定位并高亮「精简对话」开关。
+  if (conciseToggleFocus.value) {
+    conciseToggleFocus.value = false
+    nextTick(() => requestAnimationFrame(scrollToConciseToggle))
+  }
 })
+
+// 「精简对话」开关定位：滚动到开关所在行并短暂高亮，提示用户点击位置。
+const conciseRowEl = ref(null)
+const conciseRowHighlight = ref(false)
+let conciseHighlightTimer = 0
+function scrollToConciseToggle() {
+  const el = conciseRowEl.value
+  if (!el) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  conciseRowHighlight.value = true
+  clearTimeout(conciseHighlightTimer)
+  conciseHighlightTimer = window.setTimeout(() => { conciseRowHighlight.value = false }, 2600)
+}
+onBeforeUnmount(() => { clearTimeout(conciseHighlightTimer) })
 
 function downloadAndInstallApp() {
   if (!appStatus.value?.downloadUrl) return
@@ -181,6 +201,11 @@ function setShowIdentity(value) {
   config.preferences.showIdentity = value
   persist()
 }
+// 精简对话：默认关闭，开启后对话详情中的思考与工具调用折叠为精简摘要块。
+function setConciseChat(value) {
+  config.preferences.conciseChat = !!value
+  persist()
+}
 function setSubagentConcurrency(value) {
   config.subagentConcurrency = Math.min(4, Math.max(1, Number(value) || 4))
   persist()
@@ -188,6 +213,15 @@ function setSubagentConcurrency(value) {
 // 工具调用超时：限制单次工具（bash）执行时长，默认 10 分钟，最大 1 小时（60 分钟）。
 function setToolExecutionTimeout(value) {
   config.toolExecutionTimeoutMinutes = Math.min(60, Math.max(1, Number(value) || 10))
+  persist()
+}
+// 会话数据自动清理：启动时按保留天数清理过期会话（DB 记录 + 磁盘会话目录）。
+function setSessionCleanupEnabled(value) {
+  config.sessionCleanupEnabled = !!value
+  persist()
+}
+function setSessionCleanupDays(value) {
+  config.sessionCleanupDays = Math.min(100, Math.max(1, Number(value) || 14))
   persist()
 }
 // 计划审批 / 任务完成时是否发送系统通知（默认开启）。
@@ -290,6 +324,16 @@ function resizeImageFile(file, maxSize) {
                 <button :class="{ active: config.preferences.chatLayout === 'left' }" @click="setChatLayout('left')">{{ t.chatLayoutLeft }}</button>
               </div>
             </div>
+            <div ref="conciseRowEl" class="setting-row setting-row--toggle" :class="{ 'is-focused': conciseRowHighlight }">
+              <div>
+                <label>{{ t.conciseChat }}</label>
+                <small>{{ t.conciseChatHint }}</small>
+              </div>
+              <label class="switch" :title="t.conciseChat">
+                <input type="checkbox" :checked="config.preferences.conciseChat === true" @change="setConciseChat($event.target.checked)" />
+                <span class="switch__track"></span>
+              </label>
+            </div>
             <div class="setting-row">
               <div><label>{{ t.diffMode }}</label></div>
               <div class="segmented">
@@ -349,7 +393,13 @@ function resizeImageFile(file, maxSize) {
                 <button :class="{ active: config.systemNotificationEnabled === false }" @click="setSystemNotification(false)">{{ t.off }}</button>
               </div>
             </div>
-            <p class="settings-note">{{ t.subagentConcurrencyNextStart }}</p>
+            <div class="setting-row">
+              <div>
+                <label>{{ t.globalPromptConfig }}</label>
+                <small>{{ t.globalPromptConfigHint }}</small>
+              </div>
+              <button class="secondary-button" type="button" @click="openGlobalPromptConfig">{{ t.globalPromptConfigAction }}</button>
+            </div>
           </div>
 
           <div class="settings-section">
@@ -391,10 +441,37 @@ function resizeImageFile(file, maxSize) {
                 <small>{{ t.sessionStorageHint }}</small>
               </div>
               <div class="directory-field">
-                <input v-model.trim="config.sessionDir" :placeholder="t.sessionStorageDefault" @change="savePrefs()" />
+                <input v-model.trim="config.sessionDir" :placeholder="t.sessionStorageDefault" @change="persist()" />
                 <button class="secondary-button" type="button" @click="pickDir">
                   <FolderOpen :size="14" />{{ t.choose }}
                 </button>
+              </div>
+            </div>
+            <div class="setting-row setting-row--toggle">
+              <div>
+                <label>{{ t.sessionCleanup }}</label>
+                <small>{{ t.sessionCleanupHint }}</small>
+              </div>
+              <label class="switch" :title="t.sessionCleanup">
+                <input type="checkbox" :checked="config.sessionCleanupEnabled === true" @change="setSessionCleanupEnabled($event.target.checked)" />
+                <span class="switch__track"></span>
+              </label>
+            </div>
+            <div class="setting-row">
+              <div>
+                <label>{{ t.sessionCleanupDays }}</label>
+                <small>{{ t.sessionCleanupRange }}。{{ t.sessionCleanupNextStart }}</small>
+              </div>
+              <div class="cleanup-days-field">
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  class="tool-timeout-input"
+                  :value="config.sessionCleanupDays || 14"
+                  @change="setSessionCleanupDays($event.target.value)"
+                />
+                <span class="cleanup-days-unit">{{ t.sessionCleanupDaysUnit }}</span>
               </div>
             </div>
           </div>
@@ -544,5 +621,14 @@ function resizeImageFile(file, maxSize) {
 .tool-timeout-input::-webkit-outer-spin-button,
 .tool-timeout-input::-webkit-inner-spin-button {
   opacity: 1;
+}
+.cleanup-days-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.cleanup-days-unit {
+  color: var(--muted);
+  font-size: var(--fs-13);
 }
 </style>

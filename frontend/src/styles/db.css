@@ -1,0 +1,109 @@
+/* DB Security Gateway: environment page cards, editor dialog, policy editor */
+
+/* 卡片 */
+.db-card { gap: 12px; }
+/* SQLite 文件路径独占整行，长路径自动换行避免溢出卡片 */
+.db-file-row { grid-column: 1 / -1; min-width: 0; }
+.db-file-row dd { white-space: normal; overflow-wrap: anywhere; }
+.db-kind-badge {
+  flex: 0 0 auto; padding: 2px 8px; border-radius: 999px;
+  /* 状态类标签：浅灰底深色文字，深色主题下不反转，保持可读对比 */
+  color: #3d3d3a; background: #e7e7e3;
+  font-size: var(--fs-12); font-weight: 650; letter-spacing: .02em; white-space: nowrap;
+}
+:root[data-theme="dark"] .db-kind-badge { color: #3d3d3a; background: #d9d9d4; }
+.db-ssh-badge {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 2px 8px; border-radius: 999px;
+  color: #3d3d3a; background: #e7e7e3;
+  font-size: var(--fs-12); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+:root[data-theme="dark"] .db-ssh-badge { color: #3d3d3a; background: #d9d9d4; }
+.db-preset-badge {
+  flex: 0 0 auto; padding: 2px 8px; border-radius: 999px;
+  color: #3d3d3a; background: #e7e7e3;
+  font-size: var(--fs-12); font-weight: 650; white-space: nowrap;
+}
+:root[data-theme="dark"] .db-preset-badge { color: #3d3d3a; background: #d9d9d4; }
+.db-preset-badge[data-preset="full"] { color: #7a4a12; background: #f3e3c8; }
+:root[data-theme="dark"] .db-preset-badge[data-preset="full"] { color: #6b3f0d; background: #ecd9b5; }
+.db-preset-badge[data-preset="custom"] { color: #1f4f75; background: #d9e7f2; }
+:root[data-theme="dark"] .db-preset-badge[data-preset="custom"] { color: #1c476a; background: #cfe2f0; }
+.db-card__foot { display: flex; align-items: center; gap: 10px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.db-card__foot .secondary-button { flex: 0 0 auto; }
+.db-card__foot small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-12); }
+.db-test-result--ok { color: #1c7a3f; }
+.db-test-result--fail { color: var(--danger); }
+.db-panel-hint { display: flex; align-items: center; gap: 7px; margin: 16px 0 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.5; }
+
+/* 编辑弹窗 */
+.db-editor-dialog { width: min(720px, 100%); max-height: min(84vh, 860px); }
+.db-editor-dialog .agent-editor-dialog__body { overflow-y: auto; }
+.db-connection-form { display: flex; flex-direction: column; gap: 22px; }
+.db-form-section { display: flex; flex-direction: column; gap: 10px; }
+.db-form-section h3 { margin: 0; padding-bottom: 8px; border-bottom: 1px solid var(--border-soft); font-size: var(--fs-13); }
+.db-form-wide { grid-column: 1 / -1; }
+.db-form-test { display: flex; align-items: center; gap: 10px; }
+.db-form-test small { font-size: var(--fs-12); }
+.db-password-hint, .db-policy-hint { margin: 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.5; }
+
+/* 策略编辑器 */
+.db-policy-editor { display: flex; flex-direction: column; gap: 14px; }
+.db-policy-editor__presets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.db-preset-option { display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--surface-2); cursor: pointer; }
+.db-preset-option.active { border-color: var(--border); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border-soft); }
+.db-preset-option input { margin-top: 3px; }
+.db-preset-option strong, .db-preset-option small { display: block; }
+.db-preset-option strong { font-size: var(--fs-13); }
+.db-preset-option small { margin-top: 3px; color: var(--faint); font-size: var(--fs-12); line-height: 1.45; }
+.db-overrides { display: flex; flex-direction: column; gap: 8px; }
+.db-overrides__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.db-overrides__hint { color: var(--faint); font-size: var(--fs-12); line-height: 1.5; }
+.db-overrides__empty { margin: 0; color: var(--faint); font-size: var(--fs-12); }
+.db-override-rule { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--surface-2); }
+.db-override-rule__row { display: grid; grid-template-columns: 1.2fr 1fr auto; gap: 8px; align-items: end; }
+.db-override-rule__row label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.db-override-rule__row label > span { color: var(--faint); font-size: var(--fs-12); }
+.db-override-rule__wide { grid-column: 1 / 2; }
+.db-override-rule__conds { grid-template-columns: auto auto 1fr; align-items: center; }
+.db-cond-check { flex-direction: row !important; display: flex; align-items: center; gap: 6px; align-self: end; font-size: var(--fs-12); color: var(--muted); }
+.db-override-rule__reason { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.db-override-rule__reason > span { color: var(--faint); font-size: var(--fs-12); }
+
+/* Override 规则内表单控件：与 .form-grid 控件同风格，消除浏览器原生外观 */
+.db-override-rule input[type="text"],
+.db-override-rule input:not([type]),
+.db-override-rule input[type="number"],
+.db-override-rule select {
+  min-width: 0; width: 100%; height: 32px; border: 1px solid var(--border); outline: 0;
+  border-radius: 7px; padding: 0 9px; color: var(--text); background: var(--surface); font-size: var(--fs-12);
+}
+.db-override-rule input[type="text"]:focus, .db-override-rule input:not([type]):focus, .db-override-rule input[type="number"]:focus, .db-override-rule select:focus { border-color: var(--faint); box-shadow: 0 0 0 2px rgba(113,113,109,.08); }
+.db-override-rule input[type="checkbox"] { accent-color: var(--accent); }
+/* db 弹窗内单选/复选选中色统一 */
+.db-connection-form input[type="checkbox"], .db-connection-form input[type="radio"] { accent-color: var(--accent); }
+
+/* 审计记录 */
+.db-audit-empty { margin: 0; color: var(--faint); font-size: var(--fs-12); }
+.db-audit-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; padding: 8px; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--surface-2); }
+.db-audit-row { display: grid; grid-template-columns: 130px 64px 150px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 4px 6px; border-radius: 6px; font-size: var(--fs-12); }
+.db-audit-row:nth-child(odd) { background: var(--surface); }
+.db-audit-row__time { color: var(--faint); white-space: nowrap; }
+.db-audit-row__decision { font-weight: 650; }
+.db-audit-row__decision[data-decision="allow"] { color: #1c7a3f; }
+.db-audit-row__decision[data-decision="deny"], .db-audit-row__decision[data-decision="error"] { color: var(--danger); }
+.db-audit-row__decision[data-decision="confirm"] { color: #b57924; }
+.db-audit-row__action { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.db-audit-row__sql { overflow: hidden; color: var(--text); font-family: Consolas, "SFMono-Regular", monospace; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 工作空间编辑器：数据库勾选区 */
+.workspace-db-field { display: flex; flex-direction: column; gap: 9px; }
+.workspace-db-field__title { display: flex; align-items: center; gap: 7px; }
+.workspace-db-field__title b { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; color: var(--muted); background: var(--surface-2); font-size: var(--fs-12); }
+.workspace-db-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.workspace-db-option { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--surface-2); cursor: pointer; }
+.workspace-db-option input { margin-top: 3px; }
+.workspace-db-option strong, .workspace-db-option small { display: block; }
+.workspace-db-option strong { font-size: var(--fs-13); }
+.workspace-db-option small { display: flex; align-items: center; gap: 4px; margin-top: 3px; color: var(--faint); font-size: var(--fs-12); }
+.workspace-db-empty { margin: 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.5; }

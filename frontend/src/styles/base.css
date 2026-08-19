@@ -22,6 +22,9 @@
   --danger: #d14b42;
   --success: #1a7f37;
   --amber: #d9a441;
+  --installed-tag-bg: #eeeeeb;
+  --installed-tag-fg: #171716;
+  --installed-tag-border: #d7d7d2;
   --shadow: 0 12px 35px rgba(20, 20, 18, .08);
   /* 字号分档变量：全系统字号只保留 12/13/14 三档（小）。
      中/大档由 App.vue applyTheme() 整体 +1/+2（中=13/14/15、大=14/15/16）。 */
@@ -65,6 +68,9 @@
   --hover: #2d2d2b;
   --danger: #ef6a60;
   --success: #86d6a6;
+  --installed-tag-bg: #d9d9d5;
+  --installed-tag-fg: #171716;
+  --installed-tag-border: #bfc0bb;
   --shadow: 0 14px 40px rgba(0, 0, 0, .25);
   /* 深色主题下的改动对比配色 */
   --diff-add-bg: rgba(80, 200, 130, .14);

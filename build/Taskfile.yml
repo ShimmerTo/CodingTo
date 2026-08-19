@@ -11,6 +11,11 @@ tasks:
     cmds:
       - go build -buildvcs=false -o "{{.BIN_DIR}}/subagent-bridge{{exeExt}}" ./cmd/subagent-bridge
 
+  build:db-security-bridge:
+    summary: Builds the per-session DB Security Bridge helper
+    cmds:
+      - go build -buildvcs=false -o "{{.BIN_DIR}}/db-security-bridge{{exeExt}}" ./cmd/db-security-bridge
+
   go:mod:tidy:
     summary: Runs `go mod tidy`
     internal: true

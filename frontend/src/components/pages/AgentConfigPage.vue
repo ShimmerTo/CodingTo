@@ -8,7 +8,7 @@ import { listBrowserProfiles, deleteBrowserProfile, renameBrowserProfile } from 
 import InstallDialog from '../../components/InstallDialog.vue'
 import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 
-const { t, bootstrap, selectedAgent, activeAgentId, defaultAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, setDefaultAgent, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, agentConfigInitialTab, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, removeAgentMcpServer, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, deleteSkill, skills, refreshSkills, skillsLoading } = useAppContext()
+const { t, bootstrap, selectedAgent, activeAgentId, agentList, modelOptions, extensionSnapshot, refreshExtensions, refreshAgentExtensions, extensionBusy, extensionDeleteBusy, extensionLoading, figma, toggleAgentExtension, persistAgentChange, restartAgent, pickAgentDataDir, openAgentConfig, openMemoryConfig, openPlanConfig, agentConfigInitialTab, backToAgentList, readAgentFile, writeAgentFile, pushToast, installAgentMcp, removeAgentMcpServer, installAgentExtension, uninstallAgentExtension, requestDeleteExtension, deleteSkill, skills, refreshSkills, skillsLoading } = useAppContext()
 
 const activeTab = ref(agentConfigInitialTab.value || 'basics')
 const availableSubagents = computed(() =>
@@ -79,6 +79,10 @@ async function toggleSubagent(id) {
   if (current.has(id)) current.delete(id)
   else current.add(id)
   selectedAgent.value.subagents = [...current]
+  if (current.size) {
+    selectedAgent.value.builtin ||= {}
+    selectedAgent.value.builtin.subagent = true
+  }
   await saveAgentRuntimeConfig()
 }
 function subagentTooltip(agent) {
@@ -628,21 +632,6 @@ watch(
           <input v-model="selectedAgent.name" @change="persistAgentChange(selectedAgent)" />
         </div>
         <div class="agent-view__meta-row">
-          <label>{{ t.agentDefault }}</label>
-          <label class="agent-basics-default-toggle">
-            <span class="switch">
-              <input
-                type="checkbox"
-                :checked="selectedAgent.id === defaultAgentId"
-                :disabled="selectedAgent.id === defaultAgentId"
-                @change="setDefaultAgent(selectedAgent, $event.target.checked)"
-              />
-              <span class="switch__track"></span>
-            </span>
-            <span>{{ selectedAgent.id === defaultAgentId ? t.agentDefaultEnabled : t.agentDefaultHint }}</span>
-          </label>
-        </div>
-        <div class="agent-view__meta-row">
           <label>{{ t.agentDescription }}</label>
           <input v-model="selectedAgent.description" @change="persistAgentChange(selectedAgent)" :placeholder="t.agentNoDescription" />
         </div>
@@ -931,7 +920,6 @@ watch(
                 <p class="agent-ext-row__description">{{ status.description || status.key }}</p>
                 <p v-if="status.key === 'browser-profile'" class="browser-policy-summary">{{ browserPolicySummary }}</p>
                 <div class="agent-ext-row__meta">
-                  <span v-if="status.required" class="agent-ext-row__version agent-ext-row__version--latest">{{ t.requiredBuiltin }}</span>
                   <span v-if="status.installed && status.installedVersion" class="agent-ext-row__version"><span class="agent-ext-row__version-label">{{ t.currentVersionLabel }}</span>v{{ status.installedVersion }}</span>
                   <button v-if="status.installed && status.installedVersion && status.installedVersion !== status.currentVersion" class="primary-button compact" :disabled="builtinBusy === status.key" @click="updateBuiltinTool(status.key)"><RefreshCw v-if="builtinBusy === status.key" :size="13" />{{ t.updateBuiltin }}</button>
                 </div>
@@ -940,10 +928,13 @@ watch(
                 <button v-if="status.key === 'browser-profile'" class="secondary-button compact browser-policy-button" :title="t.browserPolicyTitle" @click="openBrowserPolicyModal">
                   <Settings :size="13" />{{ t.configure }}
                 </button>
-                <button v-if="status.required" class="btn-install is-installed" disabled>
-                  <span class="btn-install__delete">{{ t.requiredBuiltin }}</span>
+                <button v-if="status.key === 'memory'" class="secondary-button compact browser-policy-button" :title="t.configure" @click="openMemoryConfig">
+                  <Settings :size="13" />{{ t.configure }}
                 </button>
-                <button v-else class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.[status.key] }" @click="onExtensionToggle('builtin', status.key, selectedAgent?.builtin?.[status.key], status.name || status.key)">
+                <button v-if="status.key === 'plan'" class="secondary-button compact browser-policy-button" :title="t.configure" @click="openPlanConfig">
+                  <Settings :size="13" />{{ t.configure }}
+                </button>
+                <button class="btn-install" :class="{ 'is-installed': selectedAgent?.builtin?.[status.key] }" @click="onExtensionToggle('builtin', status.key, selectedAgent?.builtin?.[status.key], status.name || status.key)">
                   <span class="btn-install__install">{{ t.runInstall }}</span>
                   <span class="btn-install__delete">{{ t.delete }}</span>
                 </button>

@@ -1,9 +1,10 @@
 <script setup>
 import { computed, ref } from 'vue'
-import { Bot, Drama, ExternalLink, Globe2, Image, PackagePlus, RefreshCw, Settings, ShieldAlert, Zap } from 'lucide-vue-next'
+import { Bot, Download, Drama, ExternalLink, Globe2, Image, PackagePlus, RefreshCw, ShieldAlert, SlidersHorizontal, Trash2, Zap } from 'lucide-vue-next'
 import { useAppContext } from '../../composables/appContext'
 import AgentAssignDialog from '../AgentAssignDialog.vue'
 import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
+import DcgPolicyDialog from '../DcgPolicyDialog.vue'
 import InstallDialog from '../InstallDialog.vue'
 
 const { t, refreshExtensions, extensionSnapshot, extensionBusy, extensionAction, figma, figmaAction, showFigmaConfig, installGlobalPackage, removeGlobalPackage, agentList, newAgentId } = useAppContext()
@@ -16,6 +17,7 @@ const showInstallModal = ref(false)
 const packageName = ref('')
 const pendingPluginDelete = ref(null)
 const assignDialogTool = ref('')
+const showDcgPolicy = ref(false)
 
 // 汇总各推荐扩展的已分配智能体。RTK/DCG 的 per-agent 状态在 enabled 上
 //（installed 表示全局运行时二进制），Figma 的 installed 已含 recommended 标记。
@@ -85,7 +87,7 @@ async function confirmPluginDelete() {
 </script>
 
 <template>
-  <section class="content-page">
+  <section class="content-page plugins-page">
     <div class="page-heading">
       <div><h2>{{ t.pluginsTitle }}</h2><p>{{ t.pluginsIntro }}</p></div>
       <div class="page-heading__actions">
@@ -102,9 +104,19 @@ async function confirmPluginDelete() {
         <div class="plugin-icon"><Zap :size="19" /></div>
         <div class="plugin-copy">
           <div class="plugin-name">
-            <strong>RTK</strong>
-            <span class="status-dot" :class="{ active: rtkRuntime?.installed, missing: !rtkRuntime?.installed }"></span>
-            <small>{{ rtkRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            <span class="plugin-name__main">
+              <strong :class="{ 'plugin-name__label--installed': rtkRuntime?.installed }">RTK</strong>
+              <span class="status-dot" :class="{ active: rtkRuntime?.installed, missing: !rtkRuntime?.installed }"></span>
+              <small>{{ rtkRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            </span>
+            <div class="plugin-actions">
+              <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
+              <button class="icon-button" :disabled="extensionBusy !== ''" :title="t.assignAgent" @click="openAssignDialog('rtk')"><Bot :size="14" /></button>
+              <button class="icon-button" :disabled="extensionBusy === 'rtk'" :title="rtkRuntime?.installed ? t.update : t.runInstall" @click="extensionAction(rtkRuntime || { key: 'rtk', name: 'RTK' }, 'install')">
+                <RefreshCw v-if="extensionBusy === 'rtk' || rtkRuntime?.installed" :class="{ spin: extensionBusy === 'rtk' }" :size="14" /><Download v-else :size="14" />
+              </button>
+              <button v-if="rtkRuntime?.installed" class="icon-button danger" :disabled="extensionBusy === 'rtk'" :title="t.delete" @click="requestUninstall(rtkRuntime)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <p>{{ t.globalRtkDescription }}</p>
           <code v-if="rtkRuntime?.installHint">{{ rtkRuntime.installHint }}</code>
@@ -117,22 +129,25 @@ async function confirmPluginDelete() {
             <span v-else class="plugin-assigned__empty">{{ t.notAssignedToAnyAgent }}</span>
           </div>
         </div>
-        <div class="plugin-actions">
-          <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
-          <button class="secondary-button" :disabled="extensionBusy !== ''" :title="t.assignAgent" @click="openAssignDialog('rtk')"><Bot :size="13" />{{ t.assign }}</button>
-          <button :class="rtkRuntime?.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'rtk'" @click="extensionAction(rtkRuntime || { key: 'rtk', name: 'RTK' }, 'install')">
-            <RefreshCw v-if="rtkRuntime?.installed || extensionBusy === 'rtk'" :class="{ spin: extensionBusy === 'rtk' }" :size="13" />{{ rtkRuntime?.installed ? t.update : t.runInstall }}
-          </button>
-          <button v-if="rtkRuntime?.installed" class="danger-button compact" :disabled="extensionBusy === 'rtk'" @click="requestUninstall(rtkRuntime)">{{ t.delete }}</button>
-        </div>
       </article>
       <article class="plugin-row">
         <div class="plugin-icon"><ShieldAlert :size="19" /></div>
         <div class="plugin-copy">
           <div class="plugin-name">
-            <strong>DCG</strong>
-            <span class="status-dot" :class="{ active: dcgRuntime?.installed, missing: !dcgRuntime?.installed }"></span>
-            <small>{{ dcgRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            <span class="plugin-name__main">
+              <strong :class="{ 'plugin-name__label--installed': dcgRuntime?.installed }">DCG</strong>
+              <span class="status-dot" :class="{ active: dcgRuntime?.installed, missing: !dcgRuntime?.installed }"></span>
+              <small>{{ dcgRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            </span>
+            <div class="plugin-actions">
+              <a href="https://github.com/Dicklesworthstone/destructive_command_guard" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
+              <button class="icon-button" :disabled="extensionBusy !== ''" :title="t.assignAgent" @click="openAssignDialog('dcg')"><Bot :size="14" /></button>
+              <button class="icon-button" :disabled="extensionBusy !== '' || !dcgRuntime?.installed" :title="dcgRuntime?.installed ? t.dcgPolicy : t.dcgBinaryMissing" @click="showDcgPolicy = true"><SlidersHorizontal :size="14" /></button>
+              <button class="icon-button" :disabled="extensionBusy === 'dcg'" :title="dcgRuntime?.installed ? t.update : t.runInstall" @click="extensionAction(dcgRuntime || { key: 'dcg', name: 'DCG' }, 'install')">
+                <RefreshCw v-if="extensionBusy === 'dcg' || dcgRuntime?.installed" :class="{ spin: extensionBusy === 'dcg' }" :size="14" /><Download v-else :size="14" />
+              </button>
+              <button v-if="dcgRuntime?.installed" class="icon-button danger" :disabled="extensionBusy === 'dcg'" :title="t.delete" @click="requestUninstall(dcgRuntime)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <p>{{ t.globalDcgDescription }}</p>
           <p class="plugin-hint">{{ t.globalDcgAntivirusHint }}</p>
@@ -146,62 +161,69 @@ async function confirmPluginDelete() {
             <span v-else class="plugin-assigned__empty">{{ t.notAssignedToAnyAgent }}</span>
           </div>
         </div>
-        <div class="plugin-actions">
-          <a href="https://github.com/Dicklesworthstone/destructive_command_guard" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
-          <button class="secondary-button" :disabled="extensionBusy !== ''" :title="t.assignAgent" @click="openAssignDialog('dcg')"><Bot :size="13" />{{ t.assign }}</button>
-          <button :class="dcgRuntime?.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'dcg'" @click="extensionAction(dcgRuntime || { key: 'dcg', name: 'DCG' }, 'install')">
-            <RefreshCw v-if="dcgRuntime?.installed || extensionBusy === 'dcg'" :class="{ spin: extensionBusy === 'dcg' }" :size="13" />{{ dcgRuntime?.installed ? t.update : t.runInstall }}
-          </button>
-          <button v-if="dcgRuntime?.installed" class="danger-button compact" :disabled="extensionBusy === 'dcg'" @click="requestUninstall(dcgRuntime)">{{ t.delete }}</button>
-        </div>
       </article>
       <article class="plugin-row">
         <div class="plugin-icon"><Globe2 :size="19" /></div>
         <div class="plugin-copy">
           <div class="plugin-name">
-            <strong>{{ t.globalBrowserRuntime }}</strong>
-            <span class="status-dot" :class="{ active: browserRuntime?.installed, missing: !browserRuntime?.installed }"></span>
-            <small>{{ browserRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            <span class="plugin-name__main">
+              <strong :class="{ 'plugin-name__label--installed': browserRuntime?.installed }">{{ t.globalBrowserRuntime }}</strong>
+              <span class="status-dot" :class="{ active: browserRuntime?.installed, missing: !browserRuntime?.installed }"></span>
+              <small>{{ browserRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            </span>
+            <div class="plugin-actions">
+              <a href="https://agent-browser.dev/" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
+              <button class="icon-button" :disabled="extensionBusy === 'agent-browser'" :title="browserRuntime?.installed ? t.update : t.runInstall" @click="extensionAction(browserRuntime || { key: 'agent-browser', name: t.globalBrowserRuntime }, 'install')">
+                <RefreshCw v-if="extensionBusy === 'agent-browser' || browserRuntime?.installed" :class="{ spin: extensionBusy === 'agent-browser' }" :size="14" /><Download v-else :size="14" />
+              </button>
+              <button v-if="browserRuntime?.installed" class="icon-button danger" :disabled="extensionBusy === 'agent-browser'" :title="t.delete" @click="requestUninstall(browserRuntime)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <p>{{ t.globalBrowserRuntimeDescription }}</p>
           <code>{{ browserRuntime?.installHint || 'npm install -g agent-browser' }}</code>
           <code v-if="browserRuntime?.version">{{ browserRuntime.version }}</code>
-        </div>
-        <div class="plugin-actions">
-          <a href="https://agent-browser.dev/" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
-          <button :class="browserRuntime?.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'agent-browser'" @click="extensionAction(browserRuntime || { key: 'agent-browser', name: t.globalBrowserRuntime }, 'install')">
-            <RefreshCw v-if="browserRuntime?.installed || extensionBusy === 'agent-browser'" :class="{ spin: extensionBusy === 'agent-browser' }" :size="13" />{{ browserRuntime?.installed ? t.update : t.runInstall }}
-          </button>
-          <button v-if="browserRuntime?.installed" class="danger-button compact" :disabled="extensionBusy === 'agent-browser'" @click="requestUninstall(browserRuntime)">{{ t.delete }}</button>
         </div>
       </article>
       <article class="plugin-row">
         <div class="plugin-icon"><Drama :size="19" /></div>
         <div class="plugin-copy">
           <div class="plugin-name">
-            <strong>Playwright</strong>
-            <span class="status-dot" :class="{ active: playwrightRuntime?.installed, missing: !playwrightRuntime?.installed }"></span>
-            <small>{{ playwrightRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            <span class="plugin-name__main">
+              <strong :class="{ 'plugin-name__label--installed': playwrightRuntime?.installed }">Playwright</strong>
+              <span class="status-dot" :class="{ active: playwrightRuntime?.installed, missing: !playwrightRuntime?.installed }"></span>
+              <small>{{ playwrightRuntime?.installed ? t.installed : t.notInstalled }}</small>
+            </span>
+            <div class="plugin-actions">
+              <a href="https://playwright.dev/" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
+              <button class="icon-button" :disabled="extensionBusy === 'playwright'" :title="playwrightRuntime?.installed ? t.update : t.runInstall" @click="extensionAction(playwrightRuntime || { key: 'playwright', name: 'Playwright' }, 'install')">
+                <RefreshCw v-if="extensionBusy === 'playwright' || playwrightRuntime?.installed" :class="{ spin: extensionBusy === 'playwright' }" :size="14" /><Download v-else :size="14" />
+              </button>
+              <button v-if="playwrightRuntime?.installed" class="icon-button danger" :disabled="extensionBusy === 'playwright'" :title="t.delete" @click="requestUninstall(playwrightRuntime)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <p>{{ t.globalPlaywrightDescription }}</p>
           <code>{{ playwrightRuntime?.installHint || 'npm install -g playwright && playwright install chromium' }}</code>
           <code v-if="playwrightRuntime?.version">{{ playwrightRuntime.version }}</code>
-        </div>
-        <div class="plugin-actions">
-          <a href="https://playwright.dev/" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
-          <button :class="playwrightRuntime?.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'playwright'" @click="extensionAction(playwrightRuntime || { key: 'playwright', name: 'Playwright' }, 'install')">
-            <RefreshCw v-if="playwrightRuntime?.installed || extensionBusy === 'playwright'" :class="{ spin: extensionBusy === 'playwright' }" :size="13" />{{ playwrightRuntime?.installed ? t.update : t.runInstall }}
-          </button>
-          <button v-if="playwrightRuntime?.installed" class="danger-button compact" :disabled="extensionBusy === 'playwright'" @click="requestUninstall(playwrightRuntime)">{{ t.delete }}</button>
         </div>
       </article>
       <article class="plugin-row">
         <div class="plugin-icon"><Image :size="19" /></div>
         <div class="plugin-copy">
           <div class="plugin-name">
-            <strong>{{ t.figma }}</strong>
-            <span class="status-dot" :class="{ active: figma.installed && figma.hasToken, missing: !figma.installed || !figma.hasToken }"></span>
-            <small>{{ !figma.installed ? t.notInstalled : (figma.hasToken ? t.figmaAuthorized : t.figmaNotAuthorized) }}</small>
+            <span class="plugin-name__main">
+              <strong :class="{ 'plugin-name__label--installed': figma.installed }">{{ t.figma }}</strong>
+              <span class="status-dot" :class="{ active: figma.installed && figma.hasToken, missing: !figma.installed || !figma.hasToken }"></span>
+              <small>{{ !figma.installed ? t.notInstalled : (figma.hasToken ? t.figmaAuthorized : t.figmaNotAuthorized) }}</small>
+            </span>
+            <div class="plugin-actions">
+              <a href="https://www.figma.com" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
+              <button class="icon-button" :disabled="extensionBusy !== '' || !figma.hasToken" :title="figma.hasToken ? t.assignAgent : t.configureFigmaFirst" @click="openAssignDialog('figma')"><Bot :size="14" /></button>
+              <button class="icon-button" :disabled="extensionBusy === 'figma-install'" :title="figma.installed ? t.update : t.runInstall" @click="figmaAction('install')">
+                <RefreshCw v-if="extensionBusy === 'figma-install' || figma.installed" :class="{ spin: extensionBusy === 'figma-install' }" :size="14" /><Download v-else :size="14" />
+              </button>
+              <button v-if="figma.installed" class="icon-button" :title="t.configure" @click="showFigmaConfig = true"><Settings :size="14" /></button>
+              <button v-if="figma.installed" class="icon-button danger" :disabled="extensionBusy === 'figma-uninstall'" :title="t.delete" @click="requestUninstall({ key: 'figma', name: t.figma }, true)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <p>{{ t.figmaDescription }}</p>
           <code>figma-developer-mcp</code>
@@ -215,20 +237,6 @@ async function confirmPluginDelete() {
             <span v-else class="plugin-assigned__empty">{{ t.notAssignedToAnyAgent }}</span>
           </div>
         </div>
-        <div class="plugin-actions">
-          <a href="https://www.figma.com" target="_blank" rel="noreferrer" :title="t.homepage"><ExternalLink :size="14" /></a>
-          <button
-            class="secondary-button"
-            :disabled="extensionBusy !== '' || !figma.hasToken"
-            :title="figma.hasToken ? t.assignAgent : t.configureFigmaFirst"
-            @click="openAssignDialog('figma')"
-          ><Bot :size="13" />{{ t.assign }}</button>
-          <button :class="figma.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'figma-install'" @click="figmaAction('install')">
-            <RefreshCw v-if="figma.installed || extensionBusy === 'figma-install'" :class="{ spin: extensionBusy === 'figma-install' }" :size="13" />{{ figma.installed ? t.update : t.runInstall }}
-          </button>
-          <button v-if="figma.installed" class="secondary-button" @click="showFigmaConfig = true"><Settings :size="13" />{{ t.configure }}</button>
-          <button v-if="figma.installed" class="danger-button compact" :disabled="extensionBusy === 'figma-uninstall'" @click="requestUninstall({ key: 'figma', name: t.figma }, true)">{{ t.delete }}</button>
-        </div>
       </article>
     </div>
 
@@ -238,19 +246,21 @@ async function confirmPluginDelete() {
         <div class="plugin-icon"><PackagePlus :size="19" /></div>
         <div class="plugin-copy">
           <div class="plugin-name">
-            <strong>{{ plugin.name || plugin.key }}</strong>
-            <span class="status-dot" :class="{ active: plugin.installed, missing: !plugin.installed }"></span>
-            <small>{{ plugin.installed ? t.installed : t.notInstalled }}</small>
+            <span class="plugin-name__main">
+              <strong :class="{ 'plugin-name__label--installed': plugin.installed }">{{ plugin.name || plugin.key }}</strong>
+              <span class="status-dot" :class="{ active: plugin.installed, missing: !plugin.installed }"></span>
+              <small>{{ plugin.installed ? t.installed : t.notInstalled }}</small>
+            </span>
+            <div class="plugin-actions">
+              <button class="icon-button" :disabled="extensionBusy === 'global-plugin-install'" :title="plugin.installed ? t.update : t.runInstall" @click="openInstallModal(plugin.key)">
+                <RefreshCw v-if="plugin.installed" :size="14" /><Download v-else :size="14" />
+              </button>
+              <button class="icon-button danger" :disabled="extensionBusy === 'global-plugin-remove'" :title="t.delete" @click="requestRemove(plugin.key)"><Trash2 :size="14" /></button>
+            </div>
           </div>
           <p>{{ plugin.description || plugin.key }}</p>
           <code>{{ plugin.installHint || `npm install -g ${plugin.key}` }}</code>
           <code v-if="plugin.version">{{ plugin.version }}</code>
-        </div>
-        <div class="plugin-actions">
-          <button :class="plugin.installed ? 'secondary-button' : 'primary-button'" :disabled="extensionBusy === 'global-plugin-install'" @click="openInstallModal(plugin.key)">
-            <RefreshCw v-if="plugin.installed" :size="13" />{{ plugin.installed ? t.update : t.runInstall }}
-          </button>
-          <button class="danger-button compact" :disabled="extensionBusy === 'global-plugin-remove'" @click="requestRemove(plugin.key)">{{ t.delete }}</button>
         </div>
       </article>
     </div>
@@ -288,12 +298,14 @@ async function confirmPluginDelete() {
       :tool-name="({ rtk: 'RTK', dcg: 'DCG', figma: t.figma })[assignDialogTool]"
       @update:model-value="assignDialogTool = ''"
     />
+
+    <DcgPolicyDialog v-model="showDcgPolicy" />
+
   </section>
 </template>
 
 <style scoped>
 .plugin-copy .plugin-hint {
-  max-width: 640px;
   margin: 8px 0 0;
   padding: 8px 10px;
   font-size: var(--fs-13);

@@ -25,7 +25,7 @@ var systemExtensions embed.FS
 //go:embed all:recommended_extensions
 var recommendedExtensions embed.FS
 
-var retiredBuiltinTools = []string{"api", "db", "git", "browser-workflow"}
+var retiredBuiltinTools = []string{"api", "git", "browser-workflow"}
 
 // stewardToolKey is the default_tools directory name of the steward toolset,
 // kept in sync with internal/steward.ToolKey (piagent must not import steward,
@@ -55,7 +55,6 @@ func BuiltinToolCatalog() ([]extensions.BuiltinToolStatus, error) {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 			Version     string `json:"version"`
-			Required    bool   `json:"required"`
 		}
 		raw, err := builtinTools.ReadFile(path.Join("default_tools", name, "meta.json"))
 		if err != nil {
@@ -68,7 +67,6 @@ func BuiltinToolCatalog() ([]extensions.BuiltinToolStatus, error) {
 			Key:            name,
 			Name:           meta.Name,
 			Description:    meta.Description,
-			Required:       meta.Required,
 			CurrentVersion: meta.Version,
 		})
 	}
@@ -96,22 +94,6 @@ func DefaultBuiltinTools() map[string]bool {
 		enabled[tool.Key] = true
 	}
 	return enabled
-}
-
-// RequiredBuiltinTools returns the subset that cannot be disabled because it
-// forms part of CodingTo's runtime contract.
-func RequiredBuiltinTools() map[string]bool {
-	catalog, err := BuiltinToolCatalog()
-	if err != nil {
-		return map[string]bool{}
-	}
-	required := make(map[string]bool)
-	for _, tool := range catalog {
-		if tool.Required {
-			required[tool.Key] = true
-		}
-	}
-	return required
 }
 
 // MaterializeSystemExtensions copies CodingTo's mandatory, non-user-configurable

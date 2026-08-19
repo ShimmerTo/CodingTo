@@ -1,14 +1,16 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ArrowDown, Bot, LoaderCircle, TerminalSquare } from 'lucide-vue-next'
+import { ArrowDown, Bot, LoaderCircle, TerminalSquare, X } from 'lucide-vue-next'
 import { useChatAutoScroll } from '../../composables/useChatAutoScroll.js'
 import ChatMessageItem from './ChatMessageItem.vue'
+import ChatFoldBlock from './ChatFoldBlock.vue'
 import SubAgentDetailsDialog from './SubAgentDetailsDialog.vue'
 import { findActiveQuestionIndex } from './questionNavigation.js'
 import { formatDuration } from './chatFormatters.js'
 import { isSubagentRunTool, toolInput, toolOutput } from './chatToolPresentation.js'
 import { resolvedSubagentStatus, subagentActivity } from './subagentRuntime.js'
 import { agentAvatar, isImageAvatar, useAppContext } from '../../composables/appContext.js'
+import { buildConciseRenderList, countConciseSteps, hasThinkingTrace } from './conciseChat.js'
 
 const props = defineProps({
   messages: { type: Array, required: true },
@@ -26,8 +28,10 @@ const userAvatar = computed(() => (config.userProfile && config.userProfile.avat
 const chatLayout = computed(() => (config.preferences && config.preferences.chatLayout) || 'left')
 // 头像昵称展示：默认开启，关闭后对话详情不再显示 agent / 用户头像与昵称。
 const showIdentity = computed(() => !(config.preferences && config.preferences.showIdentity === false))
+// 精简对话：默认关闭，开启后思考过程与工具调用折叠为精简摘要块。
+const conciseChat = computed(() => config.preferences && config.preferences.conciseChat === true)
 
-const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'preview-image'])
+const emit = defineEmits(['update-thinking-open', 'artifact-error', 'open-change-file', 'open-git-diff', 'preview-image', 'open-settings'])
 
 const PLAN_TOOL_NAMES = ['codingto_plan_present', 'codingto_plan_update']
 const runtimeNow = ref(Date.now())
@@ -212,12 +216,45 @@ const questionNodes = computed(() => {
   return nodes
 })
 
+// 消息列表实际渲染的节点：精简模式用 conciseNodes（含折叠块），否则用原始节点。
+const renderNodes = computed(() => conciseChat.value ? conciseNodes.value : questionNodes.value)
+
 function needsRuntimeUpdate(message) {
   if (message.live) return true
   if (message.role !== 'tool') return false
   const detail = message.detail || {}
   return Boolean(detail.startedAt && detail.status !== 'done' && detail.type !== 'tool_execution_end')
 }
+
+// ---- 精简对话：把思考过程与工具调用折叠为摘要块 ----
+// 以「思考输出的 content」为边界折叠思考与工具调用（见 conciseChat.js）。
+const conciseNodes = computed(() => questionNodes.value.map(node => ({
+  ...node,
+  renderList: buildConciseRenderList(node.agentMessages)
+})))
+
+function conciseBlockNeedsRuntime(items) {
+  return items.some(item => needsRuntimeUpdate(item.message))
+}
+
+// ---- 精简对话提示条：未开启精简且思考+工具调用超过 50 次时，顶部居中提示 ----
+const CONCISE_HINT_DISMISS_KEY = 'codingto:concise-hint-dismissed'
+const conciseHintDismissed = ref(false)
+function loadConciseHintDismissed() {
+  try { conciseHintDismissed.value = localStorage.getItem(CONCISE_HINT_DISMISS_KEY) === '1' } catch { conciseHintDismissed.value = false }
+}
+loadConciseHintDismissed()
+function dismissConciseHint() {
+  conciseHintDismissed.value = true
+  try { localStorage.setItem(CONCISE_HINT_DISMISS_KEY, '1') } catch { /* ignore */ }
+}
+function openConciseSettings() {
+  emit('open-settings')
+}
+const conciseStepCount = computed(() => countConciseSteps(displayMessages.value))
+const showConciseHint = computed(() => (
+  !conciseChat.value && !conciseHintDismissed.value && conciseStepCount.value > 50
+))
 
 const {
   scrollEl,
@@ -368,6 +405,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="chat-main__messages">
+    <div v-if="showConciseHint" class="concise-hint" role="note">
+      <span>{{ t.conciseHintPrefix }}</span>
+      <button class="concise-hint__action" type="button" @click="openConciseSettings">{{ t.conciseHintAction }}</button>
+      <span>{{ t.conciseHintSuffix }}</span>
+      <button class="concise-hint__close" type="button" :title="t.conciseHintClose" :aria-label="t.conciseHintClose" @click="dismissConciseHint"><X :size="13" /></button>
+    </div>
     <div
       ref="scrollEl"
       class="chat-main__scroll"
@@ -387,7 +430,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-else ref="messageListEl" class="message-list" :class="chatLayout === 'side' ? 'message-list--side' : ''">
-        <section v-for="node in questionNodes" :key="node.key" class="message-node">
+        <section v-for="node in renderNodes" :key="node.key" class="message-node">
           <ChatMessageItem
             v-for="message in node.userMessages"
             :key="message.id"
@@ -418,27 +461,73 @@ onBeforeUnmount(() => {
             </span>
             <strong class="message-node__name">{{ node.agentName }}</strong>
           </header>
-          <ChatMessageItem
-            v-for="message in node.agentMessages"
-            :key="message.id"
-            :message="message"
-            :session-id="sessionId"
-            :agents="agents"
-            :agent-avatar="node.agentAvatar"
-            :agent-name="node.agentName"
-            :user-avatar="userAvatar"
-            :chat-layout="chatLayout"
-            :show-identity="showIdentity"
-            :now="needsRuntimeUpdate(message) ? runtimeNow : 0"
-            :t="t"
-            :data-subagent-index="subagentIndexById.get(message.id)"
-            @update-thinking-open="emit('update-thinking-open', { id: message.id, open: $event })"
-            @artifact-error="emit('artifact-error', $event)"
-            @open-change-file="emit('open-change-file', $event)"
-            @open-git-diff="emit('open-git-diff', $event)"
-            @open-subagent-details="openSubagentDetails"
-            @preview-image="emit('preview-image', $event)"
-          />
+          <template v-if="conciseChat">
+            <template
+              v-for="entry in node.renderList"
+              :key="entry.type === 'block' ? 'block-' + entry.items[0].message.id : 'msg-' + entry.message.id"
+            >
+              <ChatFoldBlock
+                v-if="entry.type === 'block'"
+                :items="entry.items"
+                :session-id="sessionId"
+                :agents="agents"
+                :now="conciseBlockNeedsRuntime(entry.items) ? runtimeNow : 0"
+                :t="t"
+                :show-identity="showIdentity"
+                :subagent-index-by-id="subagentIndexById"
+                @update-thinking-open="emit('update-thinking-open', $event)"
+                @artifact-error="emit('artifact-error', $event)"
+                @open-change-file="emit('open-change-file', $event)"
+                @open-git-diff="emit('open-git-diff', $event)"
+                @open-subagent-details="openSubagentDetails"
+                @preview-image="emit('preview-image', $event)"
+              />
+              <ChatMessageItem
+                v-else
+                :message="entry.message"
+                :session-id="sessionId"
+                :agents="agents"
+                :agent-avatar="node.agentAvatar"
+                :agent-name="node.agentName"
+                :user-avatar="userAvatar"
+                :chat-layout="chatLayout"
+                :show-identity="showIdentity"
+                :now="needsRuntimeUpdate(entry.message) ? runtimeNow : 0"
+                :t="t"
+                :hide-thinking="hasThinkingTrace(entry.message)"
+                :data-subagent-index="subagentIndexById.get(entry.message.id)"
+                @update-thinking-open="emit('update-thinking-open', { id: entry.message.id, open: $event })"
+                @artifact-error="emit('artifact-error', $event)"
+                @open-change-file="emit('open-change-file', $event)"
+                @open-git-diff="emit('open-git-diff', $event)"
+                @open-subagent-details="openSubagentDetails"
+                @preview-image="emit('preview-image', $event)"
+              />
+            </template>
+          </template>
+          <template v-else>
+            <ChatMessageItem
+              v-for="message in node.agentMessages"
+              :key="message.id"
+              :message="message"
+              :session-id="sessionId"
+              :agents="agents"
+              :agent-avatar="node.agentAvatar"
+              :agent-name="node.agentName"
+              :user-avatar="userAvatar"
+              :chat-layout="chatLayout"
+              :show-identity="showIdentity"
+              :now="needsRuntimeUpdate(message) ? runtimeNow : 0"
+              :t="t"
+              :data-subagent-index="subagentIndexById.get(message.id)"
+              @update-thinking-open="emit('update-thinking-open', { id: message.id, open: $event })"
+              @artifact-error="emit('artifact-error', $event)"
+              @open-change-file="emit('open-change-file', $event)"
+              @open-git-diff="emit('open-git-diff', $event)"
+              @open-subagent-details="openSubagentDetails"
+              @preview-image="emit('preview-image', $event)"
+            />
+          </template>
         </section>
       </div>
 

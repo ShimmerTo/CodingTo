@@ -15,6 +15,44 @@
 .page-view { height: 100%; display: flex; flex-direction: column; }
 .page-view .content-page { height: auto; flex: 1; min-height: 0; }
 
+/* 启动自动清理会话数据后的结果横幅：置于主内容区顶部，可点击叉号关闭。 */
+.session-cleanup-notice {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 14px 0;
+  padding: 8px 10px;
+  border: 1px solid #b9dfca;
+  border-radius: 8px;
+  color: #337b55;
+  background: #edf8f2;
+  font-size: var(--fs-13);
+}
+.session-cleanup-notice.error {
+  border-color: rgba(209, 75, 66, .3);
+  color: var(--danger);
+  background: rgba(209, 75, 66, .07);
+}
+.session-cleanup-notice span { flex: 1; }
+.session-cleanup-notice button {
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.session-cleanup-notice button:hover { background: rgba(0, 0, 0, .05); }
+:root[data-theme="dark"] .session-cleanup-notice.success {
+  border-color: #315b43;
+  color: #80c99f;
+  background: #20382a;
+}
+
 /* 程序关闭时的全屏蒙层：后端发出 app:shutting-down 后覆盖整个界面，
    让后台清理（关闭 agent 进程、steward 渠道等，最多数秒）期间有即时反馈。
    z-index 高于图片预览(1000)与归档浮层(1000)，确保盖住所有内容。 */

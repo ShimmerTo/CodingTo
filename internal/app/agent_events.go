@@ -146,6 +146,15 @@ func (s *AgentService) settledEventWithReply(sessionID int64, sessionDir string,
 	if q := firstUserQuestion(sessionDir); q != "" {
 		enriched["firstQuestion"] = q
 	}
+	// Pi 的 agent_settled 事件本身不带错误信息：模型失败的错误嵌套在收尾的
+	// message_end / turn_end / agent_end 里。若会话最终失败，必须向机器人渠道
+	// 明确上报失败（附真实错误信息），而不是把最后一条可用的 assistant 文本
+	// 当作"最终答复"以成功姿态回传。
+	if errMsg := lastSessionError(sessionDir); errMsg != "" {
+		enriched["status"] = "failed"
+		enriched["errorMessage"] = errMsg
+		return enriched
+	}
 	if reply := lastAssistantContent(sessionDir); reply != "" {
 		enriched["message"] = reply
 	}
@@ -257,8 +266,10 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	// ends so a stale timer can never fire into a later turn.
 	if eventType == "tool_execution_start" && s.activeSessionID == sessionID {
 		s.armToolWatchdogLocked(sessionID, stringValue(event["toolName"]), toolID(event))
-	} else if eventType == "tool_execution_end" || eventType == "agent_end" || eventType == "agent_settled" || eventType == "error" {
-		s.disarmToolWatchdogLocked()
+	} else if eventType == "tool_execution_end" {
+		s.disarmToolWatchdogLocked(stringValue(event["toolName"]), toolID(event))
+	} else if eventType == "agent_end" || eventType == "agent_settled" || eventType == "error" {
+		s.disarmAllToolWatchdogsLocked()
 	}
 	if eventType == "agent_end" && s.activeSessionID == sessionID {
 		willRetry, _ := event["willRetry"].(bool)

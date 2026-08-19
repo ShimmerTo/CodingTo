@@ -1,0 +1,8 @@
+{
+  "name": "Database",
+  "version": "1.0.0",
+  "tool_name": "codingto_db",
+  "description": "在安全策略管控下查询/修改已配置的数据库：列出连接、查看结构、执行查询与写入；危险操作需用户在对话框确认。",
+  "tool_description": "Query and modify configured databases under security policy; risky statements require user confirmation.",
+  "actions": ["connections", "schema", "query", "execute"]
+}

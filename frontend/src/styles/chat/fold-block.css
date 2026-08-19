@@ -1,0 +1,24 @@
+/* 精简对话「折叠摘要块」：一行摘要 + 展开后逐条展示思考/工具调用。 */
+.concise-block-row { display: flex; align-items: flex-start; margin: 2px 0 6px; }
+.concise-block-row--indented { padding-left: 37px; }
+.concise-block { min-width: 0; background: transparent; }
+/* padding 常驻（border-box 内），运行态呼吸背景出现时不引起布局跳动。 */
+.concise-block summary { display: inline-flex; align-items: center; gap: 5px; min-height: 27px; max-width: 100%; padding: 1px 6px; border-radius: 6px; cursor: pointer; color: var(--muted); font-size: var(--fs-12); line-height: 1.65; list-style: none; user-select: none; }
+/* 执行中：背景呼吸 + 左侧转圈（与思考块 thinking-breathe 同一视觉语言）。 */
+.concise-block summary.concise-block--running { animation: concise-breathe 2.2s ease-in-out infinite; }
+.concise-block__spinner { flex: 0 0 auto; color: var(--faint); }
+@keyframes concise-breathe { 0%, 100% { background: rgba(216,166,68,.04); } 50% { background: rgba(216,166,68,.16); } }
+.concise-block summary::-webkit-details-marker { display: none; }
+.concise-block__summary { min-width: 0; overflow: hidden; color: var(--muted); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.concise-block__changes { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.concise-block__changes b { font-weight: 600; }
+.concise-block__changes .is-added { color: #299764; }
+.concise-block__changes .is-deleted { color: #d14b42; }
+/* 折叠箭头始终展示，明确提示摘要行可展开。 */
+.concise-block .details-chevron { flex: 0 0 auto; color: var(--faint); transition: transform .18s; }
+.concise-block[open] > summary .details-chevron { transform: rotate(180deg); }
+.concise-block__items { padding: 4px 0 6px; }
+/* 块内条目复用 ChatMessageItem：去掉头像列后的紧凑间距。 */
+.concise-block__items .message { margin-bottom: 8px; }
+.concise-block__items .message:last-child { margin-bottom: 2px; }
+.concise-block__items .message--tool { margin-bottom: 4px; }

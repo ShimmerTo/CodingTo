@@ -15,6 +15,7 @@ import {
   saveBrowserProfile,
   respondSubagentUI, ackSubagentUI,
   setSessionDcgDisabled, getSessionDcgDisabled,
+  updateSessionModel,
   readAgentFile, writeAgentFile,
   listSkills, installSkills, previewSkillArchive, previewSkillUrl, editSkill, deleteSkill, updateSkill,
   installGlobalPackage as beInstallGlobalPackage,
@@ -25,7 +26,9 @@ import {
   installAgentExtension as beInstallAgentExtension,
   uninstallAgentExtension as beUninstallAgentExtension,
   deleteAgentExtensionDir as beDeleteAgentExtensionDir,
-  listBotChannels
+  listBotChannels,
+  testDBConnection, getDBAuditLogs,
+  testSSHConnection, chooseSSHKeyFile
 } from './backend'
 import { buildT } from './i18n'
 import ChatView from './ChatView.vue'
@@ -41,6 +44,9 @@ const EnvironmentPage = defineAsyncComponent(() => import('./components/pages/En
 const McpPage = defineAsyncComponent(() => import('./components/pages/McpPage.vue'))
 const ModelsPage = defineAsyncComponent(() => import('./components/pages/ModelsPage.vue'))
 const PluginsPage = defineAsyncComponent(() => import('./components/pages/PluginsPage.vue'))
+const MemoryConfigDialog = defineAsyncComponent(() => import('./components/MemoryConfigDialog.vue'))
+const PlanConfigDialog = defineAsyncComponent(() => import('./components/PlanConfigDialog.vue'))
+const GlobalPromptConfigDialog = defineAsyncComponent(() => import('./components/GlobalPromptConfigDialog.vue'))
 const SettingsPage = defineAsyncComponent(() => import('./components/pages/SettingsPage.vue'))
 const SkillsPage = defineAsyncComponent(() => import('./components/pages/SkillsPage.vue'))
 const StewardPage = defineAsyncComponent(() => import('./components/pages/StewardPage.vue'))
@@ -49,6 +55,7 @@ import { BROWSER_IDENTITY_DIALOG_TITLE, isPlanConfirmationDialog, shouldAbortAft
 import { mergeSubagentRuntime, parseSubagentEvent } from './components/chat/subagentRuntime'
 import { completeCompactionMessage, createCompactionMessage } from './components/chat/compactionMessages'
 import { appContextKey } from './composables/appContext'
+import { requestConciseToggleFocus } from './utils/settingsNav'
 import { defaultThinkingLevelForModel } from './modelThinking'
 import { isResolvedStewardPermission, stewardPermissionMatchesDialog } from './stewardState.js'
 import { sendSystemNotification } from './systemNotifications'
@@ -77,7 +84,18 @@ const pageComponents = {
 }
 const pageComponent = computed(() => pageComponents[activePage.value] || null)
 function goHome() { activePage.value = 'chat' }
+// 聊天区「精简模式」提示 → 打开设置页并定位到「精简对话」开关。
+function openSettingsToConcise() {
+  activePage.value = 'settings'
+  requestConciseToggleFocus()
+}
 const environmentTab = ref('workspace')
+const showMemoryConfig = ref(false)
+const showPlanConfig = ref(false)
+const showGlobalPromptConfig = ref(false)
+function openMemoryConfig() { showMemoryConfig.value = true }
+function openPlanConfig() { showPlanConfig.value = true }
+function openGlobalPromptConfig() { showGlobalPromptConfig.value = true }
 const sidebarOpen = ref(true)
 // 后端发出 app:shutting-down 后置为 true：覆盖全屏"正在关闭中"蒙层，
 // 让后台清理（关闭 agent 进程、steward 渠道等，最多数秒）期间有即时反馈，
@@ -148,7 +166,7 @@ const bootstrap = ref(null)
 // 客户端自身更新：启动后后台检查一次，有新版本时为 true，用于设置菜单红点。
 const appUpdateAvailable = ref(false)
 const config = reactive({
-  preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified', fontSize: 'small' },
+  preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified', fontSize: 'small', conciseChat: false },
   userProfile: { name: '', avatar: '' },
   providers: [],
   defaultProvider: '',
@@ -412,7 +430,6 @@ const pendingDeleteAgent = ref(null)
 const newAgentId = ref('')
 const newAgentDraft = ref(null)
 const previousAgentId = ref('')
-const previousDefaultAgentId = ref('')
 const currentAgentId = ref('')
 const agentEditorOpen = ref(false)
 const editingNewAgent = ref(false)
@@ -426,6 +443,27 @@ function pushToast(type, text, timeout = 2800) {
   window.setTimeout(() => {
     toasts.value = toasts.value.filter(item => item.id !== id)
   }, timeout)
+}
+// 启动时自动清理过期会话数据的提示横幅：后端异步清理完成后展示，叉掉即关闭。
+// 既监听后端广播事件，也在启动后主动拉取一次，避免清理先于前端监听完成时丢失提示。
+const sessionCleanupNotice = ref(null)
+function applySessionCleanupResult(res) {
+  if (!res || res.skipped) return
+  if (res.error) {
+    sessionCleanupNotice.value = { type: 'error', text: t.value.sessionCleanupFailed.replace('{error}', res.error) }
+  } else if (res.cleaned > 0) {
+    sessionCleanupNotice.value = { type: 'success', text: t.value.sessionCleanupDone.replace('{cleaned}', res.cleaned).replace('{days}', res.days) }
+  } else {
+    sessionCleanupNotice.value = { type: 'success', text: t.value.sessionCleanupNone.replace('{days}', res.days) }
+  }
+}
+async function fetchSessionCleanupNotice() {
+  try {
+    const res = await Call.ByName('codingto/internal/app.App.GetSessionCleanupResult')
+    applySessionCleanupResult(res)
+  } catch (e) {
+    // 忽略桥接未就绪等临时失败；横幅不显示也不影响功能。
+  }
 }
 const piInstallBusy = ref(false)
 const piInstallError = ref('')
@@ -484,6 +522,7 @@ let offState
 let offDocumentPreview
 let offAttachmentDrop
 let offShuttingDown
+let offCleanupEvent
 let offSubagentEvent
 let offExtensionsChanged
 let offStewardStatus
@@ -598,7 +637,6 @@ const selectedAgent = computed(() => {
   return config.agents.find(agent => agent.id === currentAgentId.value) || config.agents[0] || null
 })
 const activeAgentId = computed(() => currentAgentId.value)
-const defaultAgentId = computed(() => config.activeAgentId)
 const agentList = computed(() => newAgentDraft.value ? [...config.agents, newAgentDraft.value] : config.agents)
 const selectedProvider = computed(() => config.providers.find(p => p.name === config.defaultProvider) || config.providers[0])
 const selectedModelsProvider = computed(() => config.providers.find(p => p.name === selectedModelsProviderName.value) || config.providers[0] || null)
@@ -615,7 +653,19 @@ const thinkingLevels = computed(() => {
   return mapping ? known.filter(level => level === 'off' || mapping[level] !== null) : known
 })
 const selectedModelValue = computed({
-  get: () => `${selectedAgent.value?.defaultProvider || ''}/${selectedAgent.value?.defaultModel || ''}`,
+  get: () => {
+    // 有当前会话时以会话落库模型为准，避免 UI 显示智能体默认模型而实际
+    // 发送（runPrompt 以 task.model 优先）用的是会话旧模型的错位。
+    const task = currentTask()
+    if (task?.provider && task?.model) return `${task.provider}/${task.model}`
+    // 无会话（新建对话）时按智能体默认模型显示；智能体默认可能仍指向
+    // 已改名/删除的服务商旧标识，解析到当前有效服务商再展示。
+    const requestedModel = selectedAgent.value?.defaultModel
+    const providerName = resolveProviderName(selectedAgent.value?.defaultProvider, requestedModel)
+    const provider = config.providers.find(p => p.name === providerName)
+    const modelName = provider?.models.some(m => m.id === requestedModel) ? requestedModel : provider?.models?.[0]?.id || ''
+    return `${providerName}/${modelName}`
+  },
   set: value => {
     const index = value.indexOf('/')
     if (!selectedAgent.value) return
@@ -685,6 +735,9 @@ async function load() {
   config.extensions.figma.authorizations ||= []
   config.extensions.globalMcp ||= []
   config.extensions.globalPlugins ||= []
+  config.extensions.db ||= { connections: [] }
+  config.extensions.db.connections ||= []
+  config.extensions.db.connections.forEach(normalizeDbConnection)
   config.agents ||= []
   config.agents.forEach(normalizeAgent)
   if (config.agents.length && !config.agents.some(agent => agent.id === config.activeAgentId)) config.activeAgentId = config.agents[0].id
@@ -701,21 +754,14 @@ async function load() {
   const envIds = new Set(config.environments.map(ws => ws.id))
   for (const id of [...collapsedWorkspaceIds]) if (!envIds.has(id)) collapsedWorkspaceIds.delete(id)
   workspaceOrder.value = workspaceOrder.value.filter(id => envIds.has(id))
-  // 清理工作目录智能体记忆中已失效的引用（环境被删除 / 智能体被删除）。
-  let envAgentCacheChanged = false
-  for (const envId of Object.keys(envLastAgent)) {
-    if (!envIds.has(envId) || !config.agents.some(agent => agent.id === envLastAgent[envId])) {
-      delete envLastAgent[envId]
-      envAgentCacheChanged = true
-    }
-  }
-  if (envAgentCacheChanged) persistEnvLastAgent()
   const request = ++sessionRefreshRequest
   const requestedVersions = new Map(taskRuntimeVersions)
   const initialTasks = (await listSessions()) || []
   if (request !== sessionRefreshRequest) return
   reconcileTaskRuntimeStatus(initialTasks, requestedVersions)
   tasks.value = initialTasks
+  reconcileStaleSessionProviders(initialTasks)
+  reconcileStaleAgentProviders()
   restorePendingAttentionState(initialTasks)
   // 仅首次加载时做一次全量扩展扫描；之后返回列表/编辑扩展都只静默刷新单个 agent。
   await refreshExtensions()
@@ -845,9 +891,6 @@ function normalizeAgent(agent) {
   agent.id ||= `agent-${crypto.randomUUID().slice(0, 8)}`
   agent.name ||= 'Agent'
   agent.builtin ||= {}
-  for (const tool of builtinCatalog()) {
-    if (tool.required) agent.builtin[tool.key] = true
-  }
   agent.recommended ||= {}
   if (!Object.hasOwn(agent.recommended, 'dcg')) agent.recommended.dcg = true
   agent.subagents ||= []
@@ -872,6 +915,14 @@ function normalizeWorkspace(ws) {
     remote.remotePath ||= ''
     remote.sshConfigId ||= ''
   }
+  // 数据库勾选只保留仍存在的连接 ID（与后端 Normalize 的引用完整性一致）。
+  const dbIds = new Set((config.extensions?.db?.connections || []).map(conn => conn.id))
+  ws.dbConnections = Array.isArray(ws.dbConnections)
+    ? [...new Set(ws.dbConnections.filter(id => dbIds.has(id)))]
+    : []
+  // 默认智能体只保留仍存在的智能体 ID，失效引用清空后回退第一个智能体。
+  const agentIds = new Set(config.agents.map(agent => agent.id))
+  if (ws.defaultAgentId && !agentIds.has(ws.defaultAgentId)) ws.defaultAgentId = ''
   return ws
 }
 
@@ -883,10 +934,12 @@ const newSshId = ref('')
 const sshEditorOpen = ref(false)
 const pendingDeleteSsh = ref(null)
 const sshBusy = ref(false)
+// 卡片内联测试状态：{ [sshId]: { busy, ok, message } }。
+const sshTestStates = reactive({})
 const pendingExtensionDelete = ref(null)
 
 function defaultSsh() {
-  return { id: `ssh-${crypto.randomUUID().slice(0, 8)}`, name: `SSH ${config.sshConfigs.length + 1}`, address: '', port: 22, username: '', password: '', remark: '' }
+  return { id: `ssh-${crypto.randomUUID().slice(0, 8)}`, name: `SSH ${config.sshConfigs.length + 1}`, address: '', port: 22, username: '', authMode: 'password', password: '', privateKey: '', privateKeyPassphrase: '', remark: '' }
 }
 function normalizeSsh(ssh) {
   ssh.id ||= `ssh-${crypto.randomUUID().slice(0, 8)}`
@@ -894,7 +947,10 @@ function normalizeSsh(ssh) {
   ssh.address ||= ''
   ssh.port = Number(ssh.port) || 22
   ssh.username ||= ''
+  ssh.authMode = ssh.authMode === 'key' ? 'key' : 'password'
   ssh.password ||= ''
+  ssh.privateKey ||= ''
+  ssh.privateKeyPassphrase ||= ''
   ssh.remark ||= ''
   return ssh
 }
@@ -920,7 +976,9 @@ async function saveNewSsh() {
   if (!Number.isInteger(Number(ssh.port)) || Number(ssh.port) < 1 || Number(ssh.port) > 65535) { pushToast('error', t.value.sshPortRequired); return }
   ssh.port = Number(ssh.port)
   if (!ssh.username.trim()) { pushToast('error', t.value.sshUsernameRequired); return }
-  if (!ssh.password) { pushToast('error', t.value.sshPasswordRequired); return }
+  if (ssh.authMode === 'key') {
+    if (!ssh.privateKey.trim()) { pushToast('error', t.value.sshPrivateKeyRequired); return }
+  } else if (!ssh.password) { pushToast('error', t.value.sshPasswordRequired); return }
   sshBusy.value = true
   config.sshConfigs.push(ssh)
   const ok = await persist()
@@ -943,15 +1001,241 @@ async function confirmDeleteSsh() {
   sshBusy.value = true
   const index = config.sshConfigs.indexOf(ssh)
   config.sshConfigs.splice(index, 1)
+  const previousRemotes = config.environments.map(ws => safeClone(ws.remotes || []))
+  const previousDraftRemotes = wsDraft.value ? safeClone(wsDraft.value.remotes || []) : null
+  for (const ws of config.environments) {
+    ws.remotes = (ws.remotes || []).filter(remote => remote.sshConfigId !== ssh.id)
+    normalizeWorkspace(ws)
+  }
+  if (wsDraft.value) {
+    wsDraft.value.remotes = (wsDraft.value.remotes || []).filter(remote => remote.sshConfigId !== ssh.id)
+    normalizeWorkspace(wsDraft.value)
+  }
   const ok = await persist()
   if (ok) {
     pendingDeleteSsh.value = null
-    pushToast('success', t.value.sshCreated)
+    pushToast('success', t.value.sshDeleted)
   } else {
     config.sshConfigs.splice(index, 0, ssh)
+    config.environments.forEach((ws, wsIndex) => { ws.remotes = previousRemotes[wsIndex] })
+    if (wsDraft.value && previousDraftRemotes) wsDraft.value.remotes = previousDraftRemotes
     pushToast('error', t.value.sshCreateFailed)
   }
   sshBusy.value = false
+}
+
+// 卡片内联测试 SSH 连接：结果就地展示，不阻断其它操作。
+// 后端 TestSSHConnection 依赖 net.DialTimeout + SetDeadline 兜底，但实测在
+// 某些场景（Windows 下静默丢包的地址、握手阶段不回包）仍可能悬挂；前端再加
+// 30 秒硬超时，超时后清掉 busy 状态，避免按钮一直转圈。
+const SSH_TEST_TIMEOUT_MS = 30000
+async function testSsh(ssh) {
+  if (!ssh) return
+  // 注意：不能用 `sshTestStates[ssh.id] ||= {...}` —— 赋值表达式返回的是原始对象，
+  // 后续对 state 的修改不经过响应式代理，busy=false 时模板不会更新，按钮会永远停在
+  // “测试中”。必须先写入容器再读取，拿到响应式代理。
+  if (!sshTestStates[ssh.id]) sshTestStates[ssh.id] = { busy: false, ok: null, message: '' }
+  const state = sshTestStates[ssh.id]
+  if (state.busy) {
+    console.warn('[testSsh] busy, skip', ssh.id)
+    return
+  }
+  state.busy = true
+  state.message = ''
+  console.log('[testSsh] start', ssh.id, ssh.address)
+  try {
+    const result = await withTimeout(testSSHConnection(safeClone(ssh)), SSH_TEST_TIMEOUT_MS, t.value.sshTestTimeout)
+    console.log('[testSsh] result', ssh.id, result)
+    state.ok = !!result?.ok
+    state.message = String(result?.message || (result?.ok ? t.value.sshTestPassed : t.value.sshTestFailed))
+  } catch (err) {
+    console.warn('[testSsh] error', ssh.id, err)
+    state.ok = false
+    state.message = localizeError(String(err))
+  } finally {
+    console.log('[testSsh] finally', ssh.id)
+    state.busy = false
+  }
+}
+
+// 选择密钥文件：读取内容填入 sshDraft.privateKey（私钥仍以内容形式随配置保存）。
+async function pickSshKeyFile() {
+  if (!sshDraft.value || sshBusy.value) return
+  try {
+    const result = await chooseSSHKeyFile()
+    if (!result || !result.content) return
+    sshDraft.value.privateKey = result.content
+    pushToast('success', t.value.sshKeyFileLoaded)
+  } catch (err) {
+    pushToast('error', localizeError(String(err)))
+  }
+}
+
+// --- DB connections ---
+// 数据库连接与其连接级权限策略：数据随整体配置保存（SaveConfig），密码已
+// 脱敏下发、空密码=不修改；测试连接与审计日志是独立的按需接口。
+const dbDraft = ref(null)
+const editingNewDb = ref(false)
+const newDbId = ref('')
+const dbEditorOpen = ref(false)
+const pendingDeleteDb = ref(null)
+const dbBusy = ref(false)
+// 卡片内联测试状态：{ [connectionId]: { busy, ok, message } }。
+const dbTestStates = reactive({})
+const dbAuditRows = ref([])
+const dbAuditLoading = ref(false)
+
+function defaultDbConnection() {
+  return {
+    id: `db-${crypto.randomUUID().slice(0, 8)}`,
+    name: `Database ${config.extensions.db.connections.length + 1}`,
+    kind: 'mysql',
+    host: '', port: 3306, database: '', path: '', username: '', password: '', sslMode: '', sshConfigId: '',
+    policy: { preset: 'safe', overrides: [] },
+    queryTimeoutSeconds: 0, maxRows: 0
+  }
+}
+function normalizeDbConnection(conn) {
+  conn.id ||= `db-${crypto.randomUUID().slice(0, 8)}`
+  conn.name ||= ''
+  conn.kind ||= 'mysql'
+  conn.host ||= ''
+  conn.port = Number(conn.port) || (conn.kind === 'postgres' ? 5432 : 3306)
+  conn.database ||= ''
+  conn.path ||= ''
+  conn.username ||= ''
+  conn.password ||= ''
+  conn.sslMode ||= ''
+  conn.sshConfigId ||= ''
+  conn.policy ||= { preset: 'safe', overrides: [] }
+  conn.policy.preset ||= 'safe'
+  conn.policy.overrides ||= []
+  return conn
+}
+function openDbEditor(conn) {
+  dbDraft.value = conn ? safeClone(normalizeDbConnection(conn)) : defaultDbConnection()
+  editingNewDb.value = !conn
+  newDbId.value = conn ? '' : dbDraft.value.id
+  dbAuditRows.value = []
+  dbEditorOpen.value = true
+  if (conn) void loadDbAudit(conn.id)
+}
+function closeDbEditor() {
+  if (editingNewDb.value) {
+    dbDraft.value = null
+    newDbId.value = ''
+    editingNewDb.value = false
+  }
+  dbEditorOpen.value = false
+}
+function persistDbChange() {
+  if (newDbId.value) return
+  // 弹窗编辑的是草稿副本：变更时同步回配置再整体保存（与 persistWsChange 同模式）。
+  if (dbDraft.value) {
+    const connections = config.extensions.db.connections
+    const idx = connections.findIndex(conn => conn.id === dbDraft.value.id)
+    if (idx >= 0) connections[idx] = safeClone(dbDraft.value)
+  }
+  persist()
+}
+async function saveNewDb() {
+  const conn = dbDraft.value
+  if (!conn || dbBusy.value) return
+  if (!conn.name.trim()) { pushToast('error', t.value.dbNameRequired); return }
+  if (conn.kind === 'sqlite') {
+    if (!conn.path.trim()) { pushToast('error', t.value.dbPathRequired); return }
+  } else {
+    if (!conn.host.trim()) { pushToast('error', t.value.dbHostRequired); return }
+    const port = Number(conn.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) { pushToast('error', t.value.dbPortRequired); return }
+    conn.port = port
+  }
+  dbBusy.value = true
+  config.extensions.db.connections.push(conn)
+  const ok = await persist()
+  if (ok) {
+    newDbId.value = ''
+    dbDraft.value = null
+    editingNewDb.value = false
+    dbEditorOpen.value = false
+    pushToast('success', t.value.dbCreated)
+  } else {
+    config.extensions.db.connections = config.extensions.db.connections.filter(item => item.id !== conn.id)
+    pushToast('error', t.value.dbCreateFailed)
+  }
+  dbBusy.value = false
+}
+function requestDeleteDb(conn) { if (dbBusy.value) return; pendingDeleteDb.value = conn }
+async function confirmDeleteDb() {
+  const conn = pendingDeleteDb.value
+  if (!conn || dbBusy.value) return
+  dbBusy.value = true
+  const connections = config.extensions.db.connections
+  const index = connections.indexOf(conn)
+  connections.splice(index, 1)
+  const previousChecks = config.environments.map(ws => [...(ws.dbConnections || [])])
+  const previousDraftChecks = wsDraft.value ? [...(wsDraft.value.dbConnections || [])] : null
+  for (const ws of config.environments) {
+    ws.dbConnections = (ws.dbConnections || []).filter(id => id !== conn.id)
+  }
+  if (wsDraft.value) wsDraft.value.dbConnections = (wsDraft.value.dbConnections || []).filter(id => id !== conn.id)
+  const ok = await persist()
+  if (ok) {
+    pendingDeleteDb.value = null
+    pushToast('success', t.value.dbDeleted)
+  } else {
+    connections.splice(index, 0, conn)
+    config.environments.forEach((ws, wsIndex) => { ws.dbConnections = previousChecks[wsIndex] })
+    if (wsDraft.value && previousDraftChecks) wsDraft.value.dbConnections = previousDraftChecks
+    pushToast('error', t.value.dbCreateFailed)
+  }
+  dbBusy.value = false
+}
+// 卡片内联测试连接：结果就地展示，不阻断其它操作。
+// 后端 TestDBConnection 用子进程 + context.WithTimeout(10s) 兜底，前端再
+// 加 30 秒硬超时作为最后一道防线，避免任何意外悬挂让按钮永远转圈。
+const DB_TEST_TIMEOUT_MS = 30000
+async function testDb(conn) {
+  // 与 testSsh 同理：先写入容器再读取，确保 state 是响应式代理。
+  if (!dbTestStates[conn.id]) dbTestStates[conn.id] = { busy: false, ok: null, message: '' }
+  const state = dbTestStates[conn.id]
+  if (state.busy) return
+  state.busy = true
+  state.message = ''
+  try {
+    const result = await withTimeout(testDBConnection(safeClone(conn)), DB_TEST_TIMEOUT_MS, t.value.dbTestTimeout)
+    state.ok = !!result?.ok
+    state.message = String(result?.message || (result?.ok ? t.value.dbTestPassed : t.value.dbTestFailed))
+  } catch (err) {
+    state.ok = false
+    state.message = localizeError(String(err))
+  } finally {
+    state.busy = false
+  }
+}
+// 审计记录纯按需：仅在连接编辑弹窗打开时拉取最近少量条目。
+async function loadDbAudit(connectionId) {
+  dbAuditLoading.value = true
+  try {
+    dbAuditRows.value = (await getDBAuditLogs(connectionId, 20)) || []
+  } catch {
+    dbAuditRows.value = []
+  } finally {
+    dbAuditLoading.value = false
+  }
+}
+// 工作空间编辑器的 DB 勾选：结果写 wsDraft.dbConnections，经 persistWsChange 持久化。
+function toggleWorkspaceDb(connectionId, checked) {
+  if (!wsDraft.value) return
+  const set = new Set(wsDraft.value.dbConnections || [])
+  if (checked) set.add(connectionId)
+  else set.delete(connectionId)
+  wsDraft.value.dbConnections = [...set]
+  persistWsChange()
+}
+function workspaceDbConnections(ws) {
+  const connections = config.extensions?.db?.connections || []
+  return (ws?.dbConnections || []).map(id => connections.find(conn => conn.id === id)).filter(Boolean)
 }
 
 // --- Agent extension removal confirmation ---
@@ -1037,18 +1321,28 @@ function persistWsChange() {
   }
   persist()
 }
-function handleWorkspaceSshChange() {
-  const remote = wsDraft.value?.remotes?.[0]
+function addWorkspaceSsh() {
+  if (!wsDraft.value) return
+  wsDraft.value.remotes.push(defaultRemote())
+}
+function removeWorkspaceSsh(index) {
+  if (!wsDraft.value) return
+  wsDraft.value.remotes.splice(index, 1)
+  if (!wsDraft.value.remotes.length) wsDraft.value.remotes.push(defaultRemote())
+  persistWsChange()
+}
+function handleWorkspaceSshChange(remote) {
   if (remote && !remote.sshConfigId) remote.remotePath = ''
   persistWsChange()
 }
 async function saveNewWs() {
   const ws = wsDraft.value
   if (!ws || wsBusy.value) return
-  const remote = ws.remotes?.[0]
   if (!ws.path) { pushToast('error', t.value.wsLocalRequired); return }
-  if (remote?.sshConfigId && !remote.remotePath?.trim()) { pushToast('error', t.value.wsRemoteRequired); return }
-  if (remote && !remote.sshConfigId) remote.remotePath = ''
+  const selectedRemotes = (ws.remotes || []).filter(remote => remote.sshConfigId)
+  if (selectedRemotes.some(remote => !remote.remotePath?.trim())) { pushToast('error', t.value.wsRemoteRequired); return }
+  if (new Set(selectedRemotes.map(remote => remote.sshConfigId)).size !== selectedRemotes.length) { pushToast('error', t.value.wsSshDuplicate); return }
+  ws.remotes = selectedRemotes.length ? selectedRemotes : [defaultRemote()]
   const previousActiveId = config.activeEnvId
   const previousEnvironment = config.lastEnvironment
   const previousWorkspaceOrder = [...workspaceOrder.value]
@@ -1139,15 +1433,15 @@ async function pickWorkspacePath() {
   }
 }
 
-// A workspace always owns one remote server directory and references one SSH profile.
+// A workspace can reference multiple SSH profiles, each with its own remote directory.
 function defaultRemote() {
   return { id: `remote-${crypto.randomUUID().slice(0, 8)}`, remotePath: '', sshConfigId: '' }
 }
-function workspaceRemote(ws) {
-  return ws?.remotes?.[0] || null
+function workspaceRemotes(ws) {
+  return (ws?.remotes || []).filter(remote => remote.sshConfigId)
 }
-function workspaceSsh(ws) {
-  const sshId = workspaceRemote(ws)?.sshConfigId
+function remoteSsh(remote) {
+  const sshId = remote?.sshConfigId
   return config.sshConfigs.find(item => item.id === sshId)
 }
 
@@ -1166,7 +1460,6 @@ async function createAgent() {
     return
   }
   previousAgentId.value = currentAgentId.value
-  previousDefaultAgentId.value = config.activeAgentId
   if (!builtinCatalog().length) await refreshExtensions()
   const agent = defaultAgent()
   newAgentDraft.value = agent
@@ -1188,7 +1481,6 @@ async function saveNewAgent() {
     newAgentId.value = ''
     newAgentDraft.value = null
     previousAgentId.value = ''
-    previousDefaultAgentId.value = ''
     editingNewAgent.value = false
     agentEditorOpen.value = false
     showAgentNotice('success', t.value.agentCreated.replace('{name}', agent.name))
@@ -1206,15 +1498,9 @@ function cancelNewAgent() {
   currentAgentId.value = config.agents.some(item => item.id === previousAgentId.value)
     ? previousAgentId.value
     : config.agents[0]?.id || ''
-  if (config.activeAgentId === newAgentId.value) {
-    config.activeAgentId = config.agents.some(item => item.id === previousDefaultAgentId.value)
-      ? previousDefaultAgentId.value
-      : config.agents[0]?.id || ''
-  }
   newAgentId.value = ''
   newAgentDraft.value = null
   previousAgentId.value = ''
-  previousDefaultAgentId.value = ''
   editingNewAgent.value = false
   agentEditorOpen.value = false
   agentNotice.value = null
@@ -1259,50 +1545,19 @@ function persistAgentChange(agent) {
   return Promise.resolve(false)
 }
 
-async function setDefaultAgent(agent, enabled = true) {
-  if (!agent) return
-  if (!enabled) {
-    if (agent.id === newAgentId.value && config.activeAgentId === agent.id) {
-      config.activeAgentId = config.agents.some(item => item.id === previousDefaultAgentId.value)
-        ? previousDefaultAgentId.value
-        : config.agents[0]?.id || ''
-    }
-    return
-  }
-  if (config.activeAgentId === agent.id) return
-  const previousDefault = config.activeAgentId
-  config.activeAgentId = agent.id
-  if (agent.id !== newAgentId.value) {
-    const savedDefault = await persist()
-    if (savedDefault) {
-      pushToast('success', t.value.agentDefaultChanged.replace('{name}', agent.name))
-    } else {
-      config.activeAgentId = previousDefault
-    }
-  }
-}
-
 function requestDeleteAgent(agent) {
-  if (agent?.id === config.activeAgentId || config.agents.length <= 1 || agentDeleteBusy.value) return
+  if (!agent || config.agents.length <= 1 || agentDeleteBusy.value) return
   pendingDeleteAgent.value = agent
 }
 
 async function confirmDeleteAgent() {
   const agent = pendingDeleteAgent.value
-  if (!agent || agent.id === config.activeAgentId || config.agents.length <= 1 || agentDeleteBusy.value) return
+  if (!agent || config.agents.length <= 1 || agentDeleteBusy.value) return
   agentDeleteBusy.value = true
   try {
     const result = await deleteAgent(agent.id)
     Object.assign(config, result)
-    // 清理工作目录智能体记忆中指向已删除智能体的记录，避免残留失效引用。
-    let envAgentCacheChanged = false
-    for (const envId of Object.keys(envLastAgent)) {
-      if (envLastAgent[envId] === agent.id) {
-        delete envLastAgent[envId]
-        envAgentCacheChanged = true
-      }
-    }
-    if (envAgentCacheChanged) persistEnvLastAgent()
+    config.environments.forEach(normalizeWorkspace)
     if (!config.agents.some(item => item.id === currentAgentId.value)) currentAgentId.value = config.activeAgentId
     pendingDeleteAgent.value = null
     showAgentNotice('success', t.value.agentDeleted.replace('{name}', agent.name))
@@ -1687,6 +1942,18 @@ function safeClone(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
+// withTimeout 给任意 Promise 加一个硬超时：超时后 reject 给定 message，
+// 避免后端调用意外悬挂时前端永远 await（如 SSH/DB 测试连接卡死场景）。
+function withTimeout(promise, ms, timeoutMessage) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), ms)
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); resolve(v) },
+      (e) => { clearTimeout(timer); reject(e) },
+    )
+  })
+}
+
 // 思考区的默认展开状态按“最后一轮问题”计算：历史记录中，最后一条
 // 用户消息之前的思考全部折叠，最后一条用户消息之后的思考保持展开。
 function initializeThinkingVisibility(messages) {
@@ -1820,21 +2087,19 @@ async function ensureConversation(title) {
   let task = currentTask()
   if (task) return task
   const agent = selectedAgent.value
+  const requestedModel = agent?.defaultModel || config.defaultModel
+  // 智能体默认模型可能仍指向已改名/删除的服务商旧标识，创建前解析到当前
+  // 有效服务商，避免新会话落库旧 provider 前缀。
+  const providerName = resolveProviderName(agent?.defaultProvider || config.defaultProvider, requestedModel)
+  const provider = config.providers.find(p => p.name === providerName)
+  const modelName = provider?.models.some(m => m.id === requestedModel) ? requestedModel : provider?.models?.[0]?.id || ''
   task = await createSession({
     agentId: agent?.id || config.activeAgentId,
     environmentId: config.activeEnvId,
     title: Array.from(title.trim()).slice(0, 50).join('') || t.value.chatNewSession,
-    provider: agent?.defaultProvider || config.defaultProvider,
-    model: agent?.defaultModel || config.defaultModel
+    provider: providerName,
+    model: modelName
   })
-  // 若 agent 未单独设置默认模型，用首个启用服务商的首个模型兜底，
-  // 防止 createSession 落到一个不存在的全局默认模型（如 openai/gpt-5.6-terra）。
-  if (!agent?.defaultProvider || !agent?.defaultModel) {
-    const first = config.providers.find(p => p.enabled !== false && (p.models || []).length)
-    if (first && !task.provider) {
-      task = { ...task, provider: first.name, model: first.models[0].id }
-    }
-  }
   tasks.value.unshift(task)
   activeTaskId.value = task.id
   return task
@@ -1868,6 +2133,7 @@ async function refreshSessions() {
   if (request !== sessionRefreshRequest) return
   reconcileTaskRuntimeStatus(latest, requestedVersions)
   tasks.value = latest
+  reconcileStaleSessionProviders(latest)
   const active = latest.find(item => item.id === activeTaskId.value)
   if (active) {
     executionElapsedMs.value = Number(active.execDurationMs) || 0
@@ -1917,30 +2183,14 @@ try {
 function persistWorkspaceOrder() {
   try { localStorage.setItem(WS_ORDER_KEY, JSON.stringify(workspaceOrder.value)) } catch {}
 }
-// 每个工作目录记忆「上次选中的智能体」：前端 localStorage 缓存（envId -> agentId），
-// 新建对话 / 切换工作目录时恢复，无记录时回退系统默认智能体（config.activeAgentId）。
-const ENV_LAST_AGENT_KEY = 'codingto:env-last-agent'
-const envLastAgent = reactive({})
-try {
-  const raw = localStorage.getItem(ENV_LAST_AGENT_KEY)
-  if (raw) Object.assign(envLastAgent, JSON.parse(raw))
-} catch {}
-function persistEnvLastAgent() {
-  try { localStorage.setItem(ENV_LAST_AGENT_KEY, JSON.stringify(envLastAgent)) } catch {}
-}
-function setEnvLastAgent(envId, agentId) {
-  if (!envId) return
-  if (agentId && config.agents.some(agent => agent.id === agentId)) {
-    envLastAgent[envId] = agentId
-  } else {
-    delete envLastAgent[envId]
+// 工作空间默认智能体：优先使用工作空间配置的 defaultAgentId，未配置（或
+// 指向已删除智能体，normalize 已清空）时回退第一个智能体。
+function envDefaultAgentId(envId) {
+  const env = config.environments.find(item => item.id === envId)
+  if (env?.defaultAgentId && config.agents.some(agent => agent.id === env.defaultAgentId)) {
+    return env.defaultAgentId
   }
-  persistEnvLastAgent()
-}
-// 返回该工作目录记录的上次智能体；记录缺失、失效（智能体已删除）时返回空串。
-function envLastAgentId(envId) {
-  const id = envId ? envLastAgent[envId] : ''
-  return id && config.agents.some(agent => agent.id === id) ? id : ''
+  return config.agents[0]?.id || ''
 }
 // 工作空间在主菜单中的手动排序。只保存环境 ID，不改动配置中的环境数据，
 // 因此拖动排序不会触发后端配置写入，也不会影响当前会话运行。
@@ -2622,6 +2872,19 @@ function handleAgentEvent(event) {
     }
   } else if (type === 'message_end') {
     reconcileAssistantMessage(event.message)
+    const endError = agentEventErrorMessage(event)
+    if (endError) {
+      const msg = localizeError(endError)
+      error.value = msg
+      pushErrorMessage(msg)
+    }
+  } else if (type === 'turn_end') {
+    const turnError = agentEventErrorMessage(event)
+    if (turnError) {
+      const msg = localizeError(turnError)
+      error.value = msg
+      pushErrorMessage(msg)
+    }
   } else if (type === 'tool_execution_start') {
     upsertToolMessage(event)
   } else if (type === 'tool_execution_update' || type === 'tool_execution_end') {
@@ -2657,7 +2920,7 @@ function handleAgentEvent(event) {
     if (event.willRetry) {
       setTaskRunning(sourceTaskId || activeTaskId.value, true)
       executionRunning.value = true
-      if (activeAssistant && !activeAssistant.content && !activeAssistant.thinkingContent) {
+      if (activeAssistant && !activeAssistant.content && !activeAssistant.thinkingContent && !activeAssistant.thinking) {
         messagesList.value = messagesList.value.filter(message => message !== activeAssistant)
         activeAssistant = null
       }
@@ -2684,6 +2947,12 @@ function handleAgentEvent(event) {
     if (succeeded) {
       error.value = ''
       messagesList.value = messagesList.value.filter(message => message.role !== 'error')
+    }
+    const endError = agentEventErrorMessage(event)
+    if (endError) {
+      const msg = localizeError(endError)
+      error.value = msg
+      pushErrorMessage(msg)
     }
     pushChangeMessage(event.changeSummary, event._recordedAt)
     clearPersistedExtDialog(currentTask()?.id)
@@ -2815,11 +3084,31 @@ function reconcileAssistantMessage(message) {
     if (activeAssistant.thinkingStartedAt && !activeAssistant.thinkingDurationMs) {
       activeAssistant.thinkingDurationMs = Date.now() - activeAssistant.thinkingStartedAt
     }
-  } else if (activeAssistant && !activeAssistant.content && !activeAssistant.thinkingContent) {
+  } else if (activeAssistant && !activeAssistant.content && !activeAssistant.thinkingContent && !activeAssistant.thinking) {
     messagesList.value = messagesList.value.filter(messageItem => messageItem !== activeAssistant)
   }
   for (const toolCall of toolCalls) upsertToolMessage({ toolCall })
   activeAssistant = null
+}
+
+// agentEventErrorMessage 提取终止性事件携带的模型/Provider 错误。Pi 把
+// message_end / turn_end 的错误写在 event.message.errorMessage，把 agent_end
+// 的错误写在 messages[].errorMessage，顶层 errorMessage 也可能存在（error 事件）。
+// 与后端 readSessionMessages 的 eventErrorMessage 保持同一提取口径，保证实时
+// 显示与历史重读一致。
+function agentEventErrorMessage(event) {
+  if (!event) return ''
+  if (event.errorMessage) return event.errorMessage
+  const message = event.message || {}
+  if (message.errorMessage) return message.errorMessage
+  if (Array.isArray(event.messages)) {
+    for (let index = event.messages.length - 1; index >= 0; index--) {
+      const item = event.messages[index]
+      if (item?.role === 'assistant' && item.errorMessage) return item.errorMessage
+    }
+  }
+  if (event.error) return typeof event.error === 'string' ? event.error : (event.error?.message || '')
+  return ''
 }
 
 function toolCallFromEvent(event) {
@@ -2905,8 +3194,8 @@ async function runPrompt({ message, images, attachments: promptAttachments, skil
     await startPrompt({
       agentId: promptAgent?.id,
       message,
-      provider: task.provider || provider || promptAgent?.defaultProvider || config.defaultProvider,
-      model: task.model || model || promptAgent?.defaultModel || config.defaultModel,
+      provider: provider || task.provider || promptAgent?.defaultProvider || config.defaultProvider,
+      model: model || task.model || promptAgent?.defaultModel || config.defaultModel,
       // 当 agent 未单独设置默认模型，且前端也没显式指定时，回退到首个启用服务商，
       // 避免把空 provider/model 发到后端去触发全局 openai 默认。
       fallbackProvider: selectedAgent.value?.defaultProvider || config.defaultProvider,
@@ -2955,8 +3244,8 @@ async function runBackgroundPrompt(taskId, prompt) {
     await startPrompt({
       agentId: task.agentId || prompt.agentId,
       message: prompt.message,
-      provider: task.provider || prompt.provider,
-      model: task.model || prompt.model,
+      provider: prompt.provider || task.provider,
+      model: prompt.model || task.model,
       workDir: environment?.path || prompt.workDir,
       mode: prompt.mode,
       thinkingLevel: prompt.thinkingLevel,
@@ -2992,6 +3281,7 @@ async function sendNextPendingPrompt(taskId = activeTaskId.value) {
 async function sendPrompt() {
   const message = draft.value.trim()
   if (attachmentReadsPending.value > 0 || (!message && !promptImages.value.length && !attachments.value.length) || !selectedModelValue.value) return
+  const task = currentTask()
   const prompt = {
     id: crypto.randomUUID(),
     message,
@@ -2999,13 +3289,15 @@ async function sendPrompt() {
     attachments: safeClone(attachments.value),
     createdAt: Date.now(),
     agentId: selectedAgent.value?.id,
-    provider: selectedAgent.value?.defaultProvider || config.defaultProvider,
-    model: selectedAgent.value?.defaultModel || config.defaultModel,
+    // 无会话时智能体默认可能仍指向已改名/删除的服务商旧标识，解析到当前
+    // 有效服务商，避免 runPrompt 用旧 provider 覆盖新建会话的落库模型。
+    provider: task?.provider || resolveProviderName(selectedAgent.value?.defaultProvider, selectedAgent.value?.defaultModel) || config.defaultProvider,
+    model: task?.model || selectedAgent.value?.defaultModel || config.defaultModel,
     workDir: config.lastEnvironment,
     mode: mode.value,
     thinkingLevel: thinkingLevel.value,
     skillPath: selectedSkill.value?.agents?.find(agent => agent.id === selectedAgent.value?.id)?.path || '',
-    sessionPath: currentTask()?.sessionPath || ''
+    sessionPath: task?.sessionPath || ''
   }
   draft.value = ''
   // 在首页（新建对话）发送后，草稿已消费，清除已保存的未发送内容；
@@ -3080,8 +3372,8 @@ async function pickSessionDirectory() {
 async function chatNewSession() {
   syncCurrentTask()
   activeTaskId.value = ''
-  // 新建对话默认选中该工作目录上次使用的智能体；无记录回退系统默认智能体。
-  const envAgentId = envLastAgentId(config.activeEnvId) || config.activeAgentId
+  // 新建对话默认选中该工作空间的默认智能体；未配置时回退第一个智能体。
+  const envAgentId = envDefaultAgentId(config.activeEnvId)
   currentAgentId.value = envAgentId
   const defaultAgent = config.agents.find(agent => agent.id === envAgentId)
   if (defaultAgent?.defaultProvider && defaultAgent?.defaultModel) {
@@ -3207,14 +3499,12 @@ function chatSelectEnvironment(env) {
   // 切换工作空间时，仅当处于首页模式才保存/载入草稿；历史会话视图下
   // 输入框为空，不覆盖目标工作空间已保存的未发送草稿。
   if (isHomeMode.value) persistDraftForEnv(config.activeEnvId, draft.value)
-  // 把当前选中的智能体记到旧工作目录，下次回到该目录时恢复。
-  setEnvLastAgent(config.activeEnvId, currentAgentId.value)
   config.activeEnvId = env.id
   config.lastEnvironment = env.path
   draft.value = isHomeMode.value ? loadDraftForEnv(env.id) : ''
-  // 恢复目标工作目录上次选中的智能体；无记录回退系统默认智能体，
-  // 保证切换过来后直接发消息 / 新建对话都使用该目录的智能体。
-  const targetAgentId = envLastAgentId(env.id) || config.activeAgentId
+  // 恢复目标工作空间的默认智能体；未配置时回退第一个智能体，
+  // 保证切换过来后直接发消息 / 新建对话都使用该工作空间的智能体。
+  const targetAgentId = envDefaultAgentId(env.id)
   const targetAgent = config.agents.find(agent => agent.id === targetAgentId)
   if (targetAgent) {
     currentAgentId.value = targetAgent.id
@@ -3233,9 +3523,12 @@ function chatSelectEnvironment(env) {
 function chatSelectAgent(agent) {
   if (!agent) return
   currentAgentId.value = agent.id
-  // 记录该工作目录上次选中的智能体，下次新建对话时默认恢复。
-  setEnvLastAgent(config.activeEnvId, agent.id)
   selectedSkill.value = null
+  // 切换智能体即同步为当前工作空间的默认智能体（随配置持久化）
+  const env = config.environments.find(item => item.id === config.activeEnvId)
+  if (env && env.defaultAgentId !== agent.id) {
+    env.defaultAgentId = agent.id
+  }
   if (agent.defaultProvider && agent.defaultModel) {
     config.defaultProvider = agent.defaultProvider
     config.defaultModel = agent.defaultModel
@@ -3244,6 +3537,7 @@ function chatSelectAgent(agent) {
     config.defaultProvider = first?.name || ''
     config.defaultModel = first?.models?.[0]?.id || ''
   }
+  void syncSessionModel(config.defaultProvider, config.defaultModel)
   persist()
 }
 
@@ -3264,7 +3558,22 @@ function onModelChange(value) {
     selectedAgent.value.defaultProvider = config.defaultProvider
     selectedAgent.value.defaultModel = config.defaultModel
   }
+  void syncSessionModel(config.defaultProvider, config.defaultModel)
   persist()
+}
+
+// 切换模型后同步当前会话的落库模型：历史会话续写（runPrompt 以 task.model
+// 优先）与重新进入回显都用新模型，而不是停留在创建会话时的默认模型。
+async function syncSessionModel(provider, model) {
+  const task = currentTask()
+  if (!task || !provider || !model) return
+  try {
+    await updateSessionModel(task.id, provider, model)
+    const index = tasks.value.findIndex(item => item.id === task.id)
+    if (index >= 0) tasks.value[index] = { ...task, provider, model }
+  } catch (err) {
+    pushToast('error', localizeError(String(err)))
+  }
 }
 
 function onRemoveImage(index) {
@@ -3527,7 +3836,9 @@ function confirmSaveProvider() {
   // 改用 JSON 深拷贝；随后剔除内部标记字段 __name。
   const copy = JSON.parse(JSON.stringify(draft))
   delete copy.__name
+  const oldName = target.name
   Object.assign(target, copy)
+  if (oldName !== target.name) migrateProviderReferences(oldName, target.name)
   persist()
   closeProviderEditor()
 }
@@ -3546,6 +3857,60 @@ function selectModelsProvider(provider) {
   showProviderApiKey.value = false
 }
 
+// 服务商改名后迁移所有引用旧标识的地方（智能体默认模型、会话落库模型、
+// 模型页选中项），否则对话详情的选中模型仍显示旧前缀，且无法匹配新选项。
+function migrateProviderReferences(oldName, newName) {
+  if (!oldName || oldName === newName) return
+  for (const agent of config.agents || []) {
+    if (agent.defaultProvider === oldName) agent.defaultProvider = newName
+  }
+  for (const task of tasks.value) {
+    if (task.provider !== oldName || !task.model) continue
+    task.provider = newName
+    void updateSessionModel(task.id, newName, task.model).catch(err => pushToast('error', localizeError(String(err))))
+  }
+  if (selectedModelsProviderName.value === oldName) selectedModelsProviderName.value = newName
+}
+
+// 兜底：服务商曾改名/删除时，会话落库的 provider 可能已不存在于配置。
+// 模型 id 能唯一命中某个服务商时，把会话引用修正到当前标识，避免对话详情
+// 选中模型显示旧前缀；无法唯一判定时保持原样，由用户手动切换。
+function reconcileStaleSessionProviders(list) {
+  for (const task of list) {
+    if (!task.provider || !task.model || config.providers.some(p => p.name === task.provider)) continue
+    const matches = config.providers.filter(p => (p.models || []).some(m => m.id === task.model))
+    if (matches.length === 1) task.provider = matches[0].name
+  }
+}
+
+// 服务商改名/删除后旧标识可能残留在引用处；按「配置存在 → 模型 id 唯一
+// 命中 → 全局默认/首个启用服务商」解析到当前有效标识，空串表示无可用。
+function resolveProviderName(providerName, modelId) {
+  if (providerName && config.providers.some(p => p.name === providerName)) return providerName
+  if (modelId) {
+    const matches = config.providers.filter(p => p.enabled !== false && (p.models || []).some(m => m.id === modelId))
+    if (matches.length === 1) return matches[0].name
+  }
+  if (config.providers.some(p => p.name === config.defaultProvider && (p.models || []).length)) return config.defaultProvider
+  return config.providers.find(p => p.enabled !== false && (p.models || []).length)?.name || ''
+}
+
+// 兜底：服务商改名/删除后，智能体默认模型可能仍指向旧标识（早期改名流程
+// 未迁移引用，属存量脏数据）。启动加载时把不存在的 provider 引用修正到
+// 当前配置，避免新建对话仍按旧前缀创建会话。仅内存修正，随下次持久化落盘。
+function reconcileStaleAgentProviders() {
+  for (const agent of config.agents || []) {
+    if (!agent.defaultProvider || config.providers.some(p => p.name === agent.defaultProvider)) continue
+    const providerName = resolveProviderName(agent.defaultProvider, agent.defaultModel)
+    const provider = config.providers.find(p => p.name === providerName)
+    if (!provider) continue
+    agent.defaultProvider = providerName
+    if (!provider.models.some(m => m.id === agent.defaultModel)) {
+      agent.defaultModel = provider.models[0]?.id || ''
+    }
+  }
+}
+
 function renameModelsProvider(event) {
   const provider = selectedModelsProvider.value
   if (!provider) return
@@ -3558,6 +3923,7 @@ function renameModelsProvider(event) {
   provider.name = nextName
   selectedModelsProviderName.value = nextName
   if (config.defaultProvider === previousName) config.defaultProvider = nextName
+  migrateProviderReferences(previousName, nextName)
 }
 
 function requestDeleteProvider(provider) {
@@ -3780,7 +4146,6 @@ provide(appContextKey, {
   modelOptions,
   selectedAgent,
   activeAgentId,
-  defaultAgentId,
   newAgentId,
   agentDeleteBusy,
   skills,
@@ -3820,6 +4185,16 @@ provide(appContextKey, {
   editingNewProvider,
   pendingDeleteSsh,
   sshBusy,
+  sshTestStates,
+  pendingDeleteDb,
+  dbBusy,
+  dbDraft,
+  editingNewDb,
+  newDbId,
+  dbEditorOpen,
+  dbTestStates,
+  dbAuditRows,
+  dbAuditLoading,
   pendingExtensionDelete,
   requestDeleteExtension,
   confirmDeleteExtension,
@@ -3831,13 +4206,15 @@ provide(appContextKey, {
   editingNewWs,
   toasts,
   showFigmaConfig,
+  openMemoryConfig,
+  openPlanConfig,
+  openGlobalPromptConfig,
   figmaAuthorizationsDraft,
   figmaActiveAuthorizationIdDraft,
   installPiNow,
   createAgent,
   openAgentEditor,
   requestDeleteAgent,
-  setDefaultAgent,
   refreshExtensions,
   refreshAgentExtensions,
   refreshSkills,
@@ -3868,10 +4245,12 @@ provide(appContextKey, {
   dropWorkspace,
   endWorkspaceDrag,
   workspaceDragOverId: dragOverWorkspaceId,
-  workspaceSsh,
-  workspaceRemote,
+  workspaceRemotes,
+  remoteSsh,
   setActiveWorkspace,
   requestDeleteSsh,
+  testSsh,
+  pickSshKeyFile,
   selectModelsProvider,
   openProviderEditor,
   openProviderEdit,
@@ -3902,6 +4281,16 @@ provide(appContextKey, {
   confirmAddProvider,
   confirmSaveProvider,
   confirmDeleteSsh,
+  confirmDeleteDb,
+  openDbEditor,
+  closeDbEditor,
+  persistDbChange,
+  saveNewDb,
+  requestDeleteDb,
+  testDb,
+  loadDbAudit,
+  toggleWorkspaceDb,
+  workspaceDbConnections,
   confirmDeleteWs,
   closeSshEditor,
   persistSshChange,
@@ -3911,6 +4300,8 @@ provide(appContextKey, {
   handleWsPathChange,
   pickWorkspacePath,
   handleWorkspaceSshChange,
+  addWorkspaceSsh,
+  removeWorkspaceSsh,
   saveNewWs,
   persistFigma,
   addFigmaAuthorization,
@@ -3929,7 +4320,10 @@ onMounted(async () => {
     const files = Array.isArray(payload?.files) ? payload.files : []
     if (files.length) void onAddAttachments(files)
   })
+  offCleanupEvent = onEvent('session-cleanup:done', applySessionCleanupResult)
   await load()
+  // 启动异步清理会话数据的结果通常在 window 渲染后不久就绪，主动拉取一次并展示。
+  void fetchSessionCleanupNotice()
   void refreshStewardConnected()
   void refreshResidentSessionId()
   // 启动后后台静默检查一次客户端新版本（不弹提示，仅用于设置菜单红点）。
@@ -3999,6 +4393,7 @@ onBeforeUnmount(() => {
   offDocumentPreview?.()
   offAttachmentDrop?.()
   offShuttingDown?.()
+  offCleanupEvent?.()
   offExtensionsChanged?.()
   offStewardStatus?.()
   offStewardPermission?.()
@@ -4132,6 +4527,10 @@ onBeforeUnmount(() => {
         />
         <div v-else-if="!bootstrap" class="pi-gate-loading">正在加载…</div>
         <template v-else>
+        <div v-if="sessionCleanupNotice" class="session-cleanup-notice" :class="sessionCleanupNotice.type" role="status">
+          <span>{{ sessionCleanupNotice.text }}</span>
+          <button :aria-label="t.close" @click="sessionCleanupNotice = null"><X :size="13" /></button>
+        </div>
         <section v-if="activePage === 'chat'" class="command-page">
           <ChatView
             :config="config"
@@ -4184,6 +4583,7 @@ onBeforeUnmount(() => {
             @select-agent="chatSelectAgent"
             @open-agent-config="chatOpenAgentConfig"
             @open-plugins="activePage = 'plugins'"
+            @open-settings="openSettingsToConcise"
             @open-agent-extensions="openAgentConfig($event, 'extensions')"
             @update:dcg="onChatDcgPolicyChange($event)"
             @update:mode="mode = $event"
@@ -4212,6 +4612,9 @@ onBeforeUnmount(() => {
     </div>
 
     <AppDialogs />
+    <MemoryConfigDialog v-model="showMemoryConfig" />
+    <PlanConfigDialog v-model="showPlanConfig" />
+    <GlobalPromptConfigDialog v-model="showGlobalPromptConfig" />
 
     <div v-if="shuttingDown" class="shutdown-overlay" role="status" aria-live="polite">
       <div class="shutdown-overlay__card">

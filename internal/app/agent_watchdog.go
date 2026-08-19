@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"codingto/internal/applog"
@@ -143,43 +144,82 @@ func (s *AgentService) fireUIWatchdog(sessionID int64, sessionDir, requestID str
 // 浏览器与会话类工具已有各自的服务层超时，无需看门狗干预。
 var toolWatchdogToolNames = map[string]bool{"bash": true}
 
+// toolWatchdogState belongs to one concrete tool call. Pi can execute several
+// tool calls from the same assistant message in parallel, so a runtime-wide
+// singleton timer cannot safely represent the execution deadline.
+type toolWatchdogState struct {
+	timer    *time.Timer
+	token    uint64
+	toolName string
+	timedOut bool
+}
+
 // toolWatchdogAbortGrace gives Pi a brief opportunity to finish a normal
 // abort_bash before the stronger process-tree fallback is used. The fallback
 // is needed on Windows when a shell/descendant keeps stdio handles open after
 // taskkill, which otherwise delays tool_execution_end indefinitely.
 const toolWatchdogAbortGrace = 5 * time.Second
 
-// armToolWatchdogLocked (re)arms the tool-execution watchdog for the given
-// tool call. Only tools registered in toolWatchdogToolNames are bounded; other
-// tools are left unmonitored. Caller must hold s.mu.
+// armToolWatchdogLocked arms an independent timer for the given tool call.
+// Only tools registered in toolWatchdogToolNames are bounded; starting another
+// (possibly parallel) tool never cancels an existing deadline. Caller must
+// hold s.mu.
 func (s *AgentService) armToolWatchdogLocked(sessionID int64, toolName, toolCallID string) {
-	s.disarmToolWatchdogLocked()
+	toolName = strings.ToLower(strings.TrimSpace(toolName))
 	if !toolWatchdogToolNames[toolName] {
 		return
 	}
+	key := toolWatchdogKey(toolName, toolCallID)
+	s.disarmToolWatchdogLocked(toolName, toolCallID)
 	timeout := s.toolExecutionTimeout
 	if timeout <= 0 {
 		timeout = defaultToolExecutionTimeout
 	}
 	s.toolWatchdogToken++
 	token := s.toolWatchdogToken
-	s.toolWatchdogName = toolName
-	s.toolWatchdogToolID = toolCallID
-	s.toolWatchdogTimer = time.AfterFunc(timeout, func() {
+	if s.toolWatchdogs == nil {
+		s.toolWatchdogs = make(map[string]*toolWatchdogState)
+	}
+	state := &toolWatchdogState{token: token, toolName: toolName}
+	state.timer = time.AfterFunc(timeout, func() {
 		s.fireToolWatchdog(token, sessionID, toolName, toolCallID, timeout)
 	})
+	s.toolWatchdogs[key] = state
 }
 
-// disarmToolWatchdogLocked stops the tool-execution watchdog. Caller must hold
-// s.mu.
-func (s *AgentService) disarmToolWatchdogLocked() {
-	if s.toolWatchdogTimer != nil {
-		s.toolWatchdogTimer.Stop()
-		s.toolWatchdogTimer = nil
+func toolWatchdogKey(toolName, toolCallID string) string {
+	if toolCallID != "" {
+		return toolCallID
 	}
-	s.toolWatchdogName = ""
-	s.toolWatchdogToolID = ""
-	s.toolWatchdogToken++
+	// The Pi protocol normally supplies a call id. Keep a deterministic fallback
+	// for malformed/legacy events so their start and end can still pair up.
+	return "tool:" + strings.ToLower(strings.TrimSpace(toolName))
+}
+
+// disarmToolWatchdogLocked stops only the matching tool call. An end event for
+// one parallel call must not remove another call's deadline. Caller must hold
+// s.mu.
+func (s *AgentService) disarmToolWatchdogLocked(toolName, toolCallID string) {
+	key := toolWatchdogKey(toolName, toolCallID)
+	state := s.toolWatchdogs[key]
+	if state == nil {
+		return
+	}
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	delete(s.toolWatchdogs, key)
+}
+
+// disarmAllToolWatchdogsLocked clears every outstanding tool deadline when a
+// turn/runtime finishes. Caller must hold s.mu.
+func (s *AgentService) disarmAllToolWatchdogsLocked() {
+	for key, state := range s.toolWatchdogs {
+		if state != nil && state.timer != nil {
+			state.timer.Stop()
+		}
+		delete(s.toolWatchdogs, key)
+	}
 }
 
 // fireToolWatchdog aborts a tool call that exceeded its execution budget. For
@@ -189,18 +229,16 @@ func (s *AgentService) disarmToolWatchdogLocked() {
 // tool_execution_timeout event is recorded so the UI can surface the reason.
 func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName, toolCallID string, timeout time.Duration) {
 	s.mu.Lock()
-	if token != s.toolWatchdogToken ||
-		s.toolWatchdogName != toolName ||
-		s.toolWatchdogToolID != toolCallID ||
+	key := toolWatchdogKey(toolName, toolCallID)
+	state := s.toolWatchdogs[key]
+	if state == nil || state.token != token || state.toolName != toolName ||
 		s.activeSessionID != sessionID ||
 		s.execTurnStart.IsZero() {
 		s.mu.Unlock()
 		return
 	}
-	s.toolWatchdogTimer = nil
-	s.toolWatchdogToken++
-	s.toolWatchdogName = ""
-	s.toolWatchdogToolID = ""
+	state.timer = nil
+	state.timedOut = true
 	sessionDir := s.activeSessionDir
 	s.mu.Unlock()
 
@@ -239,8 +277,8 @@ func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName,
 }
 
 // escalateToolWatchdog kills the Pi process tree only when abort_bash did not
-// produce a tool end within the grace period. A later tool end, turn end, or
-// new tool increments toolWatchdogToken and makes this stale callback harmless.
+// produce a tool end within the grace period. A later matching tool end or turn
+// end removes the state and makes this stale callback harmless.
 func (s *AgentService) escalateToolWatchdog(token uint64, sessionID int64, toolName, toolCallID string) {
 	grace := s.toolWatchdogAbortGrace
 	if grace <= 0 {
@@ -251,11 +289,9 @@ func (s *AgentService) escalateToolWatchdog(token uint64, sessionID int64, toolN
 	<-timer.C
 
 	s.mu.Lock()
-	// fireToolWatchdog disarms the current timer and increments the generation
-	// once. Any subsequent lifecycle event increments it again; unchanged state
-	// therefore means the same timed-out tool is still blocking the runtime.
-	if s.activeSessionID != sessionID || s.execTurnStart.IsZero() ||
-		s.toolWatchdogToken != token+1 {
+	state := s.toolWatchdogs[toolWatchdogKey(toolName, toolCallID)]
+	if s.activeSessionID != sessionID || s.execTurnStart.IsZero() || state == nil ||
+		state.token != token || !state.timedOut {
 		s.mu.Unlock()
 		return
 	}
@@ -263,6 +299,10 @@ func (s *AgentService) escalateToolWatchdog(token uint64, sessionID int64, toolN
 	if killTree == nil {
 		killTree = s.adapter.KillTree
 	}
+	// Killing the Pi process ends all parallel tool calls. Clear every timer now
+	// so another deadline cannot trigger a duplicate process-tree kill while
+	// lifecycle events are still in flight.
+	s.disarmAllToolWatchdogsLocked()
 	s.mu.Unlock()
 
 	killTree()
