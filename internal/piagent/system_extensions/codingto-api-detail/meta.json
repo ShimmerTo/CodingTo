@@ -1,0 +1,5 @@
+{
+  "name": "CodingTo API Detail Recorder",
+  "version": "1.0.0",
+  "description": "Opt-in private provider request and response recording for model diagnostics."
+}

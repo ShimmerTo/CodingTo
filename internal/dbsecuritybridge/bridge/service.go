@@ -19,6 +19,7 @@ import (
 	"codingto/internal/dbsecuritybridge/executor"
 	"codingto/internal/dbsecuritybridge/policy"
 	"codingto/internal/dbsecuritybridge/protocol"
+	"codingto/internal/sshsecurity"
 )
 
 const (
@@ -60,8 +61,9 @@ type Service struct {
 }
 
 // New 以快照路径初始化服务。审计目录取 sessionDir/.db-security
-// （快照位于 sessionDir/.db-security/config.json）。
-func New(configPath string) (*Service, error) {
+// （快照位于 sessionDir/.db-security/config.json）。knownHostsPath 为 TOFU
+// 主机指纹记录文件（与主进程共享），为空时退回严格默认拒绝。
+func New(configPath string, knownHostsPath string) (*Service, error) {
 	sessionDir := filepath.Dir(filepath.Dir(configPath))
 	recorder, err := audit.NewRecorder(sessionDir)
 	if err != nil {
@@ -70,7 +72,7 @@ func New(configPath string) (*Service, error) {
 	snapshot := config.NewSnapshot(configPath)
 	s := &Service{
 		snapshot: snapshot,
-		manager:  connection.NewManager(),
+		manager:  connection.NewManager(sshsecurity.LoadKnownHosts(knownHostsPath)),
 		recorder: recorder,
 		pending:  map[string]*pendingConfirm{},
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"codingto/internal/applog"
@@ -245,6 +246,44 @@ func (s *AgentService) Restart() error {
 		return result
 	}
 	return s.restartSingle()
+}
+
+// RestartAgentProfile refreshes only session runtimes currently attached to
+// agentID. Busy turns use restartSingle's existing deferred-restart path and
+// are never interrupted by an OAuth login or logout.
+func (s *AgentService) RestartAgentProfile(agentID string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return errors.New("agent id is empty")
+	}
+	if s.runtimes == nil {
+		s.mu.Lock()
+		matches := s.activeAgent == agentID
+		s.mu.Unlock()
+		if !matches {
+			return nil
+		}
+		return s.restartSingle()
+	}
+	s.mu.Lock()
+	runtimes := make([]*AgentService, 0, len(s.runtimes))
+	for _, runtime := range s.runtimes {
+		runtimes = append(runtimes, runtime)
+	}
+	s.mu.Unlock()
+	var result error
+	for _, runtime := range runtimes {
+		runtime.mu.Lock()
+		matches := runtime.activeAgent == agentID
+		runtime.mu.Unlock()
+		if !matches {
+			continue
+		}
+		if err := runtime.restartSingle(); err != nil {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
 }
 
 func (s *AgentService) restartSingle() error {

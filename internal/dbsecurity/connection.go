@@ -36,6 +36,7 @@ type SSHTunnel struct {
 	Password             string `json:"password,omitempty"`
 	PrivateKey           string `json:"privateKey,omitempty"`
 	PrivateKeyPassphrase string `json:"privateKeyPassphrase,omitempty"`
+	HostKeyFingerprint   string `json:"hostKeyFingerprint,omitempty"`
 }
 
 // ConnectionConfig 是一条数据库连接及其连接级权限策略。

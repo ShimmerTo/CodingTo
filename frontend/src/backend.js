@@ -12,6 +12,7 @@ const fallback = {
     lastEnvironment: '',
     sessionDir: 'C:\\Users\\asus\\.codingto\\sessions',
     memory: { projectHistoryLimit: 100 },
+    recordApiDetails: false,
     providers: [
       {
         name: 'openai',
@@ -38,7 +39,7 @@ const fallback = {
       figma: { enabled: false, activeAuthorizationId: '', authorizations: [] }
     },
     activeAgentId: 'default',
-    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, memory: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
+    agents: [{ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, memory: true, plan: true, subagent: true, db: true, ssh: true }, recommended: { dcg: true, rtk: false }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } }],
     environments: [],
     activeEnvId: '',
     sshConfigs: [],
@@ -103,7 +104,7 @@ export async function installPi() {
   fallback.piInstalled = true
   fallback.piPath = 'pi'
   if (!fallback.config.agents.length) {
-    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, memory: true, plan: true, 'skills-list': true, subagent: true }, recommended: { dcg: true }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
+    fallback.config.agents.push({ id: 'default', name: 'Default Agent', description: 'General-purpose coding agent', dataDir: '', avatar: '', builtin: { 'browser-profile': true, document: true, memory: true, plan: true, subagent: true, db: true, ssh: true }, recommended: { dcg: true, rtk: false }, subagents: [], piTools: { read: true, bash: true, edit: true, write: true }, defaultProvider: 'openai', defaultModel: 'gpt-5.6-terra', browserProfilePolicy: { existingProfileMode: 'headless', interactiveLoginMode: 'headed', authenticatedTaskMode: 'headless' } })
     fallback.config.activeAgentId = 'default'
   }
   if (!fallback.config.environments) fallback.config.environments = []
@@ -607,6 +608,7 @@ export async function stewardDeleteSession(sessionId) {
 const mockBuiltinCatalog = [
   { key: 'browser-profile', name: 'Browser Profile', description: 'Manage reusable authenticated browser profiles for this agent.', currentVersion: '6.0.0' },
   { key: 'document', name: 'Document', description: 'Inspect, search, create, and distribute local documents.', currentVersion: '1.0.0' },
+  { key: 'memory', name: 'Memory', description: 'Manage durable user memory and project rules for this agent.', currentVersion: '1.0.0' },
   { key: 'plan', name: 'Plan Mode', description: 'Present and track an execution plan before making changes.', currentVersion: '1.0.1' },
   { key: 'skills-list', name: 'Skills List', description: 'List every skill available to the current isolated agent.', currentVersion: '1.0.0' },
   { key: 'subagent', name: 'Subagent', description: 'Run authorized CodingTo agents in the background and receive their results automatically.', currentVersion: '1.1.0' },
@@ -969,8 +971,141 @@ export async function saveFigmaConfig(config) {
 }
 
 export async function testModel(request) {
-  if (isWails()) return App.TestModel({ provider: request.provider, model: request.model })
+  if (isWails()) return App.TestModel({ provider: request.provider, model: request.model, agentId: request.agentId || '' })
   return new Promise(resolve => setTimeout(() => resolve({ ok: true, output: 'OK', latencyMs: 412 }), 800))
+}
+
+// Fetch OpenCode Go quota usage for one provider (GET {baseUrl}/usage). Only
+// providers whose base URL contains opencode.ai/zen/go expose this endpoint;
+// the backend rejects everything else.
+export async function getProviderUsage(providerName) {
+  if (isWails()) return App.GetProviderUsage(providerName)
+  // 浏览器预览模式返回样例数据，便于 UI 验证（5h/7d/30d 三窗口）。
+  return {
+    rolling: { percent: 0, resetSeconds: 6360 },
+    weekly: { percent: 0, resetSeconds: 330000 },
+    monthly: { percent: 50, resetSeconds: 2535000 }
+  }
+}
+
+// 查询 DeepSeek 服务商余额；API Key 仅由后端发送到固定官方接口。
+export async function getProviderBalance(providerName) {
+  if (isWails()) return App.GetProviderBalance(providerName)
+  return {
+    available: true,
+    balances: [{ currency: 'CNY', totalBalance: 18.5 }]
+  }
+}
+
+// 查询指定本地自然日范围内的模型、会话或单请求统计。
+export async function queryModelUsageStats(query) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.QueryModelUsageStats', query || {})
+  }
+  const dimension = query?.dimension || 'model'
+  const localDay = offset => {
+    const value = new Date()
+    value.setHours(12, 0, 0, 0)
+    value.setDate(value.getDate() + offset)
+    const pad = item => String(item).padStart(2, '0')
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`
+  }
+  const startDay = query?.startDay || localDay(0)
+  const endDay = query?.endDay || localDay(0)
+  const rows = dimension === 'request'
+    ? [
+        { day: endDay, label: '修复登录闪退', sessionId: 12, provider: 'openai', model: 'gpt-5', api: 'openai-responses', requestId: 'mock-1', requestTime: Date.now(), requestCount: 1, input: 12000, cached: 8000, cacheWrite: 0, output: 1400, total: 21400, stopReason: 'stop', success: true }
+      ]
+    : dimension === 'session'
+      ? [
+          { day: endDay, label: '修复登录闪退', sessionId: 12, requestCount: 3, modelCount: 1, input: 32000, cached: 18000, cacheWrite: 0, output: 4200, total: 54200, success: true }
+        ]
+      : [
+          { day: endDay, label: 'openai / gpt-5', provider: 'openai', model: 'gpt-5', requestCount: 3, sessionCount: 1, input: 32000, cached: 18000, cacheWrite: 0, output: 4200, total: 54200, success: true }
+        ]
+  const days = Math.max(1, Math.round((new Date(`${endDay}T12:00:00`) - new Date(`${startDay}T12:00:00`)) / 86400000) + 1)
+  return {
+    dimension,
+    days,
+    retentionDays: 60,
+    startDay,
+    endDay,
+    byDay: [{ day: endDay, label: endDay, requestCount: 3, sessionCount: 1, modelCount: 1, input: 32000, cached: 18000, cacheWrite: 0, output: 4200, total: 54200, success: true }],
+    rows,
+    totals: { requestCount: 3, sessionCount: 1, modelCount: 1, input: 32000, cached: 18000, cacheWrite: 0, output: 4200, total: 54200, success: true }
+  }
+}
+
+// 获取某一自然日内一个会话的每次模型请求。
+export async function getModelUsageSessionRequests(query) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.GetModelUsageSessionRequests', query || {})
+  }
+  const stats = await queryModelUsageStats({ dimension: 'request', startDay: query?.day, endDay: query?.day })
+  const items = stats.rows.filter(item => item.day === query?.day && Number(item.sessionId) === Number(query?.sessionId))
+  return { items, hasMore: false, nextCursor: '' }
+}
+
+// 获取某次模型请求已落盘的完整请求参数与结果。
+export async function getModelUsageRequestDetail(day, sessionId, requestId) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.GetModelUsageRequestDetail', day, Number(sessionId), requestId)
+  }
+  return {
+    available: true,
+    requestId,
+    fileName: `${day}_mock_openai_gpt-5.json`,
+    startedAt: Date.now() - 1200,
+    completedAt: Date.now(),
+    request: JSON.stringify({ model: 'gpt-5', input: [{ role: 'user', content: 'Hello' }] }, null, 2),
+    response: JSON.stringify({ status: 200, result: { role: 'assistant', content: [{ type: 'text', text: 'OK' }] } }, null, 2)
+  }
+}
+
+// 启动 ChatGPT (OpenAI Codex) OAuth 登录。凭据写入 Pi 默认目录并同步到所有智能体。
+export async function chatgptLoginStart() {
+  if (isWails()) return App.ChatGPTLoginStart()
+  return { agentId: 'default', status: 'pending', authUrl: 'https://example.com/mock-chatgpt-login' }
+}
+
+// 轮询 ChatGPT 订阅登录结果：pending/completed/error/cancelled/idle。
+export async function chatgptLoginStatus() {
+  if (isWails()) return App.ChatGPTLoginStatus()
+  return { agentId: 'default', status: 'idle' }
+}
+
+// 取消正在进行的 ChatGPT 订阅登录流程。
+export async function chatgptLoginCancel() {
+  if (isWails()) return App.ChatGPTLoginCancel()
+  return undefined
+}
+
+// 登出 ChatGPT 订阅（基于默认目录的共享凭据）。
+export async function chatgptLogout() {
+  if (isWails()) return App.ChatGPTLogout()
+  return undefined
+}
+
+// 查询共享 ChatGPT 订阅登录状态（不透出 token）。
+export async function chatgptAccount() {
+  if (isWails()) return App.ChatGPTAccount()
+  return { agentId: 'default', loggedIn: false }
+}
+
+// 查询 ChatGPT 订阅额度。OAuth 凭据仅由后端/Pi 使用，不会返回前端。
+export async function chatgptUsage() {
+  if (isWails()) return App.ChatGPTUsage()
+  return {
+    rolling: { percent: 24, resetSeconds: 7200 },
+    weekly: { percent: 41, resetSeconds: 345600 },
+    monthly: { percent: 0, resetSeconds: 0 }
+  }
+}
+
+// 确保配置中存在 openai-codex 服务商（含常用订阅模型），返回最新配置。
+export async function applyCodexProvider() {
+  if (isWails()) return App.ApplyCodexProvider()
+  return structuredClone(fallback.config)
 }
 
 // ReadAgentFile returns the contents of a whitelisted file inside an agent's

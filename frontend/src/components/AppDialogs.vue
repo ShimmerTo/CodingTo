@@ -4,6 +4,7 @@ import { Bot, Brain, Check, Database, Eye, EyeOff, Folder, Image, KeyRound, Plus
 import { useAppContext } from '../composables/appContext'
 import ConfirmDeleteDialog from './ConfirmDeleteDialog.vue'
 import DBConnectionForm from './DBConnectionForm.vue'
+import SSHSecurityEditor from './SSHSecurityEditor.vue'
 
 const { t, pendingDeleteAgent, agentDeleteBusy, confirmDeleteAgent, pendingDeleteProvider, saving, confirmDeleteProvider, agentEditorOpen, closeAgentEditor, editingNewAgent, selectedAgent, agentList, modelOptions, newAgentId, persistAgentChange, pickAgentDataDir, cancelNewAgent, saveNewAgent, providerEditorOpen, closeProviderEditor, providerDraft, editingNewProvider, showProviderApiKey, apiKeyVisibilityLabel, piCompatBooleanFields, formatCompat, updateCompatJson, addModel, modelRequestRoute, toggleImageInput, confirmAddProvider, confirmSaveProvider, pendingDeleteSsh, sshBusy, confirmDeleteSsh, pendingDeleteDb, dbBusy, confirmDeleteDb, dbEditorOpen, closeDbEditor, editingNewDb, dbDraft, persistDbChange, saveNewDb, pendingExtensionDelete, extensionDeleteBusy, confirmDeleteExtension, pendingDeleteWs, wsBusy, confirmDeleteWs, sshEditorOpen, closeSshEditor, editingNewSsh, sshDraft, persistSshChange, saveNewSsh, pickSshKeyFile, wsEditorOpen, closeWsEditor, editingNewWs, wsDraft, persistWsChange, saveNewWs, pickWorkspacePath, config, handleWorkspaceSshChange, addWorkspaceSsh, removeWorkspaceSsh, handleWsPathChange, toggleWorkspaceDb, toasts, extensionBusy, showFigmaConfig, figmaAuthorizationsDraft, figmaActiveAuthorizationIdDraft, addFigmaAuthorization, removeFigmaAuthorization, persistFigma } = useAppContext()
 
@@ -206,7 +207,7 @@ const selectedAgentDefaultModel = computed({
     />
 
     <div v-if="sshEditorOpen" class="modal-backdrop" @pointerdown.self="closeSshEditor">
-      <section class="agent-editor-dialog" role="dialog" aria-modal="true">
+      <section class="agent-editor-dialog ssh-editor-dialog" role="dialog" aria-modal="true">
         <header class="agent-editor-dialog__head">
           <h2>{{ editingNewSsh ? t.createSsh : t.openEditor }}</h2>
           <button class="icon-button" :aria-label="t.closeDialog" @click="closeSshEditor"><X :size="16" /></button>
@@ -232,9 +233,11 @@ const selectedAgentDefaultModel = computed({
             <template v-else>
               <label class="db-form-wide"><span>{{ t.sshPassword }}</span><input v-model="sshDraft.password" type="password" autocomplete="current-password" @change="persistSshChange" /></label>
             </template>
+            <label class="db-form-wide"><span>{{ t.sshHostKeyFingerprint }}</span><input v-model.trim="sshDraft.hostKeyFingerprint" placeholder="SHA256:..." spellcheck="false" @change="persistSshChange" /><small class="field-hint">{{ t.sshHostKeyFingerprintHint }}</small></label>
             <label><span>{{ t.sshRemark }}</span><input v-model="sshDraft.remark" @change="persistSshChange" /></label>
           </div>
           <p class="ssh-auth-hint"><KeyRound :size="14" />{{ sshDraft.authMode === 'key' ? t.sshKeyModeHint : t.sshPasswordModeHint }}</p>
+          <SSHSecurityEditor :ssh="sshDraft" @persist="persistSshChange" />
         </div>
         <footer class="agent-editor-dialog__footer">
           <div class="agent-draft-actions">

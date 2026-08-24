@@ -6,6 +6,7 @@ import {
 } from 'lucide-vue-next'
 import { useAppContext } from '../../composables/appContext'
 import ChatMessages from '../chat/ChatMessages.vue'
+import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 import {
   deleteBotChannel, getSessionHistory, getStewardProfile, injectBotMessage, listBotChannels,
   onEvent, saveBotChannel, saveStewardProfile, testBotChannel, toggleBotChannel
@@ -173,8 +174,14 @@ async function submitChannel() {
   showForm.value = false
   await loadAll()
 }
-async function removeChannel(channel) {
-  if (!window.confirm(t.value.steward_channel_delete_confirm)) return
+const channelToDelete = ref(null)
+function removeChannel(channel) {
+  channelToDelete.value = channel
+}
+async function confirmDeleteChannel() {
+  const channel = channelToDelete.value
+  channelToDelete.value = null
+  if (!channel) return
   await deleteBotChannel(channel.id)
   await loadAll()
 }
@@ -480,6 +487,14 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </Teleport>
+
+    <ConfirmDeleteDialog
+      :model-value="!!channelToDelete"
+      :title="t.steward_channel_delete_confirm"
+      :description="t.steward_channel_delete_desc.replace('{name}', channelToDelete?.name || '')"
+      @cancel="channelToDelete = null"
+      @confirm="confirmDeleteChannel"
+    />
   </section>
 </template>
 

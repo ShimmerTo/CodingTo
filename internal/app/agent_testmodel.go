@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 type TestModelRequest struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	AgentID  string `json:"agentId,omitempty"`
 }
 
 type TestModelResult struct {
@@ -54,15 +56,40 @@ func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) 
 		return TestModelResult{OK: false, Error: fmt.Sprintf("model not found: %s/%s", req.Provider, req.Model)}, nil
 	}
 
-	// Use a throwaway data dir so the test never touches a real agent session.
+	// Models and extensions always live in a throwaway directory. The SDK RPC
+	// launcher separately points authPath at Pi's shared default auth.json, so a
+	// Codex test can safely participate in the same locked refresh-token store
+	// without overwriting ~/.pi/agent/models.json.
+	if isOpenAICodexProvider(cfg.Providers, req.Provider) {
+		defaultDir, err := piagent.DefaultAgentDir()
+		if err != nil {
+			applog.Errorf("[TestModel] resolve default Pi agent dir for codex: %v", err)
+			return TestModelResult{OK: false, Error: "cannot determine Pi default agent directory"}, nil
+		}
+		if _, ok, err := readChatGPTAuthEntry(defaultDir); err != nil {
+			applog.Errorf("[TestModel] read ChatGPT credential from default dir: %v", err)
+			return TestModelResult{OK: false, Error: "cannot read ChatGPT sign-in"}, nil
+		} else if !ok {
+			return TestModelResult{OK: false, Error: "not signed in to ChatGPT"}, nil
+		}
+	}
 	testDir, err := os.MkdirTemp("", "codingto-modeltest-")
 	if err != nil {
 		return TestModelResult{OK: false, Error: fmt.Sprintf("create temp dir: %v", err)}, nil
 	}
-	defer os.RemoveAll(testDir)
+	defer func() { _ = os.RemoveAll(testDir) }()
 	if err := piagent.WriteModels(testDir, cfg.Providers); err != nil {
 		return TestModelResult{OK: false, Error: fmt.Sprintf("write models.json: %v", err)}, nil
 	}
+	recorderDir, err := os.MkdirTemp("", "codingto-modeltest-recorder-")
+	if err != nil {
+		return TestModelResult{OK: false, Error: "cannot prepare model test recorder"}, nil
+	}
+	defer func() { _ = os.RemoveAll(recorderDir) }()
+	if err := piagent.MaterializeSystemExtensions(recorderDir); err != nil {
+		return TestModelResult{OK: false, Error: "cannot prepare model test recorder"}, nil
+	}
+	recorderPath := filepath.Join(recorderDir, "extensions", "codingto-api-detail", "index.ts")
 	applog.Infof("[TestModel] wrote models.json to %s, starting isolated Pi process", testDir)
 
 	adapter := piagent.NewAdapter()
@@ -72,15 +99,25 @@ func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) 
 	start := time.Now()
 	if err := adapter.Start(ctx, piagent.StartConfig{
 		WorkDir:   testDir,
+		AgentDir:  testDir,
 		Model:     req.Model,
 		Provider:  req.Provider,
-		ExtraArgs: []string{"--no-builtin-tools"},
-		Env:       map[string]string{"PI_CODING_AGENT_DIR": testDir},
+		ExtraArgs: []string{"--no-builtin-tools", "--no-session", "--no-extensions", "--extension", recorderPath},
+		Env: map[string]string{
+			"PI_CODING_AGENT_DIR":        testDir,
+			"CODINGTO_SESSION_DIR":       filepath.Join(s.store.Dir(), modelTestDetailDir),
+			"CODINGTO_API_DETAIL_MARKER": filepath.Join(s.store.Dir(), apiDetailMarkerFile),
+			"CODINGTO_API_DETAIL_DIR":    filepath.Join(s.store.Dir(), modelTestDetailDir, "api"),
+		},
 	}); err != nil {
 		applog.Infof("[TestModel] adapter.Start failed after %dms: %v", time.Since(start).Milliseconds(), err)
 		return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
 	}
-	defer adapter.Stop()
+	defer func() {
+		if err := adapter.GracefulStop(5 * time.Second); err != nil {
+			applog.Errorf("[TestModel] graceful recorder shutdown failed: %v", err)
+		}
+	}()
 	applog.Infof("[TestModel] Pi process started after %dms, sending set_model", time.Since(start).Milliseconds())
 
 	if err := adapter.SendCommand(mustJSON(map[string]string{"type": "set_model", "provider": req.Provider, "modelId": req.Model})); err != nil {
@@ -101,7 +138,11 @@ func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) 
 	}
 	applog.Infof("[TestModel] prompt sent, waiting for response (timeout 90s)")
 
-	output, err := waitForText(ctx, adapter)
+	output, usageMessage, err := waitForText(ctx, adapter)
+	// Model tests bypass the normal conversation event dispatcher. Persist the
+	// assistant usage here so the test button is represented as a real request
+	// in model statistics as well.
+	s.recordModelTestUsage(req, usageMessage, time.Now().UnixMilli())
 	if err != nil {
 		applog.Infof("[TestModel] waitForText failed after %dms: %v", time.Since(start).Milliseconds(), err)
 		return TestModelResult{OK: false, Error: err.Error(), Latency: time.Since(start).Milliseconds()}, nil
@@ -112,24 +153,25 @@ func (s *AgentService) TestModel(req TestModelRequest) (TestModelResult, error) 
 
 // waitForText blocks until the Pi process emits a text delta or the context
 // expires, returning the trimmed accumulated text.
-func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) {
+func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, map[string]any, error) {
 	var buf strings.Builder
+	var usageMessage map[string]any
 	for {
 		select {
 		case <-ctx.Done():
 			applog.Infof("[TestModel] waitForText: context done (timeout). buffered=%q", buf.String())
-			return buf.String(), fmt.Errorf("model test timed out")
+			return buf.String(), usageMessage, fmt.Errorf("model test timed out")
 		case evt, ok := <-adapter.Events():
 			if !ok {
 				msg := buf.String()
 				applog.Infof("[TestModel] waitForText: events channel closed. buffered=%q", msg)
 				if msg == "" {
 					if err := adapter.ExitError(); err != nil {
-						return "", fmt.Errorf("pi exited: %v", err)
+						return "", usageMessage, fmt.Errorf("pi exited: %v", err)
 					}
-					return "", fmt.Errorf("pi exited before producing output")
+					return "", usageMessage, fmt.Errorf("pi exited before producing output")
 				}
-				return msg, nil
+				return msg, usageMessage, nil
 			}
 			var payload struct {
 				Type                  string `json:"type"`
@@ -145,6 +187,7 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 					Content string `json:"content"`
 					Text    string `json:"text"`
 				} `json:"assistantMessageEvent"`
+				Message map[string]any `json:"message"`
 			}
 			if err := json.Unmarshal(evt.Raw, &payload); err != nil {
 				continue
@@ -167,11 +210,14 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 						collect(payload.AssistantMessageEvent.Content)
 					}
 				case "error":
-					return buf.String(), errors.New("model stream failed")
+					return buf.String(), usageMessage, errors.New("model stream failed")
 				}
 			case "text_delta":
 				collect(payload.Delta)
 			case "message_start", "message_end":
+				if payload.Type == "message_end" && stringValue(payload.Message["role"]) == "assistant" {
+					usageMessage = payload.Message
+				}
 				// reasoning 模型或非流式回答可能在这些事件里直接携带文本。
 				if payload.Text != "" {
 					collect(payload.Text)
@@ -188,18 +234,18 @@ func waitForText(ctx context.Context, adapter *piagent.Adapter) (string, error) 
 				if strings.TrimSpace(buf.String()) == "" {
 					// 优先返回模型/provider 返回的真实错误（如 404、鉴权失败等）。
 					if msg := agentEndErrorMessage(evt.Raw); msg != "" {
-						return "", errors.New(msg)
+						return "", usageMessage, errors.New(msg)
 					}
 					applog.Infof("[TestModel] waitForText: last raw event: %s", string(evt.Raw))
-					return "", errors.New("model completed without a text response")
+					return "", usageMessage, errors.New("model completed without a text response")
 				}
-				return buf.String(), nil
+				return buf.String(), usageMessage, nil
 			case "response":
 				if payload.Success != nil && !*payload.Success {
 					if payload.Error == "" {
 						payload.Error = payload.Command + " failed"
 					}
-					return buf.String(), errors.New(payload.Error)
+					return buf.String(), usageMessage, errors.New(payload.Error)
 				}
 				// 兼容极少数把最终结果放在 response 顶层 text/content 的实现。
 				if payload.Text != "" {

@@ -16,7 +16,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-func (s *AgentService) forwardEvents(adapter *piagent.Adapter, sessionID int64, sessionDir string) {
+func (s *AgentService) forwardEvents(adapter *piagent.Adapter, sessionID int64, sessionDir string, adapterGeneration uint64) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	events := adapter.Events()
@@ -33,7 +33,9 @@ func (s *AgentService) forwardEvents(adapter *piagent.Adapter, sessionID int64, 
 	defer stopFlushTimer()
 	flushPending := func() {
 		merger.flush(func(event map[string]any) {
-			s.dispatchEvent(adapter, sessionID, sessionDir, event, nil)
+			if s.isCurrentAdapterGeneration(adapter, adapterGeneration) {
+				s.dispatchEventForGeneration(adapter, adapterGeneration, sessionID, sessionDir, event, nil)
+			}
 		})
 	}
 	for {
@@ -42,6 +44,9 @@ func (s *AgentService) forwardEvents(adapter *piagent.Adapter, sessionID int64, 
 			if !ok {
 				flushPending()
 				goto closed
+			}
+			if !s.isCurrentAdapterGeneration(adapter, adapterGeneration) {
+				return
 			}
 			var payload any
 			if err := json.Unmarshal(evt.Raw, &payload); err != nil {
@@ -75,28 +80,42 @@ func (s *AgentService) forwardEvents(adapter *piagent.Adapter, sessionID int64, 
 			// 先按序排空合并缓冲再处理本事件。
 			flushPending()
 			stopFlushTimer()
-			s.dispatchEvent(adapter, sessionID, sessionDir, event, evt.Raw)
+			s.dispatchEventForGeneration(adapter, adapterGeneration, sessionID, sessionDir, event, evt.Raw)
 		case <-flushC:
 			flushPending()
 			stopFlushTimer()
 		case <-ticker.C:
+			if !s.isCurrentAdapterGeneration(adapter, adapterGeneration) {
+				return
+			}
 			s.emitExecProgressFor(sessionID)
 		}
 	}
 
 closed:
-	if adapter.IsRunning() {
+	s.handleAdapterEventStreamClosed(adapter, adapterGeneration, sessionID, sessionDir)
+}
+
+func (s *AgentService) isCurrentAdapterGeneration(adapter *piagent.Adapter, generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.adapter == adapter && s.adapterGeneration == generation
+}
+
+func (s *AgentService) handleAdapterEventStreamClosed(adapter *piagent.Adapter, generation uint64, sessionID int64, sessionDir string) {
+	s.mu.Lock()
+	// A stopped adapter can be restarted before its previous stdout reader
+	// closes. That old stream must never clear the new turn or publish idle.
+	if s.adapter != adapter || s.adapterGeneration != generation || adapter.IsRunning() || s.activeSessionID != sessionID {
+		s.mu.Unlock()
 		return
 	}
-	s.mu.Lock()
 	interruptedNodeID := ""
-	if s.activeSessionID == sessionID {
-		interruptedNodeID = s.activeChangeNode
-		s.activeChangeNode = ""
-		s.activeStewardToken = ""
-		s.pendingStewardToken = ""
-		s.stewardPromptPending = false
-	}
+	interruptedNodeID = s.activeChangeNode
+	s.activeChangeNode = ""
+	s.activeStewardToken = ""
+	s.pendingStewardToken = ""
+	s.stewardPromptPending = false
 	s.finishExecutionLocked("active")
 	s.disarmUIWatchdogLocked("")
 	s.mu.Unlock()
@@ -109,7 +128,7 @@ closed:
 	if err := adapter.ExitError(); err != nil {
 		state["error"] = err.Error()
 	}
-	application.Get().Event.Emit("agent:state", state)
+	s.emitEvent("agent:state", state)
 }
 
 // dispatchEvent 处理单条已填充元数据（_recordedAt / codingToSessionId /
@@ -162,6 +181,10 @@ func (s *AgentService) settledEventWithReply(sessionID int64, sessionDir string,
 }
 
 func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, sessionDir string, event map[string]any, raw json.RawMessage) {
+	s.dispatchEventForGeneration(adapter, 0, sessionID, sessionDir, event, raw)
+}
+
+func (s *AgentService) dispatchEventForGeneration(adapter *piagent.Adapter, adapterGeneration uint64, sessionID int64, sessionDir string, event map[string]any, raw json.RawMessage) {
 	recordedAt := intValue(event["_recordedAt"])
 	if recordedAt == 0 {
 		recordedAt = time.Now().UnixMilli()
@@ -186,6 +209,10 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	var relayUI bool
 	var taskSettled bool
 	s.mu.Lock()
+	if adapterGeneration != 0 && (s.adapter != adapter || s.adapterGeneration != adapterGeneration) {
+		s.mu.Unlock()
+		return
+	}
 	if stewardToken := s.stewardTokenForEventLocked(sessionID, eventType); stewardToken != "" {
 		event["_stewardDispatchToken"] = stewardToken
 	}
@@ -319,6 +346,11 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 		}
 	}
 	s.mu.Unlock()
+	// 在模型回合返回处挂钩子：把本次请求的 token 消耗按日落库（含管家等长驻会话），
+	// 供模型页按天/按会话统计。只读且失败仅记日志，绝不阻塞事件分发。
+	if eventType == "message_end" {
+		s.recordTokenUsage(sessionID, event, recordedAt)
+	}
 	// Out-of-lock steward hooks: log high-value agent lifecycle events, relay
 	// interactive UI requests and report task settlement. Both callbacks never
 	// run under the service lock (network I/O and command injection must not
@@ -329,10 +361,8 @@ func (s *AgentService) dispatchEvent(adapter *piagent.Adapter, sessionID int64, 
 	if relayUI && s.stewardHooks != nil && s.stewardHooks.relayPermission != nil {
 		s.stewardHooks.relayPermission(sessionID, event)
 	}
-	if taskSettled && s.stewardHooks != nil && s.stewardHooks.onTaskSettled != nil {
-		if s.stewardHooks.isBotManaged == nil || s.stewardHooks.isBotManaged(sessionID) {
-			s.stewardHooks.onTaskSettled(sessionID, s.settledEventWithReply(sessionID, sessionDir, event))
-		}
+	if taskSettled {
+		s.notifyStewardTaskSettled(s.stewardHooks, sessionID, sessionDir, event)
 	}
 	if followUpInitError != "" {
 		if followUpInitNodeID != "" {

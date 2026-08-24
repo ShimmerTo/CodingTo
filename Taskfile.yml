@@ -34,6 +34,7 @@ tasks:
       - task: common:build:document-bridge
       - task: common:build:subagent-bridge
       - task: common:build:db-security-bridge
+      - task: common:build:ssh-security-bridge
     summary: Runs CodingTo in development mode
     cmds:
       - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}

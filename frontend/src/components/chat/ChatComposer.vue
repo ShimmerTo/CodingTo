@@ -1,8 +1,8 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  Bot, Brain, Check, AlertCircle, ChevronDown, CircleStop, File, FileAudio, FileText, FileVideo, Gauge, Image,
-  LoaderCircle, Paperclip, Pencil, Send, Shield, ShieldOff, Sparkles, Trash2, X, BrainCog
+  ArrowUp, Bot, Brain, Check, AlertCircle, ChevronDown, File, FileAudio, FileText, FileVideo, Gauge, Image,
+  LoaderCircle, Paperclip, Pencil, Shield, ShieldOff, Sparkles, Square, Trash2, X, BrainCog
 } from 'lucide-vue-next'
 import { formatFileSize, formatTokenCount, imageSrc } from './chatFormatters.js'
 import { agentAvatar, isImageAvatar } from '../../composables/appContext'
@@ -22,6 +22,7 @@ const props = defineProps({
   pendingPrompts: { type: Array, default: () => [] },
   modelOptions: { type: Array, default: () => [] },
   selectedModelValue: { type: String, default: '' },
+  selectedModelUnavailable: { type: Boolean, default: false },
   supportsImages: { type: Boolean, default: false },
   promptImages: { type: Array, default: () => [] },
   attachments: { type: Array, default: () => [] },
@@ -146,6 +147,7 @@ const tokenStatsInput = computed(() => Number(props.tokenStats?.input) || 0)
 const tokenStatsCached = computed(() => Number(props.tokenStats?.cached) || 0)
 const tokenStatsOutput = computed(() => Number(props.tokenStats?.output) || 0)
 const tokenTotal = computed(() => Number(props.tokenStats?.total) || (tokenStatsInput.value + tokenStatsCached.value + tokenStatsOutput.value))
+const hasPromptContent = computed(() => Boolean(props.draft.trim() || props.promptImages.length || props.attachments.length))
 const tokenStatsTitle = computed(() => {
   return [
     `${props.t.token_total}: ${tokenTotal.value.toLocaleString()}`,
@@ -172,9 +174,10 @@ function pickAgent(agent) {
   emit('select-agent', agent)
 }
 
-function selectModel(value) {
+function selectModel(option) {
+  if (!option || option.disabled) return
   modelMenuOpen.value = false
-  emit('update:model', value)
+  emit('update:model', option.value)
 }
 
 function sendOnEnter(event) {
@@ -424,7 +427,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
       <div class="composer-toolbar">
         <div class="composer-tools">
           <div ref="modelWrapEl" class="model-select-wrap">
-            <button class="model-select-btn" :disabled="running || !modelOptions.length" :title="t.chatModel" @click="modelMenuOpen = !modelMenuOpen">
+            <button class="model-select-btn" :disabled="running || !modelOptions.length" :title="selectedModelUnavailable ? t.chatgpt_model_not_authorized : t.chatModel" @click="modelMenuOpen = !modelMenuOpen">
               <Brain :size="14" class="model-select-btn__icon" />
               <span class="model-select-btn__label">{{ selectedModelLabel }}</span>
               <ChevronDown :size="13" :class="{ 'model-select-btn__arrow--open': modelMenuOpen }" />
@@ -437,10 +440,13 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
                     v-for="option in group.options"
                     :key="option.value"
                     class="model-menu__item"
-                    :class="{ 'model-menu__item--active': option.value === selectedModelValue }"
-                    @click="selectModel(option.value)"
+                    :class="{ 'model-menu__item--active': option.value === selectedModelValue, 'model-menu__item--disabled': option.disabled }"
+                    :disabled="option.disabled"
+                    :title="option.disabledReason || ''"
+                    @click="selectModel(option)"
                   >
                     <span>{{ option.model }}</span>
+                    <small v-if="option.disabled">{{ option.disabledLabel }}</small>
                     <Check v-if="option.value === selectedModelValue" :size="14" />
                   </button>
                 </template>
@@ -456,7 +462,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
 
           <span v-if="thinkingLevels.length" class="thinking-select-wrap">
             <BrainCog :size="14" class="thinking-select-icon" />
-            <select class="thinking-select" :value="thinkingLevel" :title="t.thinkingMode" @change="emit('update:thinking', $event.target.value)">
+            <select class="thinking-select" :value="thinkingLevel" :title="t.thinkingAutosaveHint || t.thinkingMode" @change="emit('update:thinking', $event.target.value)">
               <option v-for="level in thinkingLevels" :key="level" :value="level">{{ thinkingLevelLabel(level) }}</option>
             </select>
           </span>
@@ -613,17 +619,18 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
             :aria-label="stopping ? t.stopping : t.stop"
             @click="emit('stop')"
           >
-            <LoaderCircle v-if="stopping" class="spin" :size="17" />
-            <CircleStop v-else :size="17" />
+            <LoaderCircle v-if="stopping" class="spin" :size="16" />
+            <Square v-else :size="11" :stroke-width="2.5" fill="currentColor" />
           </button>
           <button
+            v-if="!running || hasPromptContent"
             class="send-button"
             type="button"
-            :disabled="attachmentsBusy || (!draft.trim() && !promptImages.length && !attachments.length) || !selectedModelValue"
+            :disabled="attachmentsBusy || selectedModelUnavailable || !hasPromptContent || !selectedModelValue"
             :title="running ? t.queuePrompt : t.send"
             :aria-label="running ? t.queuePrompt : t.send"
             @click="emit('send')"
-          ><Send :size="17" /></button>
+          ><ArrowUp :size="18" :stroke-width="2.4" /></button>
         </div>
       </div>
     </div>

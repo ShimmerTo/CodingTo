@@ -16,6 +16,11 @@ tasks:
     cmds:
       - go build -buildvcs=false -o "{{.BIN_DIR}}/db-security-bridge{{exeExt}}" ./cmd/db-security-bridge
 
+  build:ssh-security-bridge:
+    summary: Builds the per-session SSH Security Bridge helper
+    cmds:
+      - go build -buildvcs=false -o "{{.BIN_DIR}}/ssh-security-bridge{{exeExt}}" ./cmd/ssh-security-bridge
+
   go:mod:tidy:
     summary: Runs `go mod tidy`
     internal: true

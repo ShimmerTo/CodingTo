@@ -279,6 +279,12 @@ func (s *AgentService) fireToolWatchdog(token uint64, sessionID int64, toolName,
 // escalateToolWatchdog kills the Pi process tree only when abort_bash did not
 // produce a tool end within the grace period. A later matching tool end or turn
 // end removes the state and makes this stale callback harmless.
+//
+// Killing the Pi process tree also destroys the only channel through which a
+// tool_execution_end / agent_settled could ever arrive, so after the kill we
+// synthesize the terminal events ourselves (finalizeToolTimeoutSession);
+// otherwise the frontend would keep the timed-out tool call and the whole
+// session in a permanent "running" state with no visible way to recover.
 func (s *AgentService) escalateToolWatchdog(token uint64, sessionID int64, toolName, toolCallID string) {
 	grace := s.toolWatchdogAbortGrace
 	if grace <= 0 {
@@ -295,18 +301,114 @@ func (s *AgentService) escalateToolWatchdog(token uint64, sessionID int64, toolN
 		s.mu.Unlock()
 		return
 	}
+	timeout := s.toolExecutionTimeout
+	if timeout <= 0 {
+		timeout = defaultToolExecutionTimeout
+	}
+	sessionDir := s.activeSessionDir
+	nodeID := s.activeChangeNode
+	stewardHookSet := s.stewardHooks
+	stewardToken := s.activeStewardToken
+	if s.stewardPromptPending {
+		stewardToken = s.pendingStewardToken
+		s.activeStewardToken = stewardToken
+		s.pendingStewardToken = ""
+		s.stewardPromptPending = false
+	}
+	// End the turn and clear every watchdog timer (this one included) so a
+	// parallel deadline can never trigger a duplicate process-tree kill while
+	// the settle events below are still in flight.
+	s.pendingRestart = false
+	s.activeChangeNode = ""
+	s.finishExecutionLocked("active")
+	s.mu.Unlock()
+
 	killTree := s.killTreeOverride
 	if killTree == nil {
 		killTree = s.adapter.KillTree
 	}
-	// Killing the Pi process ends all parallel tool calls. Clear every timer now
-	// so another deadline cannot trigger a duplicate process-tree kill while
-	// lifecycle events are still in flight.
-	s.disarmAllToolWatchdogsLocked()
-	s.mu.Unlock()
-
 	killTree()
+	// Put the adapter into the stopped state right away so a follow-up prompt
+	// cannot write into the dead process before the Wait goroutine resets
+	// running. Stop is idempotent here: the tree is already gone, taskkill just
+	// fails silently and the flag + done channel are reset for the next turn.
+	_ = s.adapter.Stop()
 	applog.Infof("[session %d] tool %s (%s) did not finish after abort; killed Pi process tree", sessionID, toolName, toolCallID)
+
+	s.finalizeToolTimeoutSession(sessionID, sessionDir, nodeID, toolName, toolCallID, timeout, stewardHookSet, stewardToken)
+}
+
+// finalizeToolTimeoutSession emits the terminal events that the killed Pi
+// process can no longer produce after a tool-execution-timeout escalation. It
+// mirrors the first-response-timeout teardown (handleFirstResponseTimeout) so
+// the frontend and the steward both observe a settled, failed session instead
+// of an endless running tool call. Caller must not hold s.mu.
+func (s *AgentService) finalizeToolTimeoutSession(sessionID int64, sessionDir, nodeID, toolName, toolCallID string, timeout time.Duration, stewardHookSet *stewardHooks, stewardToken string) {
+	recordedAt := time.Now().UnixMilli()
+	seconds := int(timeout.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	message := fmt.Sprintf(
+		"Tool %s exceeded the %d second execution limit and the stalled command was force-stopped.",
+		toolName, seconds,
+	)
+
+	// The Pi process is gone, so synthesize the tool end the frontend relies on
+	// to mark the tool call as finished (its detail.status is only reset by
+	// tool_execution_end).
+	toolEnd := map[string]any{
+		"type": "tool_execution_end", "toolName": toolName, "toolCallId": toolCallID,
+		"cancelled": true, "errorMessage": message, "output": "",
+		"codingToSessionId": sessionID, "_recordedAt": recordedAt,
+	}
+	if err := s.appendEvent(sessionDir, toolEnd); err != nil {
+		applog.Infof("[session %d] append tool-timeout end event: %v", sessionID, err)
+	}
+	s.emitEvent("agent:event", toolEnd)
+
+	_ = os.Remove(filepath.Join(sessionDir, ".active-change-node"))
+	_ = finishChangeNode(sessionDir, nodeID, "timeout", recordedAt)
+	summary, err := readChangeSummary(sessionDir, nodeID)
+	if err != nil {
+		summary = ChangeSummary{
+			NodeID: nodeID, Status: "timeout", Files: []FileChangeSummary{},
+		}
+	}
+	events := []map[string]any{
+		{
+			"type": "agent_end", "messages": []any{}, "errorMessage": message,
+			"changeSummary": summary, "changeNodeId": nodeID,
+			"codingToSessionId": sessionID, "_recordedAt": recordedAt,
+		},
+		{
+			"type": "error", "code": "tool_execution_timeout", "error": message,
+			"changeNodeId": nodeID, "codingToSessionId": sessionID, "_recordedAt": recordedAt,
+		},
+		{
+			"type": "agent_settled", "reason": "tool_execution_timeout",
+			"status": "failed", "errorMessage": message,
+			"codingToSessionId": sessionID, "_recordedAt": recordedAt,
+		},
+	}
+	for _, event := range events {
+		if stewardToken != "" {
+			event["_stewardDispatchToken"] = stewardToken
+		}
+		if err := s.appendEvent(sessionDir, event); err != nil {
+			applog.Infof("[session %d] append tool-timeout settle event: %v", sessionID, err)
+		}
+		s.emitEvent("agent:event", event)
+		if stewardHookSet != nil && stewardHookSet.onAgentEvent != nil {
+			stewardHookSet.onAgentEvent(sessionID, event)
+		}
+	}
+	s.notifyStewardTaskSettled(stewardHookSet, sessionID, sessionDir, events[len(events)-1])
+	s.emitEvent("agent:state", map[string]any{
+		"running": false, "processRunning": false,
+		"codingToSessionId": sessionID, "error": message,
+	})
+	applog.Infof("[session %d] tool %s (%s) timed out after %s; session settled as failed", sessionID, toolName, toolCallID, timeout)
 }
 
 func firstResponseObserved(event map[string]any) bool {
@@ -388,6 +490,7 @@ func (s *AgentService) handleFirstResponseTimeout(sessionID int64, nodeID string
 		},
 		{
 			"type": "agent_settled", "reason": "model_first_response_timeout",
+			"status": "failed", "errorMessage": message,
 			"codingToSessionId": sessionID, "_recordedAt": recordedAt,
 		},
 	}
@@ -398,12 +501,13 @@ func (s *AgentService) handleFirstResponseTimeout(sessionID int64, nodeID string
 		if err := s.appendEvent(sessionDir, event); err != nil {
 			applog.Infof("[session %d] append first-response timeout event: %v", sessionID, err)
 		}
-		application.Get().Event.Emit("agent:event", event)
+		s.emitEvent("agent:event", event)
 		if stewardHookSet != nil && stewardHookSet.onAgentEvent != nil {
 			stewardHookSet.onAgentEvent(sessionID, event)
 		}
 	}
-	application.Get().Event.Emit("agent:state", map[string]any{
+	s.notifyStewardTaskSettled(stewardHookSet, sessionID, sessionDir, events[len(events)-1])
+	s.emitEvent("agent:state", map[string]any{
 		"running": false, "processRunning": false,
 		"codingToSessionId": sessionID, "error": message,
 	})

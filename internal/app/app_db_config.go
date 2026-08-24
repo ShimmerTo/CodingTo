@@ -98,6 +98,7 @@ func (a *App) TestDBConnection(req DBTestRequest) (DBTestResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), dbTestTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, bin, "db-security-bridge", "test-connection", "--config", configPath, "--conn", conn.ID)
+	command.Env = append(os.Environ(), "CODINGTO_SSH_KNOWN_HOSTS="+knownHostsPath(a.store.Dir()))
 	configureDocumentBridgeProcess(command)
 	output, _ := command.Output() // 非零退出码也带 JSON 结果
 

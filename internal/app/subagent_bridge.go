@@ -105,6 +105,11 @@ func (s *AgentService) prepareSubagentRuntime(
 			return fmt.Errorf("write subagent %s models.json: %w", child.Name, err)
 		}
 		childEnv := agentProcessEnv(cfg, child)
+		// Detailed API recording is a conversation-level opt-in. Child agents
+		// use their own Pi data directories, so explicitly inherit the global
+		// marker and the parent conversation's api output directory.
+		childEnv["CODINGTO_API_DETAIL_MARKER"] = agentEnv["CODINGTO_API_DETAIL_MARKER"]
+		childEnv["CODINGTO_API_DETAIL_DIR"] = agentEnv["CODINGTO_API_DETAIL_DIR"]
 		if child.Builtin["memory"] {
 			configureMemoryEnv(childEnv, s.store.Dir(), req.WorkDir, cfg.Memory.ProjectHistoryLimit)
 		}
@@ -145,6 +150,14 @@ func (s *AgentService) prepareSubagentRuntime(
 			if bin := agentEnv["CODINGTO_DB_BRIDGE_BIN"]; bin != "" {
 				agents[index].Env["CODINGTO_DB_BRIDGE_BIN"] = bin
 				agents[index].Env["CODINGTO_DB_CONFIG_PATH"] = agentEnv["CODINGTO_DB_CONFIG_PATH"]
+				agents[index].Env["CODINGTO_SSH_KNOWN_HOSTS"] = agentEnv["CODINGTO_SSH_KNOWN_HOSTS"]
+			}
+		}
+		if child.Builtin["ssh"] {
+			if bin := agentEnv["CODINGTO_SSH_BRIDGE_BIN"]; bin != "" {
+				agents[index].Env["CODINGTO_SSH_BRIDGE_BIN"] = bin
+				agents[index].Env["CODINGTO_SSH_CONFIG_PATH"] = agentEnv["CODINGTO_SSH_CONFIG_PATH"]
+				agents[index].Env["CODINGTO_SSH_KNOWN_HOSTS"] = agentEnv["CODINGTO_SSH_KNOWN_HOSTS"]
 			}
 		}
 		if s.runtimeEnv != nil {

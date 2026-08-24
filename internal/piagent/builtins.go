@@ -74,21 +74,22 @@ func BuiltinToolCatalog() ([]extensions.BuiltinToolStatus, error) {
 }
 
 // DefaultBuiltinTools returns the default selection for a newly created agent.
-// All extensions currently present under default_tools are installed by
-// default; existing agents retain their persisted selections. The steward
-// toolset is excluded: it is only meaningful on the resident steward agent,
-// which internal/steward force-materializes via MaterializeBuiltinTool and
+// All extensions currently present under default_tools except Skills List are
+// installed by default; existing agents retain their persisted selections.
+// Skills List is enabled automatically after a skill is installed for an agent.
+// The steward toolset is excluded: it is only meaningful on the resident
+// steward agent, which internal/steward force-materializes via MaterializeBuiltinTool and
 // injects the RPC endpoint for. Enabling it by default on ordinary agents
 // would mislead the model into calling codingto_steward_* tools that fail
 // with "RPC 未配置" and hijack unrelated tasks.
 func DefaultBuiltinTools() map[string]bool {
 	catalog, err := BuiltinToolCatalog()
 	if err != nil {
-		return map[string]bool{}
+		return map[string]bool{"document": true, "memory": true}
 	}
-	enabled := make(map[string]bool, len(catalog))
+	enabled := map[string]bool{"document": true, "memory": true}
 	for _, tool := range catalog {
-		if tool.Key == stewardToolKey {
+		if tool.Key == stewardToolKey || tool.Key == "skills-list" {
 			continue
 		}
 		enabled[tool.Key] = true

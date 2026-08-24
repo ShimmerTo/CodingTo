@@ -9,6 +9,7 @@ import { Call } from '@wailsio/runtime'
 import { extensionIcon } from './extensionIcons'
 import {
   abortPrompt, chooseSessionDir, chooseWorkspace, closeWindow, createSession, deleteAgent,
+  chatgptAccount,
   getBootstrap, getSessionChanges, getSessionHistory, getSessionRuntimeState, getStewardProfile, listSessions, minimise, onEvent,
   getExtensions, getAgentExtensions, installPi, manageExtension, restartAgent, saveConfig,
   saveFigmaConfig, sendAgentCommand, startPrompt, testModel, toggleMaximise,
@@ -31,6 +32,7 @@ import {
   testSSHConnection, chooseSSHKeyFile
 } from './backend'
 import { buildT } from './i18n'
+import { reconcileSshConfigResult } from './utils/sshConfig'
 import ChatView from './ChatView.vue'
 import logo from './assets/logo.png'
 import AppDialogs from './components/AppDialogs.vue'
@@ -396,6 +398,10 @@ const contextWindow = computed(() => selectedModel.value?.contextWindow || 0)
 // role:'error' 消息形式插入 messagesList，随对话流按时间顺序保留，
 // 不再用单条字符串覆盖，最终失败时用户可回看每次重试的完整错误。
 const error = ref('')
+// Pi 会把同一次模型失败重复附在 message_end、turn_end、agent_end 上。
+// 按会话、按底层运行回合记录已展示的终止错误，避免同一错误连续出现三次；
+// agent_start/auto_retry_start 会重置集合，因此后续回合或下一次重试仍会展示。
+const terminalErrorsByTask = new Map()
 function pushErrorMessage(text) {
   const value = String(text || '').trim()
   if (!value) return
@@ -405,6 +411,23 @@ function pushErrorMessage(text) {
     content: value,
     createdAt: Date.now()
   })
+}
+function resetTerminalErrors(taskId) {
+  const key = String(taskId ?? '')
+  if (key) terminalErrorsByTask.delete(key)
+}
+function pushTerminalErrorMessage(taskId, text) {
+  const value = String(text || '').trim()
+  const key = String(taskId ?? '')
+  if (!value || !key) return
+  let errors = terminalErrorsByTask.get(key)
+  if (!errors) {
+    errors = new Set()
+    terminalErrorsByTask.set(key, errors)
+  }
+  if (errors.has(value)) return
+  errors.add(value)
+  pushErrorMessage(value)
 }
 
 function pushChangeMessage(summary, recordedAt = Date.now()) {
@@ -445,6 +468,7 @@ function pushToast(type, text, timeout = 2800) {
   }, timeout)
 }
 // 启动时自动清理过期会话数据的提示横幅：后端异步清理完成后展示，叉掉即关闭。
+// 仅在实际清理掉会话或失败时展示；没有可清理的会话时静默，不打扰用户。
 // 既监听后端广播事件，也在启动后主动拉取一次，避免清理先于前端监听完成时丢失提示。
 const sessionCleanupNotice = ref(null)
 function applySessionCleanupResult(res) {
@@ -453,8 +477,6 @@ function applySessionCleanupResult(res) {
     sessionCleanupNotice.value = { type: 'error', text: t.value.sessionCleanupFailed.replace('{error}', res.error) }
   } else if (res.cleaned > 0) {
     sessionCleanupNotice.value = { type: 'success', text: t.value.sessionCleanupDone.replace('{cleaned}', res.cleaned).replace('{days}', res.days) }
-  } else {
-    sessionCleanupNotice.value = { type: 'success', text: t.value.sessionCleanupNone.replace('{days}', res.days) }
   }
 }
 async function fetchSessionCleanupNotice() {
@@ -640,11 +662,55 @@ const activeAgentId = computed(() => currentAgentId.value)
 const agentList = computed(() => newAgentDraft.value ? [...config.agents, newAgentDraft.value] : config.agents)
 const selectedProvider = computed(() => config.providers.find(p => p.name === config.defaultProvider) || config.providers[0])
 const selectedModelsProvider = computed(() => config.providers.find(p => p.name === selectedModelsProviderName.value) || config.providers[0] || null)
+// ChatGPT 订阅凭据为全局共享（Pi 默认目录，同步到所有智能体），因此登录态
+// 统一用一个全局状态判断，而非按智能体分别缓存。
+const chatgptAuth = reactive({ loaded: false, loggedIn: false })
+let chatgptAuthRequestVersion = 0
+const chatgptModelAvailabilityReady = ref(false)
+// selectedAgent is the Agent that the next prompt will actually use. During
+// history loading it is synchronized from task.agentId before reconciliation.
+const conversationAgentId = computed(() => selectedAgent.value?.id || currentTask()?.agentId || '')
+
+function isOpenAICodexProvider(provider) {
+  return provider?.name === 'openai-codex'
+    || provider?.vendor === 'openai-codex'
+    || (provider?.models || []).some(model => model.api === 'openai-codex-responses')
+}
+
+function setChatgptAgentAuth(account) {
+  chatgptAuth.loaded = true
+  chatgptAuth.loggedIn = account?.loggedIn === true
+}
+
+async function refreshChatgptAgentAuth() {
+  const version = ++chatgptAuthRequestVersion
+  try {
+    const account = await chatgptAccount()
+    if (version === chatgptAuthRequestVersion) setChatgptAgentAuth(account)
+  } catch {
+    if (version === chatgptAuthRequestVersion) {
+      chatgptAuth.loaded = true
+      chatgptAuth.loggedIn = false
+    }
+  }
+}
+
 const availableModels = computed(() => selectedProvider.value?.models || [])
 const selectedModel = computed(() => availableModels.value.find(model => model.id === config.defaultModel) || availableModels.value[0])
-const modelOptions = computed(() => config.providers.filter(p => p.enabled !== false).flatMap(p => (p.models || []).map(m => ({
-  value: `${p.name}/${m.id}`, provider: p.name, model: m.id, label: `${p.label || p.name} · ${m.name || m.id}`
-}))))
+const modelOptions = computed(() => {
+  return config.providers.filter(p => p.enabled !== false).flatMap(p => {
+    const codexUnavailable = isOpenAICodexProvider(p) && chatgptAuth.loggedIn !== true
+    return (p.models || []).map(m => ({
+      value: `${p.name}/${m.id}`,
+      provider: p.name,
+      model: m.id,
+      label: `${p.label || p.name} · ${m.name || m.id}`,
+      disabled: codexUnavailable,
+      disabledLabel: codexUnavailable ? t.value.chatgpt_model_not_authorized_short : '',
+      disabledReason: codexUnavailable ? t.value.chatgpt_model_not_authorized : ''
+    }))
+  })
+})
 const supportsImages = computed(() => selectedModel.value?.input?.includes('image'))
 const supportsTools = computed(() => selectedModel.value?.capabilities?.toolCall !== false)
 const thinkingLevels = computed(() => {
@@ -667,6 +733,7 @@ const selectedModelValue = computed({
     return `${providerName}/${modelName}`
   },
   set: value => {
+    if (modelOptions.value.find(option => option.value === value)?.disabled) return
     const index = value.indexOf('/')
     if (!selectedAgent.value) return
     selectedAgent.value.defaultProvider = value.slice(0, index)
@@ -677,6 +744,7 @@ const selectedModelValue = computed({
     persist()
   }
 })
+const selectedModelUnavailable = computed(() => modelOptions.value.find(option => option.value === selectedModelValue.value)?.disabled === true)
 
 function applyTheme() {
   const pref = config.preferences.theme
@@ -711,6 +779,46 @@ watch(selectedModel, model => {
   if (!model?.input?.includes('image')) promptImages.value = []
 })
 
+let reconcilingUnavailableModel = false
+async function reconcileUnavailableConversationModel() {
+  if (reconcilingUnavailableModel) return
+  if (!chatgptModelAvailabilityReady.value || loadingHistory.value) return
+  const agentId = conversationAgentId.value
+  if (!agentId || !chatgptAuth.loaded) return
+  const selected = modelOptions.value.find(option => option.value === selectedModelValue.value)
+  if (!selected?.disabled) return
+  const fallback = modelOptions.value.find(option => !option.disabled)
+  if (!fallback) return
+
+  reconcilingUnavailableModel = true
+  try {
+    const agent = config.agents.find(item => item.id === agentId)
+    if (agent) {
+      agent.defaultProvider = fallback.provider
+      agent.defaultModel = fallback.model
+    }
+    config.defaultProvider = fallback.provider
+    config.defaultModel = fallback.model
+    for (const prompt of pendingPromptList()) {
+      if (prompt.agentId === agentId && isOpenAICodexProvider(config.providers.find(provider => provider.name === prompt.provider))) {
+        prompt.provider = fallback.provider
+        prompt.model = fallback.model
+      }
+    }
+    const sessionSynced = await syncSessionModel(fallback.provider, fallback.model)
+    await persist({ silent: true })
+    if (sessionSynced) pushToast('info', t.value.chatgpt_model_auto_switched.replace('{model}', fallback.label))
+  } finally {
+    reconcilingUnavailableModel = false
+  }
+}
+
+watch(
+  () => `${chatgptModelAvailabilityReady.value}\u0000${loadingHistory.value}\u0000${conversationAgentId.value}\u0000${chatgptAuth.loaded}\u0000${chatgptAuth.loggedIn}\u0000${selectedModelValue.value}\u0000${modelOptions.value.map(option => `${option.value}:${option.disabled}`).join('|')}`,
+  () => { void reconcileUnavailableConversationModel() },
+  { flush: 'post' }
+)
+
 watch(showFigmaConfig, open => {
   if (!open) return
   const figmaConfig = config.extensions?.figma || {}
@@ -720,6 +828,7 @@ watch(showFigmaConfig, open => {
 
 
 async function load() {
+  chatgptModelAvailabilityReady.value = false
   bootstrap.value = await getBootstrap()
   const rawConfig = JSON.parse(JSON.stringify(bootstrap.value?.config ?? {}))
   Object.assign(config, rawConfig)
@@ -763,6 +872,10 @@ async function load() {
   reconcileStaleSessionProviders(initialTasks)
   reconcileStaleAgentProviders()
   restorePendingAttentionState(initialTasks)
+  chatgptModelAvailabilityReady.value = true
+  if (config.providers.some(isOpenAICodexProvider)) {
+    await refreshChatgptAgentAuth()
+  }
   // 仅首次加载时做一次全量扩展扫描；之后返回列表/编辑扩展都只静默刷新单个 agent。
   await refreshExtensions()
   await refreshSkills()
@@ -867,7 +980,15 @@ function builtinCatalog() {
 }
 
 function defaultBuiltinSelection() {
-  return Object.fromEntries(builtinCatalog().map(tool => [tool.key, true]))
+  const selection = { document: true, memory: true }
+  for (const tool of builtinCatalog()) {
+    if (tool.key !== 'skills-list') selection[tool.key] = true
+  }
+  return selection
+}
+
+function isGlobalRTKInstalled() {
+  return Boolean(extensionSnapshot.value?.tools?.find(tool => tool.key === 'rtk')?.installed)
 }
 
 function defaultAgent() {
@@ -878,7 +999,7 @@ function defaultAgent() {
     description: '',
     dataDir: '',
     builtin: defaultBuiltinSelection(),
-    recommended: { dcg: true },
+    recommended: { dcg: true, rtk: isGlobalRTKInstalled() },
     subagents: [],
     piTools: { read: true, bash: true, edit: true, write: true },
     defaultProvider: config.defaultProvider,
@@ -937,9 +1058,10 @@ const sshBusy = ref(false)
 // 卡片内联测试状态：{ [sshId]: { busy, ok, message } }。
 const sshTestStates = reactive({})
 const pendingExtensionDelete = ref(null)
+let sshEditRevision = 0
 
 function defaultSsh() {
-  return { id: `ssh-${crypto.randomUUID().slice(0, 8)}`, name: `SSH ${config.sshConfigs.length + 1}`, address: '', port: 22, username: '', authMode: 'password', password: '', privateKey: '', privateKeyPassphrase: '', remark: '' }
+  return { id: `ssh-${crypto.randomUUID().slice(0, 8)}`, name: `SSH ${config.sshConfigs.length + 1}`, address: '', port: 22, username: '', authMode: 'password', password: '', privateKey: '', privateKeyPassphrase: '', hostKeyFingerprint: '', remark: '', policy: { preset: 'safe', overrides: [] }, customCapabilities: [] }
 }
 function normalizeSsh(ssh) {
   ssh.id ||= `ssh-${crypto.randomUUID().slice(0, 8)}`
@@ -951,24 +1073,34 @@ function normalizeSsh(ssh) {
   ssh.password ||= ''
   ssh.privateKey ||= ''
   ssh.privateKeyPassphrase ||= ''
+  ssh.hostKeyFingerprint ||= ''
   ssh.remark ||= ''
+  ssh.policy ||= { preset: 'safe', overrides: [] }
+  ssh.policy.preset ||= 'safe'
+  ssh.policy.overrides ||= []
+  ssh.customCapabilities ||= []
   return ssh
 }
 function openSshEditor(ssh) {
   sshDraft.value = ssh ? normalizeSsh(ssh) : defaultSsh()
+  sshEditRevision = 0
   editingNewSsh.value = !ssh
   newSshId.value = ssh ? '' : sshDraft.value.id
   sshEditorOpen.value = true
 }
 function closeSshEditor() {
   if (editingNewSsh.value) {
-    sshDraft.value = null
     newSshId.value = ''
     editingNewSsh.value = false
   }
+  sshEditRevision++
+  sshDraft.value = null
   sshEditorOpen.value = false
 }
-function persistSshChange() { if (!newSshId.value) persist() }
+function persistSshChange() {
+  sshEditRevision++
+  if (!newSshId.value) void persist()
+}
 async function saveNewSsh() {
   const ssh = sshDraft.value
   if (!ssh || sshBusy.value) return
@@ -1065,6 +1197,7 @@ async function pickSshKeyFile() {
     const result = await chooseSSHKeyFile()
     if (!result || !result.content) return
     sshDraft.value.privateKey = result.content
+    persistSshChange()
     pushToast('success', t.value.sshKeyFileLoaded)
   } catch (err) {
     pushToast('error', localizeError(String(err)))
@@ -2805,6 +2938,7 @@ function handleAgentEvent(event) {
         } catch {}
       }
     } else if (type === 'agent_settled') {
+      resetTerminalErrors(sourceTaskId)
       markTaskForSidebar(sourceTaskId)
       clearTaskPendingAttention(sourceTaskId)
       setTaskRunning(sourceTaskId, false)
@@ -2843,6 +2977,7 @@ function handleAgentEvent(event) {
       }
     }
   } else if (type === 'agent_start') {
+    resetTerminalErrors(sourceTaskId || activeTaskId.value)
     setTaskRunning(sourceTaskId || activeTaskId.value, true)
     executionRunning.value = true
     // 新一轮任务开始：上一轮的执行计划条已过期，先清空，避免遮挡新一轮的计划面板
@@ -2867,7 +3002,7 @@ function handleAgentEvent(event) {
     } else if (update.type === 'error') {
       const msg = localizeError(update.error || update.content || update.message || t.modelError)
       error.value = msg
-      pushErrorMessage(msg)
+      pushTerminalErrorMessage(sourceTaskId || activeTaskId.value, msg)
       setTaskRunning(sourceTaskId || activeTaskId.value, false)
     }
   } else if (type === 'message_end') {
@@ -2876,17 +3011,37 @@ function handleAgentEvent(event) {
     if (endError) {
       const msg = localizeError(endError)
       error.value = msg
-      pushErrorMessage(msg)
+      pushTerminalErrorMessage(sourceTaskId || activeTaskId.value, msg)
     }
   } else if (type === 'turn_end') {
     const turnError = agentEventErrorMessage(event)
     if (turnError) {
       const msg = localizeError(turnError)
       error.value = msg
-      pushErrorMessage(msg)
+      pushTerminalErrorMessage(sourceTaskId || activeTaskId.value, msg)
     }
   } else if (type === 'tool_execution_start') {
     upsertToolMessage(event)
+  } else if (type === 'tool_execution_timeout') {
+    // 工具执行超时：后端 fireToolWatchdog 先发 abort_bash 并记录本事件，把工具
+    // 调用标记为完成，避免在 abort/强杀收尾完成前工具一直显示"运行中"。
+    const toolId = toolEventId(event)
+    const tool = [...messagesList.value].reverse().find(item => item.role === 'tool' && (item.detail?.toolCallId || item.detail?.id) === toolId)
+    if (tool) {
+      const startedAt = tool.detail?.startedAt || Date.now()
+      tool.detail = {
+        ...tool.detail,
+        ...event,
+        status: 'done',
+        cancelled: true,
+        timedOut: true,
+        startedAt,
+        durationMs: Date.now() - startedAt
+      }
+    }
+    const errMsg = localizeError(event.message || event.errorMessage || 'Tool execution timed out.')
+    error.value = errMsg
+    pushErrorMessage(errMsg)
   } else if (type === 'tool_execution_update' || type === 'tool_execution_end') {
     const toolId = toolEventId(event)
     const tool = [...messagesList.value].reverse().find(item => item.role === 'tool' && (item.detail?.toolCallId || item.detail?.id) === toolId)
@@ -2905,6 +3060,7 @@ function handleAgentEvent(event) {
       maybeFocusDocumentArtifacts(tool, event)
     }
   } else if (type === 'auto_retry_start') {
+    resetTerminalErrors(sourceTaskId || activeTaskId.value)
     setTaskRunning(sourceTaskId || activeTaskId.value, true)
     executionRunning.value = true
     const seconds = Math.max(0, Math.ceil(Number(event.delayMs || 0) / 1000))
@@ -2952,7 +3108,7 @@ function handleAgentEvent(event) {
     if (endError) {
       const msg = localizeError(endError)
       error.value = msg
-      pushErrorMessage(msg)
+      pushTerminalErrorMessage(sourceTaskId || activeTaskId.value, msg)
     }
     pushChangeMessage(event.changeSummary, event._recordedAt)
     clearPersistedExtDialog(currentTask()?.id)
@@ -2961,6 +3117,7 @@ function handleAgentEvent(event) {
     refreshSessions().catch(() => {})
     scheduleSessionChangesRefresh(60)
   } else if (type === 'agent_settled') {
+    resetTerminalErrors(sourceTaskId || activeTaskId.value)
     markTaskForSidebar(sourceTaskId || activeTaskId.value)
     clearTaskPendingAttention(sourceTaskId || activeTaskId.value)
     // 主 agent 回合结束但仍有后台子 agent 在运行：会话整体尚未结束，保持
@@ -3034,7 +3191,7 @@ function handleAgentEvent(event) {
       ? t.value.modelFirstResponseTimeout
       : localizeError(typeof event.error === 'string' ? event.error : event.error?.message || 'Agent error')
     error.value = msg
-    pushErrorMessage(msg)
+    pushTerminalErrorMessage(sourceTaskId || activeTaskId.value, msg)
     setTaskRunning(sourceTaskId || activeTaskId.value, false)
   }
   syncCurrentTask()
@@ -3280,7 +3437,7 @@ async function sendNextPendingPrompt(taskId = activeTaskId.value) {
 
 async function sendPrompt() {
   const message = draft.value.trim()
-  if (attachmentReadsPending.value > 0 || (!message && !promptImages.value.length && !attachments.value.length) || !selectedModelValue.value) return
+  if (attachmentReadsPending.value > 0 || selectedModelUnavailable.value || (!message && !promptImages.value.length && !attachments.value.length) || !selectedModelValue.value) return
   const task = currentTask()
   const prompt = {
     id: crypto.randomUUID(),
@@ -3549,7 +3706,32 @@ function chatOpenAgentConfig() {
   activePage.value = 'agents'
 }
 
+// 对话详情切换思考程度时，自动保存为当前模型默认思考程序；防抖合并
+// 快速连续切换，避免并发 SaveConfig 乱序（最后一次选择为准）。
+let thinkingDefaultSaveTimer = null
+function onThinkingLevelChange(level) {
+  thinkingLevel.value = level
+  if (thinkingDefaultSaveTimer) clearTimeout(thinkingDefaultSaveTimer)
+  thinkingDefaultSaveTimer = setTimeout(() => { void saveThinkingAsDefault() }, 300)
+}
+
+async function saveThinkingAsDefault() {
+  // 与 selectedModelValue 同源解析：有会话用会话落库模型，无会话用智能体默认模型。
+  const value = selectedModelValue.value
+  const index = value.indexOf('/')
+  if (index < 0) return
+  const providerName = value.slice(0, index)
+  const modelId = value.slice(index + 1)
+  const provider = config.providers.find(p => p.name === providerName)
+  const model = provider?.models.find(m => m.id === modelId)
+  if (!model || model.defaultThinkingLevel === thinkingLevel.value) return
+  model.defaultThinkingLevel = thinkingLevel.value
+  // silent：避免每次切换弹「配置已保存」；失败时 persist 内部已有错误 toast。
+  await persist({ silent: true })
+}
+
 function onModelChange(value) {
+  if (modelOptions.value.find(option => option.value === value)?.disabled) return
   const index = value.indexOf('/')
   if (index < 0) return
   config.defaultProvider = value.slice(0, index)
@@ -3566,13 +3748,15 @@ function onModelChange(value) {
 // 优先）与重新进入回显都用新模型，而不是停留在创建会话时的默认模型。
 async function syncSessionModel(provider, model) {
   const task = currentTask()
-  if (!task || !provider || !model) return
+  if (!task || !provider || !model) return true
   try {
     await updateSessionModel(task.id, provider, model)
     const index = tasks.value.findIndex(item => item.id === task.id)
     if (index >= 0) tasks.value[index] = { ...task, provider, model }
+    return true
   } catch (err) {
     pushToast('error', localizeError(String(err)))
+    return false
   }
 }
 
@@ -3586,9 +3770,11 @@ function onAddImages(images) {
   if (promptImages.value.length > 10) promptImages.value = promptImages.value.slice(-10)
 }
 
-async function persist() {
+async function persist(options = {}) {
   saving.value = true
   saved.value = false
+  const activeSshDraft = sshEditorOpen.value ? sshDraft.value : null
+  const sshRevisionAtSave = sshEditRevision
   try {
     // 若已没有任何服务商（或没有任何模型），清空默认模型指向，避免后端校验拦截。
     const hasAnyProvider = (config.providers || []).length > 0
@@ -3602,10 +3788,12 @@ async function persist() {
     if (!Array.isArray(result.environments)) {
       result.environments = config.environments
     }
+    const currentSshDraft = sshEditorOpen.value ? sshDraft.value : null
+    result.sshConfigs = reconcileSshConfigResult(result.sshConfigs, currentSshDraft, activeSshDraft, sshRevisionAtSave, sshEditRevision, normalizeSsh)
     Object.assign(config, result)
     saved.value = true
     setTimeout(() => { saved.value = false }, 1800)
-    pushToast('success', t.value.toastConfigSaved)
+    if (!options.silent) pushToast('success', t.value.toastConfigSaved)
     return true
   } catch (err) {
     const message = localizeError(String(err))
@@ -3630,6 +3818,7 @@ function localizeError(raw) {
     [/maximum concurrent task limit reached/i, '并发任务已达到上限（4）'],
     [/empty (ID|key)/i, '存在空的名称或标识'],
     [/API key environment variable (\w+) is not set for provider (.+)/i, '所选模型缺少 API Key 环境变量，请先在模型设置中配置'],
+    [/exceeded the \d+ second execution limit/i, '工具执行超过时长限制，已自动中止'],
   ]
   for (const [re, text] of map) {
     if (re.test(raw)) return text
@@ -4110,14 +4299,14 @@ const testingModel = ref('') // 兼容旧逻辑：非空表示有模型正在测
 const testingModels = reactive({}) // 按模型独立记录，避免一个卡住全部禁用
 const testResult = reactive({})
 function testModelKey(provider, model) { return `${provider.name}/${model.id}` }
-async function runModelTest(provider, model) {
+async function runModelTest(provider, model, agentId = config.activeAgentId) {
   const key = testModelKey(provider, model)
   if (testingModels[key]) return
   testingModels[key] = true
   testingModel.value = key
   delete testResult[key]
   try {
-    const result = await testModel({ provider: provider.name, model: model.id })
+    const result = await testModel({ provider: provider.name, model: model.id, agentId })
     testResult[key] = { ok: !!result?.ok, error: result?.error || '', latency: result?.latencyMs || 0 }
     if (result?.ok) pushToast('success', t.value.testPassed)
     else pushToast('error', t.value.testFailed)
@@ -4144,6 +4333,8 @@ provide(appContextKey, {
   piInstallError,
   agentList,
   modelOptions,
+  refreshChatgptAgentAuth,
+  setChatgptAgentAuth,
   selectedAgent,
   activeAgentId,
   newAgentId,
@@ -4550,6 +4741,7 @@ onBeforeUnmount(() => {
             :mode="mode"
             :model-options="modelOptions"
             :selected-model-value="selectedModelValue"
+            :selected-model-unavailable="selectedModelUnavailable"
             :supports-images="supportsImages"
             :prompt-images="promptImages"
             :attachments="attachments"
@@ -4592,7 +4784,7 @@ onBeforeUnmount(() => {
             @remove-image="onRemoveImage"
             @add-attachments="onAddAttachments"
             @remove-attachment="onRemoveAttachment"
-            @update:thinking="thinkingLevel = $event"
+            @update:thinking="onThinkingLevelChange"
             @update:skill="selectedSkill = $event"
             @update-thinking-open="updateThinkingOpen"
             @compact="compactContext"

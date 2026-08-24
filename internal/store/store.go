@@ -136,15 +136,17 @@ type Setting struct {
 	// sessions whose last update is older than this many days are removed.
 	// Clamped to 1..100 by the AppConfig layer.
 	SessionCleanupDays int
+	// RecordAPIDetails enables opt-in full provider request/result files.
+	RecordAPIDetails bool
 }
 
 func (s *Store) GetSetting() (Setting, error) {
-	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode, font_size, concise_chat, subagent_concurrency, system_notification_enabled, tool_execution_timeout, project_history_limit, db_config, dcg_policy, session_cleanup_enabled, session_cleanup_days", map[string]any{"id": 1}).One()
+	row, err := s.db.QuickQuery("tbl_setting", "theme, language, accent_color, default_provider, default_model, last_environment, session_dir, figma, global_mcp, global_plugins, user_name, user_avatar, chat_layout, show_identity, diff_mode, font_size, concise_chat, subagent_concurrency, system_notification_enabled, tool_execution_timeout, project_history_limit, db_config, dcg_policy, session_cleanup_enabled, session_cleanup_days, record_api_details", map[string]any{"id": 1}).One()
 	if err != nil {
 		return Setting{}, err
 	}
 	if len(row) == 0 {
-		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small", SubagentConcurrency: 2, SystemNotificationEnabled: true, ToolExecutionTimeoutMinutes: 10, ProjectHistoryLimit: 100, SessionCleanupDays: 14}, nil
+		return Setting{Theme: "system", Language: "zh-CN", Figma: "{}", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small", SubagentConcurrency: 2, SystemNotificationEnabled: true, ToolExecutionTimeoutMinutes: 10, ProjectHistoryLimit: 100, SessionCleanupDays: 60}, nil
 	}
 	return Setting{
 		Theme:                       asString(row["theme"]),
@@ -172,6 +174,7 @@ func (s *Store) GetSetting() (Setting, error) {
 		DCGPolicy:                   asString(row["dcg_policy"]),
 		SessionCleanupEnabled:       asString(row["session_cleanup_enabled"]) != "0",
 		SessionCleanupDays:          int(asInt(row["session_cleanup_days"])),
+		RecordAPIDetails:            asString(row["record_api_details"]) != "0",
 	}, nil
 }
 
@@ -207,6 +210,7 @@ func (s *Store) SaveSetting(set Setting) error {
 			"dcg_policy":                  set.DCGPolicy,
 			"session_cleanup_enabled":     boolToInt(set.SessionCleanupEnabled),
 			"session_cleanup_days":        set.SessionCleanupDays,
+			"record_api_details":          boolToInt(set.RecordAPIDetails),
 		}).Exec()
 		return err
 	}
@@ -236,6 +240,7 @@ func (s *Store) SaveSetting(set Setting) error {
 		"dcg_policy":                  set.DCGPolicy,
 		"session_cleanup_enabled":     boolToInt(set.SessionCleanupEnabled),
 		"session_cleanup_days":        set.SessionCleanupDays,
+		"record_api_details":          boolToInt(set.RecordAPIDetails),
 	}).Exec()
 	return err
 }
@@ -388,18 +393,46 @@ type SSHConfig struct {
 	Password             string
 	PrivateKey           string
 	PrivateKeyPassphrase string
+	HostKeyFingerprint   string
 	Remark               string
+	PolicyPreset         string
+	PolicyOverrides      []SSHPolicyOverride
+	CustomCapabilities   []SSHCapability
+}
+
+// SSHPolicyOverride is one normalized capability policy row for an SSH profile.
+type SSHPolicyOverride struct {
+	ID         string
+	Capability string
+	Effect     string
+	Reason     string
+}
+
+// SSHCapability is one normalized custom capability row. Args and Params are
+// bounded JSON collections inside the row; identity and policy remain scalar.
+type SSHCapability struct {
+	Name           string
+	Group          string
+	Description    string
+	Executable     string
+	Args           string
+	Params         string
+	Permission     string
+	TimeoutSeconds int
 }
 
 func (s *Store) ListSSHConfigs() ([]SSHConfig, error) {
-	rows, err := s.db.QueryBySql("SELECT ssh_id, name, address, port, username, auth_mode, password, private_key, private_key_passphrase, remark FROM tbl_ssh_config ORDER BY id ASC").All()
+	rows, err := s.db.QueryBySql("SELECT ssh_id, name, address, port, username, auth_mode, password, private_key, private_key_passphrase, host_key_fingerprint, remark, policy_preset FROM tbl_ssh_config ORDER BY id ASC").All()
 	if err != nil {
 		return nil, err
 	}
 	items := make([]SSHConfig, 0, len(rows))
+	positions := make(map[string]int, len(rows))
 	for _, r := range rows {
+		sshID := asString(r["ssh_id"])
+		positions[sshID] = len(items)
 		items = append(items, SSHConfig{
-			ID:                   asString(r["ssh_id"]),
+			ID:                   sshID,
 			Name:                 asString(r["name"]),
 			Address:              asString(r["address"]),
 			Port:                 int(asInt(r["port"])),
@@ -408,7 +441,41 @@ func (s *Store) ListSSHConfigs() ([]SSHConfig, error) {
 			Password:             asString(r["password"]),
 			PrivateKey:           asString(r["private_key"]),
 			PrivateKeyPassphrase: asString(r["private_key_passphrase"]),
+			HostKeyFingerprint:   asString(r["host_key_fingerprint"]),
 			Remark:               asString(r["remark"]),
+			PolicyPreset:         asString(r["policy_preset"]),
+			PolicyOverrides:      []SSHPolicyOverride{},
+			CustomCapabilities:   []SSHCapability{},
+		})
+	}
+	overrides, err := s.db.QueryBySql("SELECT ssh_id, override_id, capability, effect, reason FROM tbl_ssh_policy_override ORDER BY ssh_id ASC, position ASC, id ASC").All()
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range overrides {
+		index, ok := positions[asString(row["ssh_id"])]
+		if !ok {
+			continue
+		}
+		items[index].PolicyOverrides = append(items[index].PolicyOverrides, SSHPolicyOverride{
+			ID: asString(row["override_id"]), Capability: asString(row["capability"]),
+			Effect: asString(row["effect"]), Reason: asString(row["reason"]),
+		})
+	}
+	capabilities, err := s.db.QueryBySql("SELECT ssh_id, capability_name, group_name, description, executable, args, params, permission, timeout_seconds FROM tbl_ssh_capability ORDER BY ssh_id ASC, position ASC, id ASC").All()
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range capabilities {
+		index, ok := positions[asString(row["ssh_id"])]
+		if !ok {
+			continue
+		}
+		items[index].CustomCapabilities = append(items[index].CustomCapabilities, SSHCapability{
+			Name: asString(row["capability_name"]), Group: asString(row["group_name"]),
+			Description: asString(row["description"]), Executable: asString(row["executable"]),
+			Args: asString(row["args"]), Params: asString(row["params"]),
+			Permission: asString(row["permission"]), TimeoutSeconds: int(asInt(row["timeout_seconds"])),
 		})
 	}
 	return items, nil
@@ -418,59 +485,97 @@ func (s *Store) ListSSHConfigs() ([]SSHConfig, error) {
 // in sync with the in-memory configuration. Deleted configs are removed.
 func (s *Store) SaveSSHConfigs(items []SSHConfig) error {
 	now := time.Now().Unix()
-	seen := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		seen[item.ID] = struct{}{}
-		row, err := s.db.QuickQuery("tbl_ssh_config", "id", map[string]any{"ssh_id": item.ID}).One()
-		if err != nil {
-			return err
-		}
-		if _, exists := row["id"]; exists {
-			_, err = s.db.QuickUpdate("tbl_ssh_config", map[string]any{"ssh_id": item.ID}, map[string]any{
-				"name":                   item.Name,
-				"address":                item.Address,
-				"port":                   item.Port,
-				"username":               item.Username,
-				"auth_mode":              item.AuthMode,
-				"password":               item.Password,
-				"private_key":            item.PrivateKey,
-				"private_key_passphrase": item.PrivateKeyPassphrase,
-				"remark":                 item.Remark,
-				"update_time":            now,
-			}).Exec()
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		_, err = s.db.QuickCreate("tbl_ssh_config", map[string]any{
-			"ssh_id":                 item.ID,
-			"name":                   item.Name,
-			"address":                item.Address,
-			"port":                   item.Port,
-			"username":               item.Username,
-			"auth_mode":              item.AuthMode,
-			"password":               item.Password,
-			"private_key":            item.PrivateKey,
-			"private_key_passphrase": item.PrivateKeyPassphrase,
-			"remark":                 item.Remark,
-			"create_time":            now,
-			"update_time":            now,
-		}).Exec()
-		if err != nil {
-			return err
-		}
-	}
-	rows, err := s.db.QueryBySql("SELECT ssh_id FROM tbl_ssh_config").All()
+	tx, err := s.db.GetTx()
 	if err != nil {
 		return err
 	}
-	for _, r := range rows {
-		id := asString(r["ssh_id"])
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.Query("SELECT ssh_id FROM tbl_ssh_config")
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		seen[item.ID] = struct{}{}
+		if existing[item.ID] {
+			_, err = tx.Exec(`UPDATE tbl_ssh_config SET name = ?, address = ?, port = ?, username = ?, auth_mode = ?, password = ?, private_key = ?, private_key_passphrase = ?, host_key_fingerprint = ?, remark = ?, policy_preset = ?, update_time = ? WHERE ssh_id = ?`,
+				item.Name, item.Address, item.Port, item.Username, item.AuthMode, item.Password, item.PrivateKey, item.PrivateKeyPassphrase, item.HostKeyFingerprint, item.Remark, item.PolicyPreset, now, item.ID)
+			if err != nil {
+				return err
+			}
+		} else {
+			_, err = tx.Exec(`INSERT INTO tbl_ssh_config (ssh_id, name, address, port, username, auth_mode, password, private_key, private_key_passphrase, host_key_fingerprint, remark, policy_preset, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				item.ID, item.Name, item.Address, item.Port, item.Username, item.AuthMode, item.Password, item.PrivateKey, item.PrivateKeyPassphrase, item.HostKeyFingerprint, item.Remark, item.PolicyPreset, now, now)
+			if err != nil {
+				return err
+			}
+			existing[item.ID] = true
+		}
+		if err := replaceSSHPolicyRows(tx, item, now); err != nil {
+			return err
+		}
+	}
+	for id := range existing {
 		if _, keep := seen[id]; keep {
 			continue
 		}
-		if _, err := s.db.QuickDelete("tbl_ssh_config", map[string]any{"ssh_id": id}).Exec(); err != nil {
+		if _, err := tx.Exec("DELETE FROM tbl_ssh_policy_override WHERE ssh_id = ?", id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM tbl_ssh_capability WHERE ssh_id = ?", id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM tbl_ssh_config WHERE ssh_id = ?", id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func replaceSSHPolicyRows(tx *sql.Tx, item SSHConfig, now int64) error {
+	if _, err := tx.Exec("DELETE FROM tbl_ssh_policy_override WHERE ssh_id = ?", item.ID); err != nil {
+		return err
+	}
+	for position, rule := range item.PolicyOverrides {
+		if _, err := tx.Exec(`INSERT INTO tbl_ssh_policy_override (ssh_id, override_id, capability, effect, reason, position, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.ID, rule.ID, rule.Capability, rule.Effect, rule.Reason, position, now, now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM tbl_ssh_capability WHERE ssh_id = ?", item.ID); err != nil {
+		return err
+	}
+	for position, capability := range item.CustomCapabilities {
+		if _, err := tx.Exec(`INSERT INTO tbl_ssh_capability (ssh_id, capability_name, group_name, description, executable, args, params, permission, timeout_seconds, position, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.ID, capability.Name, capability.Group, capability.Description, capability.Executable,
+			capability.Args, capability.Params, capability.Permission, capability.TimeoutSeconds, position, now, now); err != nil {
 			return err
 		}
 	}

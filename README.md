@@ -51,6 +51,10 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 
 ## 📝 更新日志
 
+# 2026-08-24
+- feat 新增chatgpt授权安全接入
+- feat 新增三维度token统计及调用明细
+
 # 2026-08-20
 - feat 新增轻量记忆扩展，支持全局用户记忆，短时项目变更记录，长久项目规则整理（AGENTS.md）
 - feat 新增database扩展，支持四种模式
@@ -101,6 +105,7 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 ### 🔌 多服务商模型支持
 
 - **协议驱动的配置**：内置 OpenAI、Anthropic、Google、DeepSeek、OpenRouter、xAI、Z.AI、Ollama、LM Studio 以及自定义兼容接口。
+- **ChatGPT Plus/Pro 安全授权**：支持安全授权接入 ChatGPT Plus/Pro，便捷使用订阅账号能力。
 - **独立 `models.json`**：严格按 Pi Agent schema 生成，支持 provider/model 级别的 API、headers、OAuth、compat、cost 与 `thinkingLevelMap`。
 - **丰富输入与推理能力**：支持图片输入、工具调用、推理模型，以及 `off` 到 `max` 五档思考级别。
 
@@ -118,6 +123,7 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 
 - **清爽的三栏布局**：任务、对话和文件改动各自独立，信息层级清晰。
 - **过程可追踪**：展示思考过程、工具调用、执行计划、子 Agent 状态和文件变更。
+- **Token 使用量统计**：支持按会话、请求、模型三个维度统计 Token 消耗，使用量一目了然。
 - **长任务不中断**：支持后台对话、待发送问题队列和多会话运行状态管理。
 - **Wails 3 基础能力**：Service、Event Manager、Dialog Manager 与多窗口 API。
 - **原生窗口体验**：Windows 无边框窗口、macOS hidden-inset 标题栏。

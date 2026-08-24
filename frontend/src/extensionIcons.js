@@ -3,8 +3,10 @@
 import {
   Award,
   Binary,
+  Bot,
   BrainCircuit,
   Blocks,
+  Database,
   FileText,
   Globe2,
   Image,
@@ -13,6 +15,7 @@ import {
   ListTree,
   Package,
   ShieldAlert,
+  SquareTerminal,
   Store,
 } from 'lucide-vue-next'
 
@@ -29,6 +32,9 @@ const fixedExtensionIcons = {
   'browser-profile': KeyRound,
   'skills-list': ListTree,
   memory: BrainCircuit,
+  db: Database,
+  ssh: SquareTerminal,
+  steward: Bot,
 }
 
 // 其它第三方/自定义扩展的回退图标，按 key 语义映射，仍保证互不相同。

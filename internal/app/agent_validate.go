@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"codingto/internal/piagent"
@@ -51,22 +50,11 @@ func validateProviderCredentials(providers []piagent.Provider, providerName stri
 			continue
 		}
 		key := strings.TrimSpace(provider.APIKey)
-		envName := ""
-		if strings.HasPrefix(key, "${") && strings.HasSuffix(key, "}") {
-			envName = strings.TrimSuffix(strings.TrimPrefix(key, "${"), "}")
-		} else if strings.HasPrefix(key, "$") {
-			envName = strings.TrimPrefix(key, "$")
-		}
-		if envName == "" {
+		if !strings.HasPrefix(key, "$") {
 			return nil
 		}
-		for index, char := range envName {
-			if !(char == '_' || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || index > 0 && char >= '0' && char <= '9') {
-				return nil
-			}
-		}
-		if os.Getenv(envName) == "" {
-			return fmt.Errorf("API key environment variable %s is not set for provider %s", envName, provider.Name)
+		if resolveAPIKey(key) == "" {
+			return fmt.Errorf("API key environment variable %s is not set for provider %s", strings.Trim(key, "${} "), provider.Name)
 		}
 		return nil
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -108,21 +109,62 @@ type RunResult struct {
 	Transcript   string    `json:"transcript"`
 }
 
+// TokenUsageStats is the cumulative token consumption of a sub-agent run, so
+// the parent conversation can attribute the run's model spend to itself.
+type TokenUsageStats struct {
+	Input      int64 `json:"input"`
+	Cached     int64 `json:"cached"`
+	CacheWrite int64 `json:"cacheWrite"`
+	Output     int64 `json:"output"`
+	Total      int64 `json:"total"`
+}
+
+// TokenUsageRequest is one completed model request inside a sub-agent run.
+// Keeping these compact counters in run.json lets the parent model statistics
+// expose the same request-level detail as a main conversation.
+type TokenUsageRequest struct {
+	RequestKey string `json:"requestKey"`
+	Timestamp  int64  `json:"timestamp"`
+	Provider   string `json:"provider,omitempty"`
+	Model      string `json:"model,omitempty"`
+	API        string `json:"api,omitempty"`
+	Input      int64  `json:"input"`
+	Cached     int64  `json:"cached"`
+	CacheWrite int64  `json:"cacheWrite"`
+	Output     int64  `json:"output"`
+	Total      int64  `json:"total"`
+	StopReason string `json:"stopReason,omitempty"`
+	Success    bool   `json:"success"`
+}
+
 type RunRecord struct {
-	Version      int       `json:"version"`
-	RunID        string    `json:"runId"`
-	AgentKey     string    `json:"agentKey"`
-	AgentName    string    `json:"agentName"`
-	ParentNodeID string    `json:"parentNodeId"`
-	ToolCallID   string    `json:"toolCallId"`
-	ChildNodeIDs []string  `json:"childNodeIds"`
-	Status       string    `json:"status"`
-	Task         string    `json:"task"`
-	Text         string    `json:"text,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	StartedAt    int64     `json:"startedAt"`
-	EndedAt      int64     `json:"endedAt,omitempty"`
-	Files        []RunFile `json:"files"`
+	Version       int                 `json:"version"`
+	RunID         string              `json:"runId"`
+	AgentKey      string              `json:"agentKey"`
+	AgentName     string              `json:"agentName"`
+	ParentNodeID  string              `json:"parentNodeId"`
+	ToolCallID    string              `json:"toolCallId"`
+	ChildNodeIDs  []string            `json:"childNodeIds"`
+	Status        string              `json:"status"`
+	Task          string              `json:"task"`
+	Text          string              `json:"text,omitempty"`
+	Error         string              `json:"error,omitempty"`
+	Provider      string              `json:"provider,omitempty"`
+	Model         string              `json:"model,omitempty"`
+	TokenStats    *TokenUsageStats    `json:"tokenStats,omitempty"`
+	TokenRequests []TokenUsageRequest `json:"tokenRequests,omitempty"`
+	StartedAt     int64               `json:"startedAt"`
+	EndedAt       int64               `json:"endedAt,omitempty"`
+	Files         []RunFile           `json:"files"`
+}
+
+// Day returns the local calendar day the run ended on (YYYY-MM-DD), used to
+// attribute the run's token spend to a day. Empty when the run never settled.
+func (r RunRecord) Day() string {
+	if r.EndedAt <= 0 {
+		return ""
+	}
+	return time.UnixMilli(r.EndedAt).Format("2006-01-02")
 }
 
 func LoadSnapshot(path string) (Snapshot, error) {

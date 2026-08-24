@@ -9,6 +9,7 @@ import (
 
 	"codingto/internal/dbsecurity"
 	"codingto/internal/dbsecuritybridge/tunnel"
+	"codingto/internal/sshsecurity"
 )
 
 const (
@@ -44,13 +45,15 @@ type Manager struct {
 	idleTimeout time.Duration
 	stopCh      chan struct{}
 	closed      bool
+	known       *sshsecurity.KnownHosts
 }
 
-func NewManager() *Manager {
+func NewManager(known *sshsecurity.KnownHosts) *Manager {
 	m := &Manager{
 		entries:     make(map[string]*entry),
 		idleTimeout: DefaultIdleTimeout,
 		stopCh:      make(chan struct{}),
+		known:       known,
 	}
 	go m.sweepLoop()
 	return m
@@ -65,7 +68,7 @@ func (m *Manager) Get(ctx context.Context, conn dbsecurity.ConnectionConfig) (*s
 	var err error
 
 	if conn.SSHTunnel != nil && conn.Kind != dbsecurity.KindSQLite {
-		tun, err = tunnel.Dial(*conn.SSHTunnel, conn.Host, conn.Port)
+		tun, err = tunnel.Dial(*conn.SSHTunnel, conn.Host, conn.Port, m.known)
 		if err != nil {
 			return nil, err
 		}

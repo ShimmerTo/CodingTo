@@ -23,6 +23,7 @@ const props = defineProps({
   pendingPrompts: { type: Array, default: () => [] },
   modelOptions: { type: Array, default: () => [] },
   selectedModelValue: { type: String, default: '' },
+  selectedModelUnavailable: { type: Boolean, default: false },
   supportsImages: { type: Boolean, default: false },
   promptImages: { type: Array, default: () => [] },
   attachments: { type: Array, default: () => [] },
@@ -236,6 +237,7 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         :pending-prompts="pendingPrompts"
         :model-options="modelOptions"
         :selected-model-value="selectedModelValue"
+        :selected-model-unavailable="selectedModelUnavailable"
         :supports-images="supportsImages"
         :prompt-images="promptImages"
         :attachments="attachments"

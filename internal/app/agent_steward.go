@@ -32,6 +32,16 @@ type stewardHooks struct {
 	onTaskSettled           func(sessionID int64, event map[string]any)
 }
 
+func (s *AgentService) notifyStewardTaskSettled(hooks *stewardHooks, sessionID int64, sessionDir string, event map[string]any) {
+	if hooks == nil || hooks.onTaskSettled == nil {
+		return
+	}
+	if hooks.isBotManaged != nil && !hooks.isBotManaged(sessionID) {
+		return
+	}
+	hooks.onTaskSettled(sessionID, s.settledEventWithReply(sessionID, sessionDir, event))
+}
+
 // SetStewardHooks installs the steward integration hooks.
 func (s *AgentService) SetStewardHooks(hooks *stewardHooks) {
 	s.mu.Lock()

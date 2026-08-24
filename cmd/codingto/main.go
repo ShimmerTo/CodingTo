@@ -13,6 +13,7 @@ import (
 	"codingto/internal/browsersession"
 	"codingto/internal/browserworkflow"
 	"codingto/internal/documentbridge/bridge"
+	sshbridge "codingto/internal/sshsecuritybridge/bridge"
 	"codingto/internal/subagentbridge"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -27,6 +28,8 @@ func main() {
 			os.Exit(bridge.Run(os.Args[2:]))
 		case "subagent-bridge":
 			os.Exit(subagentbridge.Run(os.Args[2:]))
+		case "ssh-security-bridge":
+			os.Exit(sshbridge.Run(os.Args[2:]))
 		case "credential-provider":
 			// Resolve the global browser profile directory so the credential
 			// provider can locate the shared profile credentials.
@@ -130,12 +133,18 @@ func main() {
 		})
 	}
 
-	mainWindow.OnWindowEvent(events.Windows.WindowClosing, func(event *application.WindowEvent) {
-		beginShutdown()
+	// Closing the main window keeps CodingTo and its background services alive.
+	// RegisterHook runs before Wails' built-in close listener, so cancelling here
+	// preserves the window for restoration from the system tray.
+	mainWindow.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		if shutdownStarted.Load() {
+			return
+		}
+		mainWindow.Hide()
+		event.Cancel()
 	})
-	// Non-Windows 平台的清理钩子（例如 macOS 关闭最后一个窗口后应用自动
-	// 终止时触发）。Windows 走 beginShutdown，不会走到这里；ServiceShutdown
-	// 内部有幂等保护，即使两条路径同时触达也只真正清理一次。
+	// Cleanup for platform-initiated termination. Tray quit uses beginShutdown;
+	// ServiceShutdown is idempotent if both paths are reached.
 	app.OnShutdown(func() {
 		if err := appService.ServiceShutdown(); err != nil {
 			applog.Errorf("service shutdown: %v", err)
@@ -163,8 +172,7 @@ func main() {
 		}
 	})
 	appService.SetWindow(mainWindow)
-	// 前端 frameless 窗口的关闭按钮与窗口 X 走同一条退出流程。
-	appService.SetWindowCloseHook(beginShutdown)
+	setupSystemTray(app, mainWindow, appService.GetBootstrap().Config.Preferences.Language, beginShutdown)
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)

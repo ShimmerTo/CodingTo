@@ -269,7 +269,9 @@ func (s *Server) run(parent context.Context, params RunParams) (RunResult, error
 		Version: 1, RunID: params.RunID, AgentKey: agent.Key, AgentName: agent.Name,
 		ParentNodeID: params.ParentNodeID, ToolCallID: params.ToolCallID,
 		ChildNodeIDs: []string{nodeID}, Status: "running", Task: params.Task,
-		StartedAt: startedAt, Files: []RunFile{},
+		Provider: agent.Provider, Model: agent.Model, TokenStats: &TokenUsageStats{},
+		TokenRequests: []TokenUsageRequest{},
+		StartedAt:     startedAt, Files: []RunFile{},
 	}
 	if err := writeRunRecord(runDir, record); err != nil {
 		return RunResult{}, err
@@ -394,7 +396,7 @@ slotAcquired:
 		return result, stopErr
 	}
 	if err := adapter.Start(runCtx, piagent.StartConfig{
-		WorkDir: s.snapshot.WorkDir, SessionDir: runDir,
+		WorkDir: s.snapshot.WorkDir, AgentDir: agent.DataDir, SessionDir: runDir,
 		Provider: agent.Provider, Model: agent.Model,
 		SessionID: "codingto-subagent-" + params.RunID,
 		ExtraArgs: extra, Env: env,
@@ -509,6 +511,13 @@ slotAcquired:
 				payload["agentKey"] = agent.Key
 				collectText(&text, payload)
 				eventType, _ := payload["type"].(string)
+				// Accumulate per-request token spend so the parent conversation can
+				// attribute the run's model cost. usage is on the assistant message.
+				if eventType == "message_end" {
+					if request, ok := collectTokenUsage(record.TokenStats, payload, recordedAt); ok {
+						record.TokenRequests = append(record.TokenRequests, request)
+					}
+				}
 				// Any event - including model thinking/streaming chunks - is
 				// progress and resets the wedge silence window.
 				lastEventAt = time.Now()
@@ -1127,6 +1136,54 @@ func appendRawEvent(runDir string, raw []byte) error {
 	defer file.Close()
 	_, err = file.Write(append(append([]byte(nil), raw...), '\n'))
 	return err
+}
+
+// collectTokenUsage sums one assistant message's usage payload into the run's
+// cumulative token statistics. The usage fields mirror Pi's per-message shape.
+func collectTokenUsage(stats *TokenUsageStats, payload map[string]any, recordedAt int64) (TokenUsageRequest, bool) {
+	if stats == nil {
+		return TokenUsageRequest{}, false
+	}
+	message, _ := payload["message"].(map[string]any)
+	if role, _ := message["role"].(string); role != "assistant" {
+		return TokenUsageRequest{}, false
+	}
+	usage, _ := message["usage"].(map[string]any)
+	if len(usage) == 0 {
+		return TokenUsageRequest{}, false
+	}
+	request := TokenUsageRequest{
+		RequestKey: stringValue(message["responseId"]),
+		Timestamp:  recordedAt,
+		Provider:   stringValue(message["provider"]),
+		Model:      stringValue(message["model"]),
+		API:        stringValue(message["api"]),
+		Input:      int64(numberOf(usage["input"])),
+		Cached:     int64(numberOf(usage["cacheRead"])),
+		CacheWrite: int64(numberOf(usage["cacheWrite"])),
+		Output:     int64(numberOf(usage["output"])),
+		Total:      int64(numberOf(usage["totalTokens"])),
+		StopReason: stringValue(message["stopReason"]),
+	}
+	request.Success = stringValue(message["errorMessage"]) == "" && request.StopReason != "error" && request.StopReason != "aborted"
+	stats.Input += request.Input
+	stats.Cached += request.Cached
+	stats.CacheWrite += request.CacheWrite
+	stats.Output += request.Output
+	stats.Total += request.Total
+	return request, true
+}
+
+func numberOf(value any) float64 {
+	switch n := value.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	return 0
 }
 
 func collectText(output *strings.Builder, event map[string]any) {

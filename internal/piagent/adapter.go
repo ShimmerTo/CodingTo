@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"codingto/internal/applog"
 )
@@ -19,6 +22,8 @@ type Event struct {
 
 type StartConfig struct {
 	WorkDir     string
+	AgentDir    string
+	AuthPath    string
 	SessionDir  string
 	SessionID   string
 	SessionPath string
@@ -56,10 +61,38 @@ func (a *Adapter) Start(ctx context.Context, cfg StartConfig) error {
 	if a.running {
 		return fmt.Errorf("pi agent is already running")
 	}
-	bin, ok := FindExecutable()
-	if !ok {
+	if _, ok := FindExecutable(); !ok {
 		return fmt.Errorf("Pi CLI is not installed; run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent")
 	}
+	if cfg.AgentDir == "" {
+		return fmt.Errorf("Pi agent data directory is empty")
+	}
+	authPath := cfg.AuthPath
+	if authPath == "" {
+		defaultDir, err := DefaultAgentDir()
+		if err != nil {
+			return fmt.Errorf("resolve shared Pi auth directory: %w", err)
+		}
+		authPath = filepath.Join(defaultDir, "auth.json")
+	}
+	nodePath, err := commandPath("node")
+	if err != nil {
+		return fmt.Errorf("Node.js is unavailable: %w", err)
+	}
+	sdkEntry, err := codingAgentSDKEntry()
+	if err != nil {
+		return err
+	}
+	launcherPath, err := materializeRPCLauncher()
+	if err != nil {
+		return fmt.Errorf("prepare CodingTo Pi RPC launcher: %w", err)
+	}
+	cleanupLauncher := true
+	defer func() {
+		if cleanupLauncher {
+			_ = os.Remove(launcherPath)
+		}
+	}()
 	args := []string{"--mode", "rpc"}
 	if cfg.Provider != "" {
 		args = append(args, "--provider", cfg.Provider)
@@ -78,14 +111,14 @@ func (a *Adapter) Start(ctx context.Context, cfg StartConfig) error {
 	}
 	args = append(args, cfg.ExtraArgs...)
 
-	a.cmd = exec.CommandContext(ctx, bin, args...)
+	launcherArgs := append([]string{launcherPath, sdkEntry, authPath, cfg.AgentDir}, args...)
+	a.cmd = exec.CommandContext(ctx, nodePath, launcherArgs...)
 	configureBackgroundProcess(a.cmd)
 	a.cmd.Dir = cfg.WorkDir
 	a.cmd.Env = a.cmd.Environ()
 	for key, value := range cfg.Env {
 		a.cmd.Env = append(a.cmd.Env, key+"="+value)
 	}
-	var err error
 	a.stdin, err = a.cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("create Pi stdin: %w", err)
@@ -107,6 +140,7 @@ func (a *Adapter) Start(ctx context.Context, cfg StartConfig) error {
 	a.done = make(chan struct{})
 	a.doneOnce = &sync.Once{}
 	a.events = make(chan Event, 256)
+	cleanupLauncher = false
 	cmd, done, doneOnce, events := a.cmd, a.done, a.doneOnce, a.events
 	go func() {
 		scanner := bufio.NewScanner(stderr)
@@ -117,6 +151,7 @@ func (a *Adapter) Start(ctx context.Context, cfg StartConfig) error {
 	go readJSONL(stdout, events, done)
 	go func() {
 		err := cmd.Wait()
+		_ = os.Remove(launcherPath)
 		a.mu.Lock()
 		if a.cmd == cmd {
 			a.running, a.exitErr = false, err
@@ -165,6 +200,31 @@ func (a *Adapter) Stop() error {
 		doneOnce.Do(func() { close(done) })
 	}
 	return nil
+}
+
+// GracefulStop closes RPC stdin so Pi can run session_shutdown handlers before
+// exiting. If cleanup exceeds the bounded timeout, it falls back to Stop.
+func (a *Adapter) GracefulStop(timeout time.Duration) error {
+	a.mu.Lock()
+	if !a.running || a.stdin == nil {
+		a.mu.Unlock()
+		return nil
+	}
+	stdin, done := a.stdin, a.done
+	a.stdin = nil
+	a.mu.Unlock()
+	if err := stdin.Close(); err != nil {
+		_ = a.Stop()
+		return err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return a.Stop()
+	}
 }
 
 func (a *Adapter) Events() <-chan Event { return a.events }

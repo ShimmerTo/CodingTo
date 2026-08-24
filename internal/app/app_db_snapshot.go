@@ -66,6 +66,7 @@ func resolveSSHTunnel(sshConfigs []SSHConfig, conn *dbsecurity.ConnectionConfig)
 			Password:             s.Password,
 			PrivateKey:           s.PrivateKey,
 			PrivateKeyPassphrase: s.PrivateKeyPassphrase,
+			HostKeyFingerprint:   s.HostKeyFingerprint,
 		}
 		return
 	}
@@ -130,6 +131,7 @@ func configureDBSessionEnv(agentEnv map[string]string, store *ConfigStore, cfg A
 	}
 	agentEnv["CODINGTO_DB_BRIDGE_BIN"] = bin
 	agentEnv["CODINGTO_DB_CONFIG_PATH"] = dbSnapshotPath(sessionDir)
+	agentEnv["CODINGTO_SSH_KNOWN_HOSTS"] = knownHostsPath(store.Dir())
 }
 
 // refreshActiveDBSnapshot 在 DB 配置或工作空间勾选变更后重写活动会话

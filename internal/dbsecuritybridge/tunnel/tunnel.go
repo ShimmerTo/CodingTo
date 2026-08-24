@@ -13,6 +13,7 @@ import (
 
 	"codingto/internal/applog"
 	"codingto/internal/dbsecurity"
+	"codingto/internal/sshsecurity"
 )
 
 // dialTimeout 是 SSH 握手与建链总超时；建立失败立即返回，不悬挂。
@@ -60,8 +61,8 @@ func dialClient(cfg dbsecurity.SSHTunnel, clientCfg *ssh.ClientConfig) (*ssh.Cli
 
 // Dial 建立到跳板机的 SSH 连接并在本地随机端口监听，返回隧道。
 // cfg 为跳板机参数（Address/Port/Username/AuthMode/凭据），dbHost/dbPort
-// 为内网数据库目标。
-func Dial(cfg dbsecurity.SSHTunnel, dbHost string, dbPort int) (*Tunnel, error) {
+// 为内网数据库目标。known 为空或指纹未配置时按 TOFU 处理首次连接。
+func Dial(cfg dbsecurity.SSHTunnel, dbHost string, dbPort int, known *sshsecurity.KnownHosts) (*Tunnel, error) {
 	if dbPort <= 0 {
 		return nil, fmt.Errorf("SSH 隧道目标数据库端口无效：%d", dbPort)
 	}
@@ -69,12 +70,14 @@ func Dial(cfg dbsecurity.SSHTunnel, dbHost string, dbPort int) (*Tunnel, error) 
 	if err != nil {
 		return nil, err
 	}
+	hostKeyCallback, err := sshsecurity.HostKeyCallback(cfg.HostKeyFingerprint, known)
+	if err != nil {
+		return nil, err
+	}
 	clientCfg := &ssh.ClientConfig{
-		User: cfg.Username,
-		Auth: []ssh.AuthMethod{authMethod},
-		// 与 App 内 SSH 配置一致，不维护主机指纹：跳板机场景下不做
-		// 主机密钥校验。
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User:            cfg.Username,
+		Auth:            []ssh.AuthMethod{authMethod},
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         dialTimeout,
 	}
 	client, err := dialClient(cfg, clientCfg)
@@ -98,15 +101,19 @@ func Dial(cfg dbsecurity.SSHTunnel, dbHost string, dbPort int) (*Tunnel, error) 
 
 // TestConnection 验证到跳板机的 SSH 连接是否可用：握手成功即关闭并返回 nil。
 // 供 App 的「测试连接」按钮调用，一次性执行，不建立常驻隧道。
-func TestConnection(cfg dbsecurity.SSHTunnel) error {
+func TestConnection(cfg dbsecurity.SSHTunnel, known *sshsecurity.KnownHosts) error {
 	authMethod, err := authMethodFor(cfg)
+	if err != nil {
+		return err
+	}
+	hostKeyCallback, err := sshsecurity.HostKeyCallback(cfg.HostKeyFingerprint, known)
 	if err != nil {
 		return err
 	}
 	clientCfg := &ssh.ClientConfig{
 		User:            cfg.Username,
 		Auth:            []ssh.AuthMethod{authMethod},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         dialTimeout,
 	}
 	client, err := dialClient(cfg, clientCfg)

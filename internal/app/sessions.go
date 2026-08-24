@@ -582,53 +582,15 @@ func readSubagentUIState(runDir string) map[string]any {
 func readSessionTokenStats(sessionDir string) (SessionTokenStats, SessionContextUsage) {
 	var stats SessionTokenStats
 	var lastContextTokens int64
-	entries, err := os.ReadDir(sessionDir)
-	if err != nil {
-		return stats, SessionContextUsage{}
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
+	for _, rec := range collectSessionUsage(sessionDir) {
+		stats.Input += rec.Input
+		stats.Cached += rec.Cached
+		stats.CacheWrite += rec.CacheWrite
+		stats.Output += rec.Output
+		stats.Total += rec.Total
+		if rec.Total > 0 {
+			lastContextTokens = rec.Total
 		}
-		if entry.Name() == sessionEventFile {
-			continue
-		}
-		f, err := os.Open(filepath.Join(sessionDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
-		for scanner.Scan() {
-			var event map[string]any
-			if json.Unmarshal(scanner.Bytes(), &event) != nil {
-				continue
-			}
-			if stringValue(event["type"]) != "message" {
-				continue
-			}
-			// In Pi's session file the message payload (including role and the
-			// per-turn usage) is nested under the top-level "message" key, not
-			// at the event root. See an actual *.jsonl line:
-			//   {"type":"message","message":{"role":"assistant","usage":{...}}}
-			msg := mapValue(event["message"])
-			if stringValue(msg["role"]) != "assistant" {
-				continue
-			}
-			usage := mapValue(msg["usage"])
-			if len(usage) == 0 {
-				continue
-			}
-			stats.Input += intValue(usage["input"])
-			stats.Cached += intValue(usage["cacheRead"])
-			stats.CacheWrite += intValue(usage["cacheWrite"])
-			stats.Output += intValue(usage["output"])
-			stats.Total += intValue(usage["totalTokens"])
-			if t := intValue(usage["totalTokens"]); t > 0 {
-				lastContextTokens = t
-			}
-		}
-		f.Close()
 	}
 	// The per-turn usage is cumulative for that turn, so the last one also
 	// reflects the most recent context size. We surface it as a token count
@@ -852,6 +814,21 @@ func readSessionMessages(sessionDir string) []map[string]any {
 	toolIndexes := map[string]int{}
 	thinkingStartMs := map[int]int64{}
 	activeCompaction := -1
+	terminalErrors := map[string]struct{}{}
+	appendTerminalError := func(message string, recordedAt int64) {
+		message = strings.TrimSpace(message)
+		if message == "" {
+			return
+		}
+		if _, exists := terminalErrors[message]; exists {
+			return
+		}
+		terminalErrors[message] = struct{}{}
+		messages = append(messages, map[string]any{
+			"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
+			"content": message, "createdAt": recordedAt,
+		})
+	}
 	scanner := bufio.NewScanner(file)
 	// A user event may contain up to 100 MB of raw image data encoded as base64.
 	// Keep the history reader aligned with the prompt limits so valid image
@@ -902,6 +879,7 @@ func readSessionMessages(sessionDir string) []map[string]any {
 			messages[activeCompaction]["completedAt"] = recordedAt
 			activeCompaction = -1
 		case "user_text":
+			terminalErrors = map[string]struct{}{}
 			content := stringValue(event["message"])
 			if displayMessage, ok := event["displayMessage"]; ok {
 				content = stringValue(displayMessage)
@@ -914,8 +892,11 @@ func readSessionMessages(sessionDir string) []map[string]any {
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
 		case "agent_start":
+			terminalErrors = map[string]struct{}{}
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
+		case "auto_retry_start":
+			terminalErrors = map[string]struct{}{}
 		case "message_update":
 			update := mapValue(event["assistantMessageEvent"])
 			switch stringValue(update["type"]) {
@@ -1023,19 +1004,13 @@ func readSessionMessages(sessionDir string) []map[string]any {
 			}
 			activeAssistant = -1
 			if msg := eventErrorMessage(event); msg != "" {
-				messages = append(messages, map[string]any{
-					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
-					"content": msg, "createdAt": recordedAt,
-				})
+				appendTerminalError(msg, recordedAt)
 			}
 		case "turn_end":
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
 			if msg := eventErrorMessage(event); msg != "" {
-				messages = append(messages, map[string]any{
-					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
-					"content": msg, "createdAt": recordedAt,
-				})
+				appendTerminalError(msg, recordedAt)
 			}
 		case "agent_end":
 			if summary := mapValue(event["changeSummary"]); len(summary) > 0 {
@@ -1048,22 +1023,14 @@ func readSessionMessages(sessionDir string) []map[string]any {
 			activeAssistant = -1
 			toolIndexes = map[string]int{}
 			if msg := eventErrorMessage(event); msg != "" {
-				messages = append(messages, map[string]any{
-					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
-					"content": msg, "createdAt": recordedAt,
-				})
+				appendTerminalError(msg, recordedAt)
 			}
 		case "error":
 			message := stringValue(event["error"])
 			if message == "" {
 				message = stringValue(mapValue(event["error"])["message"])
 			}
-			if message != "" {
-				messages = append(messages, map[string]any{
-					"id": fmt.Sprintf("history-error-%d", len(messages)), "role": "error",
-					"content": message, "createdAt": recordedAt,
-				})
-			}
+			appendTerminalError(message, recordedAt)
 		}
 	}
 	// A history read can happen while this conversation continues in the

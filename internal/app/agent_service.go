@@ -47,6 +47,7 @@ func toolExecutionTimeoutFromConfig(cfg AppConfig) time.Duration {
 type AgentService struct {
 	store                *ConfigStore
 	adapter              *piagent.Adapter
+	adapterGeneration    uint64
 	mu                   sync.Mutex
 	prepareMu            sync.Mutex
 	sharedPrepareMu      *sync.Mutex
@@ -447,6 +448,19 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 	if req.Provider == "" || req.Model == "" {
 		if p, m, ok := profile.ResolveDefaultModel(cfg.Providers); ok {
 			req.Provider, req.Model = p, m
+		}
+	}
+	if isOpenAICodexProvider(cfg.Providers, req.Provider) {
+		defaultDir, err := piagent.DefaultAgentDir()
+		if err != nil {
+			applog.Errorf("resolve shared Pi auth directory before prompt: agent=%s: %v", profile.ID, err)
+			return errors.New("无法确定 Pi 默认 Agent 目录，请稍后重试")
+		}
+		if _, ok, err := readChatGPTAuthEntry(defaultDir); err != nil {
+			applog.Errorf("read shared ChatGPT credential before prompt: agent=%s: %v", profile.ID, err)
+			return errors.New("无法读取 ChatGPT 登录状态")
+		} else if !ok {
+			return errors.New("尚未登录 ChatGPT，请先在模型页面完成授权")
 		}
 	}
 	if err := piagent.ValidateProviders(cfg.Providers, req.Provider, req.Model); err != nil {

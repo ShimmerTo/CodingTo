@@ -2,6 +2,22 @@ import {
   Calculator, Code, Database, FileText, FolderOpen, Globe, Image,
   ListTodo, PenLine, Search, TerminalSquare, Wrench
 } from 'lucide-vue-next'
+import { extensionIcon } from '../../extensionIcons.js'
+
+// CodingTo 内置扩展按稳定工具族使用固定图标。必须先于下方通用关键词
+// 匹配，避免 memory_search 被误显示成搜索图标、steward_list 被误显示成目录。
+const BUILTIN_TOOL_ICON_RULES = [
+  [/(?:^|[.:/])codingto_browser_/i, extensionIcon('browser-profile')],
+  [/(?:^|[.:/])codingto_db$/i, extensionIcon('db')],
+  [/(?:^|[.:/])codingto_document$/i, extensionIcon('document')],
+  [/(?:^|[.:/])codingto_memory(?:_|$)/i, extensionIcon('memory')],
+  [/(?:^|[.:/])codingto_plan(?:_|$)/i, extensionIcon('plan')],
+  [/(?:^|[.:/])(?:skills_list|codingto_skills(?:_|$))/i, extensionIcon('skills-list')],
+  [/(?:^|[.:/])codingto_ssh$/i, extensionIcon('ssh')],
+  [/(?:^|[.:/])codingto_subagent$/i, extensionIcon('subagent')],
+  [/(?:^|[.:/])codingto_steward(?:_|$)/i, extensionIcon('steward')],
+  [/(?:^|[.:/])agent_browser$/i, extensionIcon('browser-native')],
+]
 
 const TOOL_ICONS = {
   bash: TerminalSquare, shell: TerminalSquare, terminal: TerminalSquare, command: TerminalSquare,
@@ -468,6 +484,9 @@ export function toolUrlTitle(message) {
 
 export function toolIcon(message) {
   const name = toolName(message)
+  for (const [pattern, icon] of BUILTIN_TOOL_ICON_RULES) {
+    if (name && pattern.test(name)) return icon
+  }
   if (name && TOOL_ICONS[name]) return TOOL_ICONS[name]
   for (const [pattern, icon] of TOOL_KEYWORD_ICONS) {
     if (name && pattern.test(name)) return icon

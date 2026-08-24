@@ -10,6 +10,7 @@ import (
 	"codingto/internal/dbsecuritybridge/config"
 	"codingto/internal/dbsecuritybridge/connection"
 	"codingto/internal/dbsecuritybridge/protocol"
+	"codingto/internal/sshsecurity"
 )
 
 const bridgeVersion = "0.1.0"
@@ -46,7 +47,7 @@ func serve(arguments []string) {
 	if *configPath == "" {
 		fail("serve 需要 --config")
 	}
-	svc, err := New(*configPath)
+	svc, err := New(*configPath, os.Getenv("CODINGTO_SSH_KNOWN_HOSTS"))
 	if err != nil {
 		fail("初始化服务失败：" + err.Error())
 	}
@@ -104,7 +105,7 @@ func testConnection(arguments []string) {
 	if !ok {
 		report(false, "连接不存在："+*connID)
 	}
-	manager := connection.NewManager()
+	manager := connection.NewManager(sshsecurity.LoadKnownHosts(os.Getenv("CODINGTO_SSH_KNOWN_HOSTS")))
 	defer manager.Close()
 	if _, err := manager.Get(context.Background(), conn); err != nil {
 		report(false, err.Error())

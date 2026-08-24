@@ -79,6 +79,16 @@ export function formatTokenCount(value) {
   return String(count)
 }
 
+export function formatCacheHitRate(usage) {
+  const input = Math.max(0, Number(usage?.input) || 0)
+  const cached = Math.max(0, Number(usage?.cached ?? usage?.cacheRead) || 0)
+  const cacheWrite = Math.max(0, Number(usage?.cacheWrite) || 0)
+  const inputSideTokens = input + cached + cacheWrite
+  if (inputSideTokens <= 0) return '0%'
+  const percent = Math.min(100, (cached / inputSideTokens) * 100)
+  return `${percent.toFixed(1).replace(/\.0$/, '')}%`
+}
+
 export function formatDetail(value) {
   if (value == null || value === '') return ''
   if (typeof value === 'string') return value

@@ -4,14 +4,23 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"codingto/internal/applog"
 	"codingto/internal/dbsecurity"
 	"codingto/internal/dbsecuritybridge/tunnel"
+	"codingto/internal/sshsecurity"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+// knownHostsFileName 是 TOFU 主机密钥指纹记录文件（位于应用配置目录），
+// 主进程测试连接与两个桥接子进程共享同一路径。
+const knownHostsFileName = "ssh_known_hosts.json"
+
+// knownHostsPath 返回应用配置目录下的 TOFU 主机指纹记录文件路径。
+func knownHostsPath(base string) string { return filepath.Join(base, knownHostsFileName) }
 
 // SSHTestRequest 携带待测试的 SSH 配置；密码/私钥走前端表单值，
 // 空密码时由 App 层沿用已存密码（前端不回显 SSH 密码）。
@@ -42,6 +51,9 @@ const sshTestTimeout = 15 * time.Second
 // 仅做握手，不建立常驻隧道，结果直接返回前端卡片就地展示。
 func (a *App) TestSSHConnection(req SSHTestRequest) (SSHTestResult, error) {
 	cfg := req.Config
+	merged := []SSHConfig{cfg}
+	mergeSSHCredentials(merged, a.store.Get().SSHConfigs)
+	cfg = merged[0]
 	if strings.TrimSpace(cfg.Address) == "" {
 		return SSHTestResult{OK: false, Message: "服务器地址不能为空"}, nil
 	}
@@ -53,11 +65,6 @@ func (a *App) TestSSHConnection(req SSHTestRequest) (SSHTestResult, error) {
 	}
 	if cfg.AuthMode != "key" {
 		cfg.AuthMode = "password"
-		if cfg.Password == "" {
-			if existing, ok := a.storedSSHConfig(cfg.ID); ok {
-				cfg.Password = existing.Password
-			}
-		}
 	}
 	tunnelCfg := dbsecurity.SSHTunnel{
 		Address:              cfg.Address,
@@ -67,6 +74,7 @@ func (a *App) TestSSHConnection(req SSHTestRequest) (SSHTestResult, error) {
 		Password:             cfg.Password,
 		PrivateKey:           cfg.PrivateKey,
 		PrivateKeyPassphrase: cfg.PrivateKeyPassphrase,
+		HostKeyFingerprint:   cfg.HostKeyFingerprint,
 	}
 	applog.Infof("[TestSSHConnection] start: %s@%s:%d mode=%s", cfg.Username, cfg.Address, cfg.Port, cfg.AuthMode)
 	ctx, cancel := context.WithTimeout(context.Background(), sshTestTimeout)
@@ -74,7 +82,7 @@ func (a *App) TestSSHConnection(req SSHTestRequest) (SSHTestResult, error) {
 	type testResult struct{ err error }
 	ch := make(chan testResult, 1)
 	go func() {
-		ch <- testResult{err: tunnel.TestConnection(tunnelCfg)}
+		ch <- testResult{err: tunnel.TestConnection(tunnelCfg, sshsecurity.LoadKnownHosts(filepath.Join(a.store.Dir(), knownHostsFileName)))}
 	}()
 	select {
 	case r := <-ch:
@@ -120,16 +128,4 @@ func (a *App) ChooseSSHKeyFile() (SSHKeyFileResult, error) {
 		return SSHKeyFileResult{}, fmt.Errorf("私钥文件为空")
 	}
 	return SSHKeyFileResult{Path: path, Content: content}, nil
-}
-
-func (a *App) storedSSHConfig(id string) (SSHConfig, bool) {
-	if id == "" {
-		return SSHConfig{}, false
-	}
-	for _, item := range a.store.Get().SSHConfigs {
-		if item.ID == id {
-			return item, true
-		}
-	}
-	return SSHConfig{}, false
 }

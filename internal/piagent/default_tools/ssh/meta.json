@@ -1,0 +1,8 @@
+{
+  "name": "SSH Security",
+  "version": "1.0.0",
+  "tool_name": "codingto_ssh",
+  "description": "通过强类型能力模板安全访问工作区已授权的 SSH 资源，内置 system、Git、Docker 与 service 命令组；敏感操作需用户确认。",
+  "tool_description": "Run typed, policy-controlled capabilities on workspace-authorized SSH resources without Agent-built shell commands.",
+  "actions": ["resources", "catalog", "execute"]
+}

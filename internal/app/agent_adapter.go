@@ -121,6 +121,12 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 	agentEnv["CODINGTO_SESSION_DIR"] = sessionDir
 	agentEnv["CODINGTO_WORK_DIR"] = req.WorkDir
 	agentEnv["CODINGTO_PLAN_PROMPT_PATH"] = filepath.Join(s.store.Dir(), "prompts", "plan.md")
+	// The mandatory recorder checks this global marker before every provider
+	// request, so toggling the setting applies to already-running conversations.
+	agentEnv["CODINGTO_API_DETAIL_MARKER"] = filepath.Join(s.store.Dir(), apiDetailMarkerFile)
+	// Sub-agents inherit this value and therefore write into the parent
+	// conversation's api directory as required, not their nested run directory.
+	agentEnv["CODINGTO_API_DETAIL_DIR"] = filepath.Join(sessionDir, "api")
 	if profile.Builtin["memory"] {
 		configureMemoryEnv(agentEnv, s.store.Dir(), req.WorkDir, cfg.Memory.ProjectHistoryLimit)
 		appendSystemPrompts = append(appendSystemPrompts, memoryUserPreferencePrompt)
@@ -135,6 +141,8 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 	// DB 安全网关：仅当工作空间勾选了 DB 连接时写 0600 快照并注入
 	// bridge 环境变量；未勾选时 TS 工具因缺少变量直接报 db_disabled。
 	configureDBSessionEnv(agentEnv, s.store, cfg, req.SessionID, sessionDir)
+	// SSH 安全网关仅暴露当前工作空间显式关联的 SSH 资源。
+	configureSSHSessionEnv(agentEnv, s.store, cfg, req.SessionID, sessionDir)
 	if selectedModel, found := piagent.FindModel(cfg.Providers, req.Provider, req.Model); found {
 		agentEnv["CODINGTO_MODEL_INPUT_MODALITIES"] = strings.Join(selectedModel.Input, ",")
 	}
@@ -160,7 +168,7 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 		}
 	}
 	if err := s.adapter.Start(runCtx, piagent.StartConfig{
-		WorkDir: req.WorkDir, SessionDir: sessionDir, Provider: req.Provider, Model: req.Model,
+		WorkDir: req.WorkDir, AgentDir: profile.DataDir, SessionDir: sessionDir, Provider: req.Provider, Model: req.Model,
 		SessionID:   sessionID,
 		SessionPath: req.SessionPath, ExtraArgs: extra, Env: agentEnv,
 	}); err != nil {
@@ -168,6 +176,8 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 		s.cancel = nil
 		return err
 	}
+	s.adapterGeneration++
+	adapterGeneration := s.adapterGeneration
 	s.activeDir, s.activeMode, s.activeAgent, s.activeTools = req.WorkDir, req.Mode, profile.ID, toolsEnabled
 	s.activeDataDir = filepath.Clean(profile.DataDir)
 	s.activeSessionID = req.SessionID
@@ -181,7 +191,7 @@ func (s *AgentService) startAdapter(req PromptRequest, cfg AppConfig, profile Ag
 	s.activeProfile = agentRuntimeSignature(profile, cfg)
 	s.activeSkill = req.SkillPath
 	s.activeSkillStamp = skillFileSignature(req.SkillPath)
-	go s.forwardEvents(s.adapter, req.SessionID, sessionDir)
+	go s.forwardEvents(s.adapter, req.SessionID, sessionDir, adapterGeneration)
 	return nil
 }
 

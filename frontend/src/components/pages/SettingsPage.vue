@@ -221,7 +221,7 @@ function setSessionCleanupEnabled(value) {
   persist()
 }
 function setSessionCleanupDays(value) {
-  config.sessionCleanupDays = Math.min(100, Math.max(1, Number(value) || 14))
+  config.sessionCleanupDays = Math.min(100, Math.max(1, Number(value) || 60))
   persist()
 }
 // 计划审批 / 任务完成时是否发送系统通知（默认开启）。
@@ -468,7 +468,7 @@ function resizeImageFile(file, maxSize) {
                   min="1"
                   max="100"
                   class="tool-timeout-input"
-                  :value="config.sessionCleanupDays || 14"
+                  :value="config.sessionCleanupDays || 60"
                   @change="setSessionCleanupDays($event.target.value)"
                 />
                 <span class="cleanup-days-unit">{{ t.sessionCleanupDaysUnit }}</span>

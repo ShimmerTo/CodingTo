@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"codingto/internal/applog"
 	"codingto/internal/browserworkflow"
@@ -30,26 +31,20 @@ type App struct {
 	// so the desktop app keeps working without it).
 	steward        *steward.Service
 	stewardSecrets *steward.SecretStore
-	// windowCloseHook wires the frameless window's close button to the
-	// application-level shutdown flow owned by cmd/codingto (see WindowClose).
-	windowCloseHook func()
 	// cleanupMu guards lastCleanup shared with the frontend's one-shot fetch.
 	cleanupMu   sync.Mutex
 	lastCleanup *SessionCleanupResult
+
 	// shutdownOnce makes ServiceShutdown idempotent: it can be reached from
 	// wails' own shutdownServices (when the message loop exits) and from the
 	// background shutdown goroutine started by cmd/codingto, but the real
 	// cleanup must only run once.
 	shutdownOnce sync.Once
-}
 
-// SetWindowCloseHook registers the shutdown entry point used by WindowClose.
-// cmd/codingto injects a handler that shows the "正在关闭中" overlay and runs
-// ServiceShutdown off the UI main thread.
-func (a *App) SetWindowCloseHook(fn func()) {
-	a.windowCloseHook = fn
+	// chatgptMu guards the Agent-scoped ChatGPT/Codex OAuth flow.
+	chatgptMu   sync.Mutex
+	chatgptFlow *chatgptFlow
 }
-
 type Bootstrap struct {
 	Config          AppConfig          `json:"config"`
 	ProviderPresets []piagent.Provider `json:"providerPresets"`
@@ -193,6 +188,9 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 		started = append(started, module)
 	}
 	cfg := a.store.Get()
+	if err := syncAPIDetailMarker(a.store.Dir(), cfg.RecordAPIDetails); err != nil {
+		applog.Errorf("sync API detail recording marker at startup: %v", err)
+	}
 	// Keep each agent's materialized builtin tools in sync with the bundled
 	// meta.json on every launch. This is what populates the installed version
 	// reported by GetExtensions, so the UI can show the "current" version and an
@@ -224,9 +222,21 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 			applog.Errorf("sync Pi Figma for %s: %v", agent.Name, err)
 		}
 	}
+	// CodingTo 的 Pi RPC 启动器让所有 Agent 直接使用默认目录中的共享
+	// auth.json。清理由旧版本复制到 Agent 目录的 Codex 条目，避免遗留的
+	// refresh token 被外部进程误用；损坏文件只记录日志，绝不覆盖。
+	go a.removeLegacyChatGPTCredentialsFromAgents()
 	a.reconcileOrphanedSubagents()
 	// 会话数据自动清理：启动后异步执行，不阻塞窗口渲染；结果供前端拉取展示。
 	a.startSessionCleanup()
+	go func() {
+		a.cleanupModelUsageRetention()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			a.cleanupModelUsageRetention()
+		}
+	}()
 	applog.Infof("CodingTo %s started", appVersion)
 	return nil
 }
@@ -270,6 +280,7 @@ func (a *App) ServiceShutdown() error {
 }
 
 func (a *App) shutdown() error {
+	a.cancelChatGPTFlow()
 	agentErr := a.agent.Close()
 	a.moduleMu.Lock()
 	modules := append([]RuntimeModule(nil), a.modules...)
@@ -310,9 +321,9 @@ func (a *App) GetBootstrap() Bootstrap {
 			applog.Warnf("sync dcg workspace allow: %v", err)
 		}
 	}
-	// 凭据隔离：密码仅存 App 存储与 0600 快照，bootstrap 下发前脱敏；
-	// 前端保存时空密码由 SaveConfig 沿用已存密码。
-	cfg.Extensions.DB = cfg.Extensions.DB.Masked()
+	// 凭据隔离：密码与私钥仅存 App 存储与 0600 快照，下发前统一脱敏；
+	// 前端保存时空凭据由 SaveConfig 沿用已存值。
+	cfg = maskConfigCredentials(cfg)
 	return Bootstrap{
 		Config:          cfg,
 		ProviderPresets: piagent.ProviderPresets(),
@@ -326,6 +337,10 @@ func (a *App) GetBootstrap() Bootstrap {
 
 func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 	previous := a.store.Get()
+	mergeSSHCredentials(cfg.SSHConfigs, previous.SSHConfigs)
+	if err := validateSSHSecurityConfig(cfg.SSHConfigs); err != nil {
+		return AppConfig{}, err
+	}
 	cfg.Normalize()
 	// DB 连接密码不回显（GetBootstrap 已脱敏）：提交的空密码沿用已存密码，
 	// 避免普通配置保存把既有凭据清空。
@@ -392,10 +407,11 @@ func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 	// bridge 在下次请求时按 mtime 懒重载。
 	if a.agent != nil {
 		a.agent.refreshActiveDBSnapshot()
+		a.agent.refreshActiveSSHSnapshot()
 	}
 	// DCG 处置策略或工作空间列表变化时同步策略文件与 dcg 放行规则。
 	a.ensureDCGRuntime(cfg, previous)
-	return a.store.Get(), nil
+	return maskConfigCredentials(a.store.Get()), nil
 }
 
 // enableSubagentExtensionForNewAssignments enables the parent-side bridge when
@@ -576,18 +592,11 @@ func (a *App) WindowToggleMaximise() {
 	}
 }
 
+// WindowClose hides the main window while background services keep running.
 func (a *App) WindowClose() {
-	// 前端 frameless 窗口的关闭按钮走这里。旧实现直接 application.Quit()，
-	// 但 wails v3 在 Windows 上会"先同步执行 OnShutdown/ServiceShutdown，
-	// 再销毁窗口"：清理逻辑（steward 渠道关闭等最多可阻塞 3 秒）跑在主线程
-	// 上，导致点关闭后界面卡住 3 秒没反应。cmd/codingto 现在注入
-	// windowCloseHook，走"立即显示正在关闭蒙层 + 后台异步清理"的退出流程，
-	// 界面即时反馈、清理不阻塞 UI。未注入时（理论上不会发生）回退到 Quit。
-	if a.windowCloseHook != nil {
-		a.windowCloseHook()
-		return
-	}
-	if app := application.Get(); app != nil {
-		app.Quit()
+	// The frameless title-bar close button keeps background services running.
+	// A full shutdown is available from the system tray menu.
+	if a.window != nil {
+		a.window.Hide()
 	}
 }

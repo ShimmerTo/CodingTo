@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"codingto/internal/applog"
 	"codingto/internal/extensions"
 	"codingto/internal/piagent"
+	"codingto/internal/sshsecurity"
 	"codingto/internal/store"
 	"codingto/internal/subagentbridge"
 )
@@ -70,6 +72,9 @@ type AppConfig struct {
 	// update is older than this many days are removed at startup. Clamped to
 	// 1..100 in Normalize.
 	SessionCleanupDays int `json:"sessionCleanupDays"`
+	// RecordAPIDetails stores full provider request parameters and parsed
+	// results as private JSON files. It is intentionally disabled by default.
+	RecordAPIDetails bool `json:"recordApiDetails"`
 }
 
 // DCGSettings controls CodingTo's disposition of dcg detections.
@@ -110,16 +115,19 @@ type RemoteGitDir struct {
 // directories and DB tunnels reference. AuthMode is "password" or "key";
 // key mode carries the PEM private key (optionally passphrase-protected).
 type SSHConfig struct {
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	Address              string `json:"address"`
-	Port                 int    `json:"port"`
-	Username             string `json:"username"`
-	AuthMode             string `json:"authMode,omitempty"`
-	Password             string `json:"password,omitempty"`
-	PrivateKey           string `json:"privateKey,omitempty"`
-	PrivateKeyPassphrase string `json:"privateKeyPassphrase,omitempty"`
-	Remark               string `json:"remark"`
+	ID                   string                   `json:"id"`
+	Name                 string                   `json:"name"`
+	Address              string                   `json:"address"`
+	Port                 int                      `json:"port"`
+	Username             string                   `json:"username"`
+	AuthMode             string                   `json:"authMode,omitempty"`
+	Password             string                   `json:"password,omitempty"`
+	PrivateKey           string                   `json:"privateKey,omitempty"`
+	PrivateKeyPassphrase string                   `json:"privateKeyPassphrase,omitempty"`
+	HostKeyFingerprint   string                   `json:"hostKeyFingerprint,omitempty"`
+	Remark               string                   `json:"remark"`
+	Policy               sshsecurity.Policy       `json:"policy"`
+	CustomCapabilities   []sshsecurity.Capability `json:"customCapabilities,omitempty"`
 }
 
 // Environment (环境) is one workspace: one local directory and zero or more
@@ -206,7 +214,7 @@ func DefaultAgentProfile() AgentProfile {
 	return AgentProfile{
 		ID: "default", Name: "Default Agent", Description: "General-purpose coding agent",
 		Builtin:              piagent.DefaultBuiltinTools(),
-		Recommended:          map[string]bool{"dcg": true},
+		Recommended:          map[string]bool{"dcg": true, "rtk": extensions.RTKInstalled()},
 		SubAgents:            []string{},
 		PiTools:              defaultPiTools(),
 		BrowserProfilePolicy: DefaultBrowserProfilePolicy(),
@@ -337,7 +345,8 @@ func DefaultConfig() AppConfig {
 		ToolExecutionTimeoutMinutes: 10,
 		Memory:                      MemoryConfig{ProjectHistoryLimit: 100},
 		SessionCleanupEnabled:       false,
-		SessionCleanupDays:          14,
+		SessionCleanupDays:          60,
+		RecordAPIDetails:            false,
 	}
 }
 
@@ -399,7 +408,7 @@ func (c *AppConfig) Normalize() {
 	// Session auto-cleanup retention: clamp to 1..100 days, and require the
 	// explicit enable switch so a corrupted row can never trigger deletion.
 	if c.SessionCleanupDays <= 0 {
-		c.SessionCleanupDays = 14
+		c.SessionCleanupDays = 60
 	}
 	if c.SessionCleanupDays > 100 {
 		c.SessionCleanupDays = 100
@@ -429,6 +438,11 @@ func (c *AppConfig) Normalize() {
 		if c.SSHConfigs[i].AuthMode != "key" {
 			c.SSHConfigs[i].AuthMode = "password"
 		}
+		c.SSHConfigs[i].Policy.Normalize()
+		c.SSHConfigs[i].HostKeyFingerprint = sshsecurity.NormalizeHostKeyFingerprint(c.SSHConfigs[i].HostKeyFingerprint)
+		resource := sshsecurity.Resource{CustomCapabilities: c.SSHConfigs[i].CustomCapabilities}
+		resource.Normalize()
+		c.SSHConfigs[i].CustomCapabilities = resource.CustomCapabilities
 	}
 
 	// Keep one empty remote slot for the editor when a workspace has no SSH
@@ -564,6 +578,7 @@ func (s *ConfigStore) assemble() AppConfig {
 		cfg.Memory.ProjectHistoryLimit = setting.ProjectHistoryLimit
 		cfg.SessionCleanupEnabled = setting.SessionCleanupEnabled
 		cfg.SessionCleanupDays = setting.SessionCleanupDays
+		cfg.RecordAPIDetails = setting.RecordAPIDetails
 	}
 
 	providers, err := s.st.ListProviders()
@@ -619,6 +634,24 @@ func (s *ConfigStore) assemble() AppConfig {
 	if err == nil {
 		cfgs := make([]SSHConfig, 0, len(sshConfigs))
 		for _, item := range sshConfigs {
+			policy := sshsecurity.Policy{Preset: item.PolicyPreset, Overrides: []sshsecurity.Rule{}}
+			for _, rule := range item.PolicyOverrides {
+				policy.Overrides = append(policy.Overrides, sshsecurity.Rule{ID: rule.ID, Capability: rule.Capability, Effect: sshsecurity.Effect(rule.Effect), Reason: rule.Reason})
+			}
+			customCapabilities := make([]sshsecurity.Capability, 0, len(item.CustomCapabilities))
+			for _, stored := range item.CustomCapabilities {
+				args := []string{}
+				params := map[string]sshsecurity.ParamSpec{}
+				if err := json.Unmarshal([]byte(stored.Args), &args); err != nil {
+					applog.Warnf("parse SSH capability args for %s/%s: %v", item.ID, stored.Name, err)
+					continue
+				}
+				if err := json.Unmarshal([]byte(stored.Params), &params); err != nil {
+					applog.Warnf("parse SSH capability params for %s/%s: %v", item.ID, stored.Name, err)
+					continue
+				}
+				customCapabilities = append(customCapabilities, sshsecurity.Capability{Name: stored.Name, Group: stored.Group, Description: stored.Description, Executable: stored.Executable, Args: args, Params: params, Permission: sshsecurity.Effect(stored.Permission), TimeoutSeconds: stored.TimeoutSeconds})
+			}
 			cfgs = append(cfgs, SSHConfig{
 				ID:                   item.ID,
 				Name:                 item.Name,
@@ -629,7 +662,10 @@ func (s *ConfigStore) assemble() AppConfig {
 				Password:             item.Password,
 				PrivateKey:           item.PrivateKey,
 				PrivateKeyPassphrase: item.PrivateKeyPassphrase,
+				HostKeyFingerprint:   item.HostKeyFingerprint,
 				Remark:               item.Remark,
+				Policy:               policy,
+				CustomCapabilities:   customCapabilities,
 			})
 		}
 		cfg.SSHConfigs = cfgs
@@ -728,8 +764,12 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 		DCGPolicy:                   string(dcgPolicy),
 		SessionCleanupEnabled:       cfg.SessionCleanupEnabled,
 		SessionCleanupDays:          cfg.SessionCleanupDays,
+		RecordAPIDetails:            cfg.RecordAPIDetails,
 	}); err != nil {
 		return err
+	}
+	if err := syncAPIDetailMarker(s.st.Dir(), cfg.RecordAPIDetails); err != nil {
+		return fmt.Errorf("sync API detail recording marker: %w", err)
 	}
 
 	agents := make([]store.Agent, 0, len(cfg.Agents))
@@ -762,6 +802,22 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 	}
 	sshItems := make([]store.SSHConfig, 0, len(cfg.SSHConfigs))
 	for _, item := range cfg.SSHConfigs {
+		policyOverrides := make([]store.SSHPolicyOverride, 0, len(item.Policy.Overrides))
+		for _, rule := range item.Policy.Overrides {
+			policyOverrides = append(policyOverrides, store.SSHPolicyOverride{ID: rule.ID, Capability: rule.Capability, Effect: string(rule.Effect), Reason: rule.Reason})
+		}
+		customCapabilities := make([]store.SSHCapability, 0, len(item.CustomCapabilities))
+		for _, capability := range item.CustomCapabilities {
+			args, err := json.Marshal(capability.Args)
+			if err != nil {
+				return fmt.Errorf("encode SSH capability args for %s/%s: %w", item.ID, capability.Name, err)
+			}
+			params, err := json.Marshal(capability.Params)
+			if err != nil {
+				return fmt.Errorf("encode SSH capability params for %s/%s: %w", item.ID, capability.Name, err)
+			}
+			customCapabilities = append(customCapabilities, store.SSHCapability{Name: capability.Name, Group: capability.Group, Description: capability.Description, Executable: capability.Executable, Args: string(args), Params: string(params), Permission: string(capability.Permission), TimeoutSeconds: capability.TimeoutSeconds})
+		}
 		sshItems = append(sshItems, store.SSHConfig{
 			ID:                   item.ID,
 			Name:                 item.Name,
@@ -772,7 +828,11 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 			Password:             item.Password,
 			PrivateKey:           item.PrivateKey,
 			PrivateKeyPassphrase: item.PrivateKeyPassphrase,
+			HostKeyFingerprint:   item.HostKeyFingerprint,
 			Remark:               item.Remark,
+			PolicyPreset:         item.Policy.Preset,
+			PolicyOverrides:      policyOverrides,
+			CustomCapabilities:   customCapabilities,
 		})
 	}
 	if err := s.st.SaveSSHConfigs(sshItems); err != nil {
