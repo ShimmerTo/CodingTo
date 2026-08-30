@@ -1,3 +1,8 @@
+# 2026-08-30
+- feat 新增chatgpt plus 5小时额度显示；增加额度快捷展示
+- feat 新增终端(git bash/powershell/cmd/ssh)
+- feat 新增git管理（提交/回退/推送/切换分支，仿jetbrains）
+
 # 2026-08-24
 - feat 新增chatgpt授权安全接入
 - feat 新增三维度token统计及调用明细

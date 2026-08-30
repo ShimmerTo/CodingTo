@@ -3,29 +3,31 @@
 :root {
   font-family: Inter, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #242422;
-  background: #f7f7f5;
+  background: #ffffff;
   font-synthesis: none;
-  --bg: #f7f7f5;
+  /* 浅色主题参考 ChatGPT：白色主内容、极浅中性灰侧栏与克制的灰色交互层。 */
+  --bg: #ffffff;
   --surface: #ffffff;
-  --sidebar: #efefec;
-  --surface-2: #f4f4f1;
-  --code-bg: #fcfcfb;
+  --sidebar: #f9f9f9;
+  --surface-2: #f4f4f4;
+  --code-bg: #f7f7f8;
+  --terminal-bg: #ffffff;
   --text: #242422;
   --muted: #71716d;
   --faint: #9b9b95;
-  --border: #deded9;
-  --border-soft: #e9e9e5;
+  --border: #d9d9d9;
+  --border-soft: #e5e5e5;
   --accent: #171716;
   --accent-fg: #fff;
   --link: #2563eb;
-  --hover: #e6e6e1;
+  --hover: #ececec;
   --danger: #d14b42;
   --success: #1a7f37;
   --amber: #d9a441;
-  --installed-tag-bg: #eeeeeb;
+  --installed-tag-bg: #f0f0f0;
   --installed-tag-fg: #171716;
-  --installed-tag-border: #d7d7d2;
-  --shadow: 0 12px 35px rgba(20, 20, 18, .08);
+  --installed-tag-border: #d9d9d9;
+  --shadow: 0 12px 35px rgba(0, 0, 0, .08);
   /* 字号分档变量：全系统字号只保留 12/13/14 三档（小）。
      中/大档由 App.vue applyTheme() 整体 +1/+2（中=13/14/15、大=14/15/16）。 */
   --fs-12: 12px;
@@ -57,6 +59,7 @@
   --sidebar: #181817;
   --surface-2: #292928;
   --code-bg: #2a2a28;
+  --terminal-bg: #292928;
   --text: #e9e9e7;
   --muted: #aaa9a3;
   --faint: #777771;
@@ -163,7 +166,7 @@ button { color: inherit; }
 .save-bar span { display: flex; align-items: center; gap: 5px; color: #399162; font-size: var(--fs-13); }
 
 /* Toasts */
-.toast-stack { position: fixed; top: 54px; right: 14px; z-index: 200; display: flex; flex-direction: column; gap: 9px; pointer-events: none; }
+.toast-stack { position: fixed; top: 54px; left: 50%; z-index: 200; display: flex; align-items: center; flex-direction: column; gap: 9px; max-width: calc(100vw - 28px); pointer-events: none; transform: translateX(-50%); }
 .toast { display: flex; align-items: center; gap: 9px; min-width: 220px; max-width: 360px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); color: var(--text); font-size: var(--fs-13); animation: toast-in .18s ease; }
 .toast--success { border-color: #b9dfca; color: #2f7a52; background: #edf8f2; }
 .toast--error { border-color: #e5a29d; color: #a92f28; background: #fff0ef; box-shadow: 0 12px 30px rgba(126,31,25,.16); }

@@ -17,7 +17,10 @@ const props = defineProps({
   focusRequest: { type: Object, default: null },
   // 变更消息行尾斜箭头发起的 Git 对比请求：定位节点/文件后复用 GitDiffDialog 打开。
   diffRequest: { type: Object, default: null },
-  t: { type: Object, required: true }
+  t: { type: Object, required: true },
+  language: { type: String, default: 'zh-CN' },
+  modelOptions: { type: Array, default: () => [] },
+  selectedModelValue: { type: String, default: '' }
 })
 
 const emit = defineEmits(['close', 'refresh', 'artifact-error'])
@@ -310,14 +313,14 @@ function gitFileActions(file) {
   const actions = []
   if (file.untracked) {
     actions.push({ op: 'track', label: props.t.gitTrack, icon: Plus })
-    actions.push({ op: 'discard', label: props.t.gitDeleteFile, icon: Trash2, destructive: true })
+    actions.push({ op: 'delete_untracked', label: props.t.gitDeleteFile, icon: Trash2, destructive: true })
   } else if (file.status === 'deleted') {
     actions.push({ op: 'restore', label: props.t.gitRestore, icon: RotateCcw })
   } else {
     if (file.staged) actions.push({ op: 'unstage', label: props.t.gitUnstage, icon: Undo2 })
     if (file.unstaged) {
       actions.push({ op: 'stage', label: props.t.gitStage, icon: Plus })
-      actions.push({ op: 'discard', label: props.t.gitDiscard, icon: RotateCcw, destructive: true })
+      actions.push({ op: 'discard_tracked', label: props.t.gitRevertFile, icon: RotateCcw, destructive: true })
     }
   }
   return actions
@@ -325,7 +328,7 @@ function gitFileActions(file) {
 
 // 破坏性操作先弹确认框，其余直接执行。
 function requestGitFileOp(op, file) {
-  if (op === 'discard') {
+  if (op === 'delete_untracked' || op === 'discard_tracked') {
     const isUntracked = file.untracked
     confirmGitOp.value = {
       op,
@@ -955,6 +958,9 @@ function startResize(event) {
     :files="gitDialog.files"
     :index="gitDialog.index"
     :base-branch="selectedBase || gitSnapshot.baseBranch || ''"
+    :language="language"
+    :model-options="modelOptions"
+    :selected-model-value="selectedModelValue"
     :t="t"
     @close="gitDialog = { ...gitDialog, open: false }"
     @update:index="gitDialog = { ...gitDialog, index: $event }"

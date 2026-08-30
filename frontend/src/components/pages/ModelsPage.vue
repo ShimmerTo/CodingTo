@@ -24,7 +24,13 @@ import {
   openExternal
 } from '../../backend'
 import { formatCacheHitRate, formatTokenCount } from '../chat/chatFormatters'
-import { normalizeOpenCodeUsage } from '../../utils/providerQuota'
+import {
+  clearProviderQuotaCache,
+  fetchProviderQuota,
+  getProviderQuotaCache,
+  normalizeChatGPTUsage,
+  normalizeOpenCodeUsage
+} from '../../utils/providerQuota'
 
 const {
   t,
@@ -54,7 +60,8 @@ const {
 
 const providers = computed(() => config.providers || [])
 const CHATGPT_PROVIDER_ID = 'openai-codex'
-const chatgptAccountInfo = ref({ loggedIn: false })
+const initialChatgptQuota = getProviderQuotaCache('chatgpt', CHATGPT_PROVIDER_ID)?.data ?? null
+const chatgptAccountInfo = ref({ loggedIn: Boolean(initialChatgptQuota) })
 
 function isChatgptProvider(provider) {
   return provider?.name === CHATGPT_PROVIDER_ID
@@ -109,7 +116,7 @@ async function ensureChatgptProvider() {
 const USAGE_POLL_MS = 60 * 1000
 const usageByProvider = reactive({})
 const balanceByProvider = reactive({})
-const chatgptQuota = ref(null)
+const chatgptQuota = ref(initialChatgptQuota)
 const quotaNow = ref(Date.now())
 let usageTimer = null
 let usageFetching = false
@@ -123,7 +130,28 @@ function isDeepSeekProvider(provider) {
   return /^https:\/\/api\.deepseek\.com(?:[/:]|$)/i.test((provider?.baseUrl || '').trim())
 }
 
-async function refreshUsage() {
+function hydrateUsageCache() {
+  const chatgpt = getProviderQuotaCache('chatgpt', CHATGPT_PROVIDER_ID)?.data
+  if (chatgpt?.weekly) chatgptQuota.value = chatgpt
+
+  for (const provider of providers.value) {
+    if (isZenGoProvider(provider)) {
+      const usage = getProviderQuotaCache('opencode', provider.name)?.data
+      if (usage?.rolling && usage?.weekly && usage?.monthly) usageByProvider[provider.name] = usage
+    } else if (isDeepSeekProvider(provider)) {
+      const balance = getProviderQuotaCache('deepseek', provider.name)?.data
+      if (balance?.balances?.length) balanceByProvider[provider.name] = balance
+    }
+  }
+}
+
+watch(
+  () => providers.value.map(provider => `${provider.name}\u0000${provider.baseUrl || ''}`).join('\u0001'),
+  hydrateUsageCache,
+  { immediate: true }
+)
+
+async function refreshUsage({ force = false } = {}) {
   if (usageFetching) return
   const usageTargets = providers.value.filter(isZenGoProvider)
   const balanceTargets = providers.value.filter(isDeepSeekProvider)
@@ -131,19 +159,30 @@ async function refreshUsage() {
   try {
     await Promise.all([
       ...usageTargets.map(async provider => {
-        try {
-          const usage = await getProviderUsage(provider.name)
-          usageByProvider[provider.name] = normalizeOpenCodeUsage(usage)
-        } catch (_) {
-          // 失败保留上次成功数据；从未成功则不展示。
-        }
+        const usage = await fetchProviderQuota({
+          kind: 'opencode',
+          providerName: provider.name,
+          force,
+          fetcher: async () => {
+            const normalized = normalizeOpenCodeUsage(await getProviderUsage(provider.name))
+            return normalized?.rolling && normalized?.weekly && normalized?.monthly
+              ? { kind: 'opencode', rolling: normalized.rolling, weekly: normalized.weekly, monthly: normalized.monthly }
+              : null
+          }
+        })
+        if (usage?.rolling && usage?.weekly && usage?.monthly) usageByProvider[provider.name] = usage
       }),
       ...balanceTargets.map(async provider => {
-        try {
-          balanceByProvider[provider.name] = await getProviderBalance(provider.name)
-        } catch (_) {
-          // 失败保留上次成功数据；从未成功则不展示。
-        }
+        const balance = await fetchProviderQuota({
+          kind: 'deepseek',
+          providerName: provider.name,
+          force,
+          fetcher: async () => {
+            const result = await getProviderBalance(provider.name)
+            return result?.available && result?.balances?.length ? { ...result, kind: 'deepseek' } : null
+          }
+        })
+        if (balance?.balances?.length) balanceByProvider[provider.name] = balance
       })
     ])
   } finally {
@@ -151,11 +190,20 @@ async function refreshUsage() {
   }
 }
 
-async function refreshChatgptUsage() {
+async function refreshChatgptUsage({ force = false } = {}) {
   if (chatgptUsageFetching || chatgptAccountInfo.value.loggedIn !== true) return
   chatgptUsageFetching = true
   try {
-    chatgptQuota.value = await chatgptUsage()
+    const usage = await fetchProviderQuota({
+      kind: 'chatgpt',
+      providerName: CHATGPT_PROVIDER_ID,
+      force,
+      fetcher: async () => {
+        const normalized = normalizeChatGPTUsage(await chatgptUsage())
+        return normalized ? { kind: 'chatgpt', ...normalized } : null
+      }
+    })
+    if (usage?.weekly) chatgptQuota.value = usage
     // Pi may refresh the canonical access token while querying usage.
     const account = await chatgptAccount()
     chatgptAccountInfo.value = account
@@ -505,8 +553,13 @@ async function refreshChatgptAccount() {
     setChatgptAgentAuth(account)
     chatgptAccountInfo.value = account
     if (account.loggedIn) refreshChatgptUsage()
-    else chatgptQuota.value = null
+    else {
+      chatgptQuota.value = null
+      clearProviderQuotaCache('chatgpt', CHATGPT_PROVIDER_ID)
+    }
   } catch {
+    // 账户接口瞬时失败时保留已确认过的登录态和额度，避免缓存内容闪空。
+    if (chatgptQuota.value?.weekly) return
     const account = { agentId: 'default', loggedIn: false }
     setChatgptAgentAuth(account)
     chatgptAccountInfo.value = account
@@ -543,6 +596,7 @@ async function pollChatgptLogin() {
   stopChatgptPolling()
   chatgptLoginState.value = null
   if (state.status === 'completed') {
+    clearProviderQuotaCache('chatgpt', CHATGPT_PROVIDER_ID)
     try {
       const result = await applyCodexProvider()
       Object.assign(config, result)
@@ -580,6 +634,7 @@ async function logoutChatgpt() {
     await chatgptLogout()
     chatgptAccountInfo.value = { agentId: 'default', loggedIn: false }
     chatgptQuota.value = null
+    clearProviderQuotaCache('chatgpt', CHATGPT_PROVIDER_ID)
     setChatgptAgentAuth(chatgptAccountInfo.value)
     pushToast('success', t.value.chatgpt_logout_success)
   } catch (err) {
@@ -712,6 +767,11 @@ function modelTestResult(provider, model) {
           <span class="models-provider-item__count">{{ (p.models || []).length }}</span>
           <div v-if="isChatgptProvider(p)" class="models-provider-item__usage models-provider-item__usage--chatgpt">
             <template v-if="chatgptAccountInfo.loggedIn">
+              <div v-if="chatgptQuota?.rolling" class="models-provider-item__usage-row">
+                <span class="models-provider-item__usage-label">5h</span>
+                <span :class="['models-provider-item__quota', quotaLevel(chatgptQuota.rolling.percent)]">{{ quotaPercent(chatgptQuota.rolling) }}</span>
+                <span class="models-provider-item__usage-reset">{{ formatResetSeconds(chatgptQuota.rolling.resetSeconds) }}</span>
+              </div>
               <div class="models-provider-item__usage-row">
                 <span class="models-provider-item__usage-label">7d</span>
                 <template v-if="chatgptQuota?.weekly">
@@ -840,6 +900,12 @@ function modelTestResult(provider, model) {
               <span class="chatgpt-account__label">{{ t.chatgpt_expires }}</span>
               <span :class="['chatgpt-account__value', 'chatgpt-auth-state', { expired: isChatgptCredentialExpired(), valid: !isChatgptCredentialExpired() }]">
                 {{ formatLocalDate(chatgptAccountInfo.expires) || '-' }}
+              </span>
+            </div>
+            <div v-if="chatgptQuota?.rolling" class="chatgpt-account__item">
+              <span class="chatgpt-account__label">{{ t.chatgptFiveHourQuota }}</span>
+              <span :class="['chatgpt-account__value', 'models-provider-item__quota', quotaLevel(chatgptQuota.rolling.percent)]">
+                {{ quotaPercent(chatgptQuota.rolling) }} · {{ t.chatgpt_usage_resets_in }} {{ formatResetSeconds(chatgptQuota.rolling.resetSeconds) || '-' }}
               </span>
             </div>
             <div class="chatgpt-account__item">

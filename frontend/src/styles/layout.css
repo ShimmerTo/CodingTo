@@ -11,6 +11,8 @@
 .window-controls .window-close:hover { color: #fff; background: #c42b1c; }
 .workspace-shell { display: flex; flex: 1; min-height: 0; }
 .main-content { flex: 1; min-width: 0; overflow: hidden; border-radius: 16px 16px 0 0; background: var(--surface); }
+/* 窗口最大化时去掉 main-content 圆角，避免顶部边角出现空隙。 */
+.window--maximised .main-content { border-radius: 0; }
 
 .page-view { height: 100%; display: flex; flex-direction: column; }
 .page-view .content-page { height: auto; flex: 1; min-height: 0; }

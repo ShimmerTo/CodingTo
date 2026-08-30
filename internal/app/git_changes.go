@@ -10,6 +10,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -20,10 +21,18 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"codingto/internal/applog"
 )
 
 const gitSnapshotTimeout = 8 * time.Second
 const maxGitPreviewSize = 4 * 1024 * 1024
+
+// errGitWorkspaceNotFound signals that no Git working directory could be
+// resolved for a conversation. It is returned when a new conversation has no
+// session yet and no active workspace is configured; callers that render a
+// snapshot treat it as a non-repository state instead of a hard failure.
+var errGitWorkspaceNotFound = errors.New("conversation workspace not found")
 
 // GitSnapshot keeps repository state separate from the per-prompt artifacts in
 // SessionChanges. Worktree is the live checkout versus HEAD; Branch is the
@@ -49,15 +58,25 @@ type GitChangeSet struct {
 }
 
 type GitFileChange struct {
-	Path      string `json:"path"`
-	OldPath   string `json:"oldPath,omitempty"`
-	Status    string `json:"status"`
-	Staged    bool   `json:"staged,omitempty"`
-	Unstaged  bool   `json:"unstaged,omitempty"`
-	Untracked bool   `json:"untracked,omitempty"`
-	Added     int    `json:"added"`
-	Deleted   int    `json:"deleted"`
-	Binary    bool   `json:"binary"`
+	Path    string `json:"path"`
+	OldPath string `json:"oldPath,omitempty"`
+	Status  string `json:"status"`
+	// ConflictStatus is the two-character porcelain v1 unmerged status.
+	ConflictStatus string `json:"conflictStatus,omitempty"`
+	Staged         bool   `json:"staged,omitempty"`
+	Unstaged       bool   `json:"unstaged,omitempty"`
+	Untracked      bool   `json:"untracked,omitempty"`
+	Conflicted     bool   `json:"conflicted,omitempty"`
+	Ignored        bool   `json:"ignored,omitempty"`
+	Added          int    `json:"added"`
+	Deleted        int    `json:"deleted"`
+	// StagedAdded and StagedDeleted count only HEAD-to-index line changes.
+	StagedAdded   int `json:"stagedAdded"`
+	StagedDeleted int `json:"stagedDeleted"`
+	// UnstagedAdded and UnstagedDeleted count only index-to-worktree line changes.
+	UnstagedAdded   int  `json:"unstagedAdded"`
+	UnstagedDeleted int  `json:"unstagedDeleted"`
+	Binary          bool `json:"binary"`
 }
 
 type GitFileDetail struct {
@@ -74,6 +93,14 @@ type GitFileDetail struct {
 	Deleted  int            `json:"deleted"`
 }
 
+// GitCommitFileDetailRequest selects one file from one immutable commit for comparison with its first parent.
+type GitCommitFileDetailRequest struct {
+	SessionID int64  `json:"sessionId"`
+	Commit    string `json:"commit"`
+	Path      string `json:"path"`
+	Language  string `json:"language,omitempty"`
+}
+
 type GitFileVersion struct {
 	Exists      bool   `json:"exists"`
 	Size        int64  `json:"size"`
@@ -85,6 +112,7 @@ type GitFileVersion struct {
 	Height      int    `json:"height,omitempty"`
 	MimeType    string `json:"mimeType,omitempty"`
 	ImageData   string `json:"imageData,omitempty"`
+	Text        string `json:"text,omitempty"`
 }
 
 func readGitSnapshot(workspace, preferredBase string) GitSnapshot {
@@ -112,11 +140,18 @@ func readGitSnapshot(workspace, preferredBase string) GitSnapshot {
 		snapshot.CurrentBranch = strings.TrimSpace(shortSHA)
 	}
 
-	status, statusErr := runGit(ctx, snapshot.Root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	statusBytes, statusErr := runGitBytes(ctx, snapshot.Root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if statusErr == nil {
-		snapshot.Worktree.Files = parseGitStatus(status)
-		if numstat, diffErr := runGit(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", "HEAD", "--"); diffErr == nil {
-			applyGitNumstat(&snapshot.Worktree, numstat)
+		snapshot.Worktree.Files = parseGitStatus(string(statusBytes))
+		markGitIgnoredFiles(ctx, snapshot.Root, snapshot.Worktree.Files)
+		if numstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", "HEAD", "--"); diffErr == nil {
+			applyGitNumstat(&snapshot.Worktree, string(numstat))
+		}
+		if stagedNumstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--cached", "--numstat", "-z", "--no-renames", "--"); diffErr == nil {
+			applyGitScopedNumstat(&snapshot.Worktree, string(stagedNumstat), true)
+		}
+		if unstagedNumstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", "--"); diffErr == nil {
+			applyGitScopedNumstat(&snapshot.Worktree, string(unstagedNumstat), false)
 		}
 	}
 
@@ -134,12 +169,12 @@ func readGitSnapshot(workspace, preferredBase string) GitSnapshot {
 		return snapshot
 	}
 	rangeSpec := strings.TrimSpace(mergeBase) + "..HEAD"
-	names, namesErr := runGit(ctx, snapshot.Root, "diff", "--name-status", "-z", "--no-renames", rangeSpec, "--")
+	names, namesErr := runGitBytes(ctx, snapshot.Root, "diff", "--name-status", "-z", "--no-renames", rangeSpec, "--")
 	if namesErr == nil {
-		snapshot.Branch.Files = parseGitNameStatus(names)
+		snapshot.Branch.Files = parseGitNameStatus(string(names))
 	}
-	if numstat, diffErr := runGit(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", rangeSpec, "--"); diffErr == nil {
-		applyGitNumstat(&snapshot.Branch, numstat)
+	if numstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", rangeSpec, "--"); diffErr == nil {
+		applyGitNumstat(&snapshot.Branch, string(numstat))
 	}
 	if counts, countErr := runGit(ctx, snapshot.Root, "rev-list", "--left-right", "--count", snapshot.BaseBranch+"...HEAD"); countErr == nil {
 		fields := strings.Fields(counts)
@@ -151,9 +186,44 @@ func readGitSnapshot(workspace, preferredBase string) GitSnapshot {
 	return snapshot
 }
 
+// markGitIgnoredFiles annotates worktree changes that match an ignore rule,
+// including staged index deletions created by git rm --cached.
+func markGitIgnoredFiles(ctx context.Context, root string, files []GitFileChange) {
+	if len(files) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if file.Path != "" {
+			paths = append(paths, file.Path)
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	output, err := runGitInput(ctx, root, strings.Join(paths, "\x00")+"\x00", "check-ignore", "--no-index", "-z", "--stdin")
+	if err != nil {
+		return
+	}
+	ignored := make(map[string]struct{})
+	for _, path := range strings.Split(output, "\x00") {
+		path = filepath.ToSlash(path)
+		if path != "" {
+			ignored[path] = struct{}{}
+		}
+	}
+	for index := range files {
+		_, files[index].Ignored = ignored[files[index].Path]
+	}
+}
+
 func (a *App) GetSessionGitSnapshot(id int64, baseBranch string) (GitSnapshot, error) {
 	workspace, err := a.sessionGitWorkspace(id)
 	if err != nil {
+		if errors.Is(err, errGitWorkspaceNotFound) {
+			applog.Infof("git snapshot workspace unavailable for session %d: %v", id, err)
+			return GitSnapshot{BaseBranches: []string{}, Worktree: GitChangeSet{Files: []GitFileChange{}}, Branch: GitChangeSet{Files: []GitFileChange{}}}, nil
+		}
 		return GitSnapshot{}, err
 	}
 	return readGitSnapshot(workspace, strings.TrimSpace(baseBranch)), nil
@@ -163,16 +233,30 @@ func (a *App) GetSessionGitSnapshot(id int64, baseBranch string) (GitSnapshot, e
 // session worktree. Op is one of:
 //   - track/stage: git add the file (track an untracked file or stage worktree changes)
 //   - unstage:     git restore --staged the file (drop the staged entry)
-//   - discard:     delete an untracked file from disk, or restore a tracked
-//     file to HEAD (drop worktree modifications)
+//   - delete_untracked: delete the file only while it is still untracked
+//   - discard_tracked: restore the file only while it is still tracked
 //   - restore:     git restore the file (recover a deleted file from HEAD)
+//   - ignore:      add the path to the root .gitignore and stop tracking it
 type GitFileOperationRequest struct {
-	SessionID int64  `json:"sessionId"`
-	Op        string `json:"op"`
-	Path      string `json:"path"`
+	SessionID   int64  `json:"sessionId"`
+	Op          string `json:"op"`
+	Path        string `json:"path"`
+	IsDirectory bool   `json:"isDirectory,omitempty"`
 }
 
+// GitFileOperationsRequest describes one file-level Git action applied to a
+// bounded set of paths in the session worktree.
+type GitFileOperationsRequest struct {
+	SessionID int64    `json:"sessionId"`
+	Op        string   `json:"op"`
+	Paths     []string `json:"paths"`
+}
+
+// ApplyGitFileOperation applies one validated, serialized file or directory operation.
 func (a *App) ApplyGitFileOperation(req GitFileOperationRequest) error {
+	a.gitWriteMu.Lock()
+	defer a.gitWriteMu.Unlock()
+
 	workspace, err := a.sessionGitWorkspace(req.SessionID)
 	if err != nil {
 		return err
@@ -185,64 +269,393 @@ func (a *App) ApplyGitFileOperation(req GitFileOperationRequest) error {
 		return errors.New("workspace is not a Git repository")
 	}
 	root := filepath.Clean(strings.TrimSpace(rootText))
-	path := filepath.ToSlash(strings.TrimSpace(req.Path))
-	if path == "" || path == "." || path == ".." {
-		return errors.New("invalid Git file path")
+	if strings.TrimSpace(req.Op) == "ignore" {
+		if err := addPathToGitIgnore(ctx, root, req.Path, req.IsDirectory); err != nil {
+			applog.Errorf("add Git ignore path failed: root=%q path=%q directory=%t: %v", root, req.Path, req.IsDirectory, err)
+			return errors.New("failed to add the selected item to the Git ignore list")
+		}
+		return nil
+	}
+	return applyGitFileOperation(ctx, root, req.Op, req.Path)
+}
+
+// ApplyGitFileOperations applies one validated Git action to multiple paths.
+func (a *App) ApplyGitFileOperations(req GitFileOperationsRequest) error {
+	a.gitWriteMu.Lock()
+	defer a.gitWriteMu.Unlock()
+
+	workspace, err := a.sessionGitWorkspace(req.SessionID)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+
+	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return errors.New("workspace is not a Git repository")
+	}
+	root := filepath.Clean(strings.TrimSpace(rootText))
+	return applyGitFileOperations(ctx, root, req.Op, req.Paths)
+}
+
+// addPathToGitIgnore adds one repository-relative path to the root ignore file.
+// If the path is already in the index, git rm --cached removes only its tracked
+// state and deliberately leaves every worktree file untouched.
+func addPathToGitIgnore(ctx context.Context, root, requestedPath string, isDirectory bool) error {
+	if strings.ContainsAny(requestedPath, "\x00\r\n") {
+		return errors.New("invalid Git ignore path")
+	}
+	paths, err := normalizeGitBatchPaths(root, []string{requestedPath})
+	if err != nil {
+		return err
+	}
+	path := paths[0]
+	absolute, err := safeGitWorktreePath(root, path)
+	if err != nil {
+		return err
+	}
+	if info, statErr := os.Stat(absolute); statErr == nil {
+		isDirectory = info.IsDir()
+	} else if !os.IsNotExist(statErr) {
+		return statErr
 	}
 
-	switch strings.TrimSpace(req.Op) {
-	case "track", "stage":
-		// git add stages everything for the path, including deletions and new files.
-		if _, err := runGit(ctx, root, "add", "--", path); err != nil {
+	trackedPaths, err := gitTrackedPathSet(ctx, root, []string{path})
+	if err != nil {
+		return err
+	}
+
+	ignorePath := filepath.Join(root, ".gitignore")
+	before, mode, existed, err := readWritableGitIgnore(ignorePath)
+	if err != nil {
+		return err
+	}
+	pattern := rootGitIgnorePattern(path, isDirectory)
+	after, changed := appendGitIgnorePattern(before, pattern)
+	if changed {
+		if err := writeAppendedGitIgnore(ignorePath, before, after, mode, existed); err != nil {
 			return err
 		}
-	case "unstage":
-		// git reset 在旧版本 Git 上同样可用（git restore --staged 需要 2.23+）。
-		if _, err := runGit(ctx, root, "reset", "-q", "HEAD", "--", path); err != nil {
-			return err
+	}
+
+	if len(trackedPaths) == 0 {
+		return nil
+	}
+	if _, err := runGit(ctx, root, "rm", "-r", "--cached", "--force", "--ignore-unmatch", "--", path); err != nil {
+		if changed {
+			rollbackGitIgnore(ignorePath, before, after, mode, existed)
 		}
-	case "discard":
-		untracked, statusErr := isGitUntracked(ctx, root, path)
-		if statusErr != nil {
-			return statusErr
-		}
-		if untracked {
-			absolute, pathErr := safeGitWorktreePath(root, path)
-			if pathErr != nil {
-				return pathErr
-			}
-			if err := os.Remove(absolute); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			return nil
-		}
-		if _, err := runGit(ctx, root, "restore", "--", path); err != nil {
-			return err
-		}
-	case "restore":
-		if _, err := runGit(ctx, root, "restore", "--", path); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported Git file operation: %s", req.Op)
+		return err
 	}
 	return nil
 }
 
+func readWritableGitIgnore(path string) ([]byte, os.FileMode, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return []byte{}, 0o644, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, 0, false, errors.New("repository .gitignore is not a regular file")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return contents, info.Mode().Perm(), true, nil
+}
+
+func writeAppendedGitIgnore(path string, before, after []byte, mode os.FileMode, existed bool) error {
+	current, err := os.ReadFile(path)
+	if !existed && os.IsNotExist(err) {
+		current, err = []byte{}, nil
+	}
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current, before) || len(after) < len(before) {
+		return errors.New("repository .gitignore changed during the operation")
+	}
+	flags := os.O_WRONLY | os.O_APPEND
+	if !existed {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	file, err := os.OpenFile(path, flags, mode)
+	if err != nil {
+		return err
+	}
+	suffix := after[len(before):]
+	written, writeErr := file.Write(suffix)
+	closeErr := file.Close()
+	if writeErr == nil && written != len(suffix) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		rollbackPartialGitIgnore(path, before, after, mode, existed)
+		return writeErr
+	}
+	return nil
+}
+
+func rootGitIgnorePattern(path string, isDirectory bool) string {
+	var pattern strings.Builder
+	pattern.WriteByte('/')
+	for _, char := range filepath.ToSlash(path) {
+		switch char {
+		case '\\', '!', '#', '*', '?', '[', ']', ' ':
+			pattern.WriteByte('\\')
+		}
+		pattern.WriteRune(char)
+	}
+	if isDirectory {
+		pattern.WriteByte('/')
+	}
+	return pattern.String()
+}
+
+func appendGitIgnorePattern(contents []byte, pattern string) ([]byte, bool) {
+	normalized := strings.ReplaceAll(string(contents), "\r\n", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		if line == pattern {
+			return contents, false
+		}
+	}
+	lineEnding := "\n"
+	if bytes.Contains(contents, []byte("\r\n")) {
+		lineEnding = "\r\n"
+	}
+	result := append([]byte(nil), contents...)
+	if len(result) > 0 && !bytes.HasSuffix(result, []byte("\n")) && !bytes.HasSuffix(result, []byte("\r")) {
+		result = append(result, lineEnding...)
+	}
+	result = append(result, pattern...)
+	result = append(result, lineEnding...)
+	return result, true
+}
+
+func rollbackGitIgnore(path string, before, expected []byte, mode os.FileMode, existed bool) {
+	current, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(current, expected) {
+		applog.Errorf("rollback Git ignore skipped because the file changed: path=%q", path)
+		return
+	}
+	if existed {
+		err = os.WriteFile(path, before, mode)
+	} else {
+		err = os.Remove(path)
+	}
+	if err != nil {
+		applog.Errorf("rollback Git ignore failed: path=%q: %v", path, err)
+	}
+}
+
+func rollbackPartialGitIgnore(path string, before, expected []byte, mode os.FileMode, existed bool) {
+	current, err := os.ReadFile(path)
+	if err != nil || len(current) < len(before) || len(current) > len(expected) || !bytes.Equal(current, expected[:len(current)]) {
+		applog.Errorf("rollback partial Git ignore append skipped because the file changed: path=%q", path)
+		return
+	}
+	if existed {
+		err = os.WriteFile(path, before, mode)
+	} else {
+		err = os.Remove(path)
+	}
+	if err != nil {
+		applog.Errorf("rollback partial Git ignore append failed: path=%q: %v", path, err)
+	}
+}
+
+// applyGitFileOperation applies one validated file-level operation inside root.
+func applyGitFileOperation(ctx context.Context, root, op, requestedPath string) error {
+	switch strings.TrimSpace(op) {
+	case "track":
+		return applyGitFileOperations(ctx, root, "stage", []string{requestedPath})
+	case "stage", "unstage", "delete_untracked", "discard_tracked", "resolve_both_deleted":
+		return applyGitFileOperations(ctx, root, op, []string{requestedPath})
+	case "restore":
+		paths, err := normalizeGitBatchPaths(root, []string{requestedPath})
+		if err != nil {
+			return err
+		}
+		path := paths[0]
+		if _, err := runGit(ctx, root, "restore", "--", path); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported Git file operation: %s", op)
+	}
+	return nil
+}
+
+const maxGitBatchFiles = 200
+const maxGitBatchPathBytes = 24 * 1024
+
+// applyGitFileOperations validates every path and expected tracking state
+// before performing a bounded batch operation.
+func applyGitFileOperations(ctx context.Context, root, op string, requestedPaths []string) error {
+	paths, err := normalizeGitBatchPaths(root, requestedPaths)
+	if err != nil {
+		return err
+	}
+
+	switch strings.TrimSpace(op) {
+	case "stage":
+		args := append([]string{"add", "--"}, paths...)
+		_, err = runGit(ctx, root, args...)
+		return err
+	case "unstage":
+		if _, headErr := runGit(ctx, root, "rev-parse", "--verify", "HEAD"); headErr == nil {
+			args := append([]string{"reset", "-q", "HEAD", "--"}, paths...)
+			_, err = runGit(ctx, root, args...)
+			return err
+		}
+		args := append([]string{"rm", "--cached", "--ignore-unmatch", "--"}, paths...)
+		_, err = runGit(ctx, root, args...)
+		return err
+	case "discard_tracked":
+		untrackedPaths, statusErr := gitUntrackedPathSet(ctx, root)
+		if statusErr != nil {
+			return statusErr
+		}
+		trackedPaths, trackedErr := gitTrackedPathSet(ctx, root, paths)
+		if trackedErr != nil {
+			return trackedErr
+		}
+		for _, path := range paths {
+			_, untracked := untrackedPaths[path]
+			_, tracked := trackedPaths[path]
+			if untracked || !tracked {
+				return fmt.Errorf("file is no longer tracked: %s", path)
+			}
+		}
+		args := append([]string{"restore", "--"}, paths...)
+		_, err = runGit(ctx, root, args...)
+		return err
+	case "delete_untracked":
+		untrackedPaths, statusErr := gitUntrackedPathSet(ctx, root)
+		if statusErr != nil {
+			return statusErr
+		}
+		absolutePaths := make([]string, 0, len(paths))
+		for _, path := range paths {
+			_, untracked := untrackedPaths[path]
+			if !untracked {
+				return fmt.Errorf("file is no longer untracked: %s", path)
+			}
+			absolute, pathErr := safeGitWorktreePath(root, path)
+			if pathErr != nil {
+				return pathErr
+			}
+			info, statErr := os.Lstat(absolute)
+			if statErr != nil {
+				return statErr
+			}
+			if info.IsDir() {
+				return fmt.Errorf("refusing to delete an untracked directory: %s", path)
+			}
+			absolutePaths = append(absolutePaths, absolute)
+		}
+		for _, absolute := range absolutePaths {
+			if err := os.Remove(absolute); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "resolve_both_deleted":
+		conflicts, statusErr := currentGitConflictMap(ctx, root)
+		if statusErr != nil {
+			return statusErr
+		}
+		for _, path := range paths {
+			if conflict, exists := conflicts[path]; !exists || conflict.ConflictStatus != "DD" {
+				return fmt.Errorf("selected file is no longer a both-deleted conflict: %s", path)
+			}
+		}
+		args := append([]string{"rm", "--"}, paths...)
+		_, err = runGit(ctx, root, args...)
+		return err
+	default:
+		return fmt.Errorf("unsupported Git batch operation: %s", op)
+	}
+}
+
+func normalizeGitBatchPaths(root string, requestedPaths []string) ([]string, error) {
+	if len(requestedPaths) == 0 || len(requestedPaths) > maxGitBatchFiles {
+		return nil, fmt.Errorf("Git batch operation requires 1 to %d files", maxGitBatchFiles)
+	}
+	paths := make([]string, 0, len(requestedPaths))
+	seen := make(map[string]struct{}, len(requestedPaths))
+	totalBytes := 0
+	for _, requestedPath := range requestedPaths {
+		path := filepath.ToSlash(strings.TrimSpace(requestedPath))
+		if path == "" || path == "." || path == ".." {
+			return nil, errors.New("invalid Git file path")
+		}
+		if _, pathErr := safeGitWorktreePath(root, path); pathErr != nil {
+			return nil, pathErr
+		}
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		totalBytes += len(path)
+		if totalBytes > maxGitBatchPathBytes {
+			return nil, errors.New("Git batch file paths are too long")
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return nil, errors.New("Git batch operation has no unique files")
+	}
+	return paths, nil
+}
+
 // isGitUntracked reports whether the porcelain status marks path as untracked,
-// which decides whether discard should remove the file from disk instead of
-// restoring it from Git.
+// which lets destructive operations enforce their expected tracking state.
 func isGitUntracked(ctx context.Context, root, path string) (bool, error) {
-	status, err := runGit(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	paths, err := gitUntrackedPathSet(ctx, root)
 	if err != nil {
 		return false, err
 	}
-	for _, file := range parseGitStatus(status) {
-		if file.Path == path {
-			return file.Untracked, nil
+	_, ok := paths[path]
+	return ok, nil
+}
+
+func gitUntrackedPathSet(ctx context.Context, root string) (map[string]struct{}, error) {
+	statusBytes, err := runGitBytes(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]struct{})
+	for _, file := range parseGitStatus(string(statusBytes)) {
+		if file.Untracked {
+			paths[file.Path] = struct{}{}
 		}
 	}
-	return false, nil
+	return paths, nil
+}
+
+func gitTrackedPathSet(ctx context.Context, root string, paths []string) (map[string]struct{}, error) {
+	args := append([]string{"ls-files", "-z", "--"}, paths...)
+	output, err := runGitBytes(ctx, root, args...)
+	if err != nil {
+		return nil, err
+	}
+	tracked := make(map[string]struct{}, len(paths))
+	for _, path := range strings.Split(string(output), "\x00") {
+		path = filepath.ToSlash(strings.TrimSpace(path))
+		if path != "" {
+			tracked[path] = struct{}{}
+		}
+	}
+	return tracked, nil
 }
 
 func (a *App) GetSessionGitFileDetail(id int64, scope, path, baseBranch string) (GitFileDetail, error) {
@@ -257,7 +670,7 @@ func (a *App) GetSessionGitFileDetail(id int64, scope, path, baseBranch string) 
 	scope = strings.TrimSpace(scope)
 	var set GitChangeSet
 	switch scope {
-	case "worktree":
+	case "worktree", "staged", "unstaged", "untracked":
 		set = snapshot.Worktree
 	case "branch":
 		set = snapshot.Branch
@@ -274,27 +687,101 @@ func (a *App) GetSessionGitFileDetail(id int64, scope, path, baseBranch string) 
 	if change == nil {
 		return GitFileDetail{}, fmt.Errorf("Git change not found: %s", path)
 	}
+	if scope == "staged" && (!change.Staged || change.Conflicted) {
+		return GitFileDetail{}, fmt.Errorf("staged Git change not found: %s", path)
+	}
+	if scope == "unstaged" && (!change.Unstaged || change.Untracked || change.Conflicted) {
+		return GitFileDetail{}, fmt.Errorf("unstaged Git change not found: %s", path)
+	}
+	if scope == "untracked" && (!change.Untracked || change.Conflicted) {
+		return GitFileDetail{}, fmt.Errorf("untracked Git change not found: %s", path)
+	}
 	return readGitFileDetail(snapshot, scope, *change)
 }
 
+// GetSessionGitCommitFileDetail returns the selected commit's file content compared with its first parent.
+func (a *App) GetSessionGitCommitFileDetail(req GitCommitFileDetailRequest) (GitFileDetail, error) {
+	workspace, err := a.sessionGitWorkspace(req.SessionID)
+	if err != nil {
+		return GitFileDetail{}, err
+	}
+	commit := strings.TrimSpace(req.Commit)
+	if !validGitCommitHash(commit) {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "提交标识不合法", "The Git commit is invalid")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "当前工作区不是 Git 仓库", "The current workspace is not a Git repository")
+	}
+	root := filepath.Clean(strings.TrimSpace(rootText))
+	resolved := strings.TrimSpace(gitTrimmed(ctx, root, "rev-parse", "--verify", commit+"^{commit}"))
+	if resolved == "" || !strings.EqualFold(resolved, commit) {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "找不到该提交", "The Git commit was not found")
+	}
+	statusRaw, err := runGit(ctx, root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-z", "--no-renames", commit, "--")
+	if err != nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "读取该提交的文件变更失败", "Failed to read the Git commit changes")
+	}
+	path := filepath.ToSlash(req.Path)
+	var change *GitFileChange
+	for _, item := range parseGitNameStatus(statusRaw) {
+		if item.Path == path {
+			copy := item
+			change = &copy
+			break
+		}
+	}
+	if change == nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "该文件不在此提交的变更中", "The file is not part of this Git commit")
+	}
+	return readGitCommitFileDetail(ctx, root, commit, *change)
+}
+
+// sessionGitWorkspace resolves the Git working directory for a conversation.
+// An existing conversation uses its bound environment (or recorded session
+// root). A brand-new conversation with no session yet resolves the app's
+// currently active workspace, because Git is a working-directory concern rather
+// than a session concern. When no workspace can be resolved it returns
+// errGitWorkspaceNotFound. The active-workspace fallback is deliberately limited
+// to sessions that do not exist (id < 1) so a missing or broken session never
+// reroutes destructive Git operations to the wrong repository.
 func (a *App) sessionGitWorkspace(id int64) (string, error) {
+	if id < 1 {
+		if workspace := a.activeEnvironmentWorkspace(); workspace != "" {
+			return workspace, nil
+		}
+		return "", errGitWorkspaceNotFound
+	}
 	item, ok, err := a.store.Store().SessionByID(id)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		return "", fmt.Errorf("conversation not found: %d", id)
-	}
-	workspace := a.sessionWorkspace(item.EnvironmentID, "")
-	if workspace == "" {
-		if changes, changeErr := readSessionChanges(item.SessionDir); changeErr == nil {
-			workspace = changes.Root
+	if ok {
+		workspace := a.sessionWorkspace(item.EnvironmentID, "")
+		if workspace == "" {
+			if changes, changeErr := readSessionChanges(item.SessionDir); changeErr == nil {
+				workspace = changes.Root
+			}
+		}
+		if workspace != "" {
+			return workspace, nil
 		}
 	}
-	if workspace == "" {
-		return "", errors.New("conversation workspace not found")
+	return "", errGitWorkspaceNotFound
+}
+
+// activeEnvironmentWorkspace returns the path of the app's currently active
+// environment (the working directory), falling back to the last used one.
+func (a *App) activeEnvironmentWorkspace() string {
+	cfg := a.store.Get()
+	if env := cfg.environmentByID(cfg.ActiveEnvID); env != nil {
+		if path := strings.TrimSpace(env.Path); path != "" {
+			return path
+		}
 	}
-	return workspace, nil
+	return strings.TrimSpace(cfg.LastEnvironment)
 }
 
 func (a *App) sessionWorkspace(environmentID, fallback string) string {
@@ -320,6 +807,7 @@ func runGit(ctx context.Context, root string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", root}, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
 	configureGitProcess(command)
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
@@ -402,12 +890,17 @@ func parseGitStatus(raw string) []GitFileChange {
 		}
 		x, y := record[0], record[1]
 		path := filepath.ToSlash(record[3:])
+		conflicted := isGitConflictStatus(x, y)
 		change := GitFileChange{
-			Path:      path,
-			Status:    gitStatusName(x, y),
-			Staged:    x != ' ' && x != '?',
-			Unstaged:  y != ' ' && y != '?',
-			Untracked: x == '?' && y == '?',
+			Path:       path,
+			Status:     gitStatusName(x, y),
+			Staged:     x != ' ' && x != '?',
+			Unstaged:   y != ' ' && y != '?',
+			Untracked:  x == '?' && y == '?',
+			Conflicted: conflicted,
+		}
+		if conflicted {
+			change.ConflictStatus = string([]byte{x, y})
 		}
 		if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
 			if index+1 < len(records) {
@@ -439,6 +932,19 @@ func readGitFileDetail(snapshot GitSnapshot, scope string, change GitFileChange)
 	case "worktree":
 		beforeData, detail.Before = readGitBlobVersion(ctx, snapshot.Root, "HEAD", beforePath)
 		afterData, detail.After, err = readWorktreeVersion(snapshot.Root, change.Path)
+	case "staged":
+		beforeData, detail.Before = readGitBlobVersion(ctx, snapshot.Root, "HEAD", beforePath)
+		afterData, detail.After = readGitIndexVersion(ctx, snapshot.Root, change.Path)
+	case "unstaged":
+		beforeData, detail.Before = readGitIndexVersion(ctx, snapshot.Root, change.Path)
+		afterData, detail.After, err = readWorktreeVersion(snapshot.Root, change.Path)
+	case "untracked":
+		// An untracked file has no previous revision at all: keep the before
+		// version empty and explicitly non-existent so the diff reports the
+		// worktree content as added lines instead of silently falling back to
+		// a HEAD blob (which does not exist and yields an empty before side).
+		beforeData, detail.Before = nil, GitFileVersion{Exists: false}
+		afterData, detail.After, err = readWorktreeVersion(snapshot.Root, change.Path)
 	case "branch":
 		if snapshot.BaseBranch == "" {
 			return GitFileDetail{}, errors.New("base branch not found")
@@ -466,6 +972,41 @@ func readGitFileDetail(snapshot GitSnapshot, scope string, change GitFileChange)
 		detail.After.Width, detail.After.Height = gitImageDimensions(afterData)
 	case "text":
 		beforeText, afterText := string(beforeData), string(afterData)
+		detail.Before.Text = beforeText
+		detail.After.Text = afterText
+		detail.Before.LineCount = countGitLines(beforeText)
+		detail.After.LineCount = countGitLines(afterText)
+		detail.Hunks, detail.Added, detail.Deleted = makeDiff(beforeText, afterText)
+	}
+	return detail, nil
+}
+
+func readGitCommitFileDetail(ctx context.Context, root, commit string, change GitFileChange) (GitFileDetail, error) {
+	detail := GitFileDetail{
+		Path: change.Path, OldPath: change.OldPath, Scope: "commit", Status: change.Status,
+		Hunks: []DiffHunk{},
+	}
+	beforePath := change.Path
+	if change.OldPath != "" {
+		beforePath = change.OldPath
+	}
+	beforeData, before := readGitBlobVersion(ctx, root, commit+"^", beforePath)
+	afterData, after := readGitBlobVersion(ctx, root, commit, change.Path)
+	detail.Before, detail.After = before, after
+	detail.MimeType = detectGitMime(change.Path, afterData, beforeData)
+	detail.Kind = gitPreviewKind(detail.MimeType, beforeData, afterData, detail.Before, detail.After)
+	detail.Before.MimeType = detail.MimeType
+	detail.After.MimeType = detail.MimeType
+	switch detail.Kind {
+	case "image":
+		detail.Before.ImageData = encodeGitImage(detail.MimeType, beforeData)
+		detail.After.ImageData = encodeGitImage(detail.MimeType, afterData)
+		detail.Before.Width, detail.Before.Height = gitImageDimensions(beforeData)
+		detail.After.Width, detail.After.Height = gitImageDimensions(afterData)
+	case "text":
+		beforeText, afterText := string(beforeData), string(afterData)
+		detail.Before.Text = beforeText
+		detail.After.Text = afterText
 		detail.Before.LineCount = countGitLines(beforeText)
 		detail.After.LineCount = countGitLines(afterText)
 		detail.Hunks, detail.Added, detail.Deleted = makeDiff(beforeText, afterText)
@@ -493,6 +1034,35 @@ func readGitBlobVersion(ctx context.Context, root, ref, path string) ([]byte, Gi
 	}
 	version.ModifiedAt = gitPathTimestamp(ctx, root, ref, path, false)
 	version.CreatedAt = gitPathTimestamp(ctx, root, ref, path, true)
+	if version.Size > maxGitPreviewSize {
+		return nil, version
+	}
+	data, err := runGitBytes(ctx, root, "show", spec)
+	if err != nil {
+		return nil, version
+	}
+	return data, version
+}
+
+func readGitIndexVersion(ctx context.Context, root, path string) ([]byte, GitFileVersion) {
+	version := GitFileVersion{}
+	path = filepath.ToSlash(path)
+	if path == "" {
+		return nil, version
+	}
+	spec := ":" + path
+	sizeText, err := runGit(ctx, root, "cat-file", "-s", spec)
+	if err != nil {
+		return nil, version
+	}
+	version.Exists = true
+	version.Size, _ = strconv.ParseInt(strings.TrimSpace(sizeText), 10, 64)
+	if entry, entryErr := runGitBytes(ctx, root, "ls-files", "--stage", "-z", "--", path); entryErr == nil {
+		fields := strings.Fields(strings.TrimSuffix(string(entry), "\x00"))
+		if len(fields) > 0 {
+			version.Permissions = fields[0]
+		}
+	}
 	if version.Size > maxGitPreviewSize {
 		return nil, version
 	}
@@ -542,6 +1112,7 @@ func runGitBytes(ctx context.Context, root string, args ...string) ([]byte, erro
 	commandArgs := append([]string{"-C", root}, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
 	configureGitProcess(command)
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := command.Output()
 	if err != nil {
 		return nil, err
@@ -667,6 +1238,8 @@ func parseGitNameStatus(raw string) []GitFileChange {
 
 func gitStatusName(x, y byte) string {
 	switch {
+	case isGitConflictStatus(x, y):
+		return "conflicted"
 	case x == '?' && y == '?':
 		return "untracked"
 	case x == 'D' || y == 'D':
@@ -677,6 +1250,16 @@ func gitStatusName(x, y byte) string {
 		return "renamed"
 	default:
 		return "modified"
+	}
+}
+
+func isGitConflictStatus(x, y byte) bool {
+	status := string([]byte{x, y})
+	switch status {
+	case "DD", "AU", "UD", "UA", "DU", "AA", "UU":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -717,4 +1300,39 @@ func applyGitNumstat(set *GitChangeSet, raw string) {
 		set.Deleted += file.Deleted
 	}
 	sort.Slice(set.Files, func(i, j int) bool { return set.Files[i].Path < set.Files[j].Path })
+}
+
+func applyGitScopedNumstat(set *GitChangeSet, raw string, staged bool) {
+	byPath := make(map[string]int, len(set.Files))
+	for index := range set.Files {
+		byPath[set.Files[index].Path] = index
+	}
+	records := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	if strings.Contains(raw, "\x00") {
+		records = strings.Split(raw, "\x00")
+	}
+	for _, record := range records {
+		parts := strings.SplitN(record, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		index, ok := byPath[filepath.ToSlash(parts[2])]
+		if !ok {
+			continue
+		}
+		file := &set.Files[index]
+		if parts[0] == "-" || parts[1] == "-" {
+			file.Binary = true
+			continue
+		}
+		added, _ := strconv.Atoi(parts[0])
+		deleted, _ := strconv.Atoi(parts[1])
+		if staged {
+			file.StagedAdded = added
+			file.StagedDeleted = deleted
+		} else {
+			file.UnstagedAdded = added
+			file.UnstagedDeleted = deleted
+		}
+	}
 }

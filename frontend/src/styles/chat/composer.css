@@ -1,5 +1,4 @@
 .chat-main__input { flex: 0 0 auto; padding: 12px 16px 18px; display: flex; flex-direction: column; gap: 8px; }
-.chat-ai-disclaimer { margin: 2px 2px 0; padding: 0; color: var(--faint); font-size: var(--fs-12); line-height: 1.4; text-align: center; user-select: none; }
 .chat-plan-dock { min-height: 0; flex: 0 1 auto; max-height: min(46vh, 460px); display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 .pending-prompts { flex: 0 1 auto; min-height: 0; display: flex; align-items: flex-start; gap: 8px; padding: 0 4px; overflow: hidden; background: transparent; }
 .pending-prompts__header { height: 32px; flex: 0 0 auto; display: flex; align-items: center; gap: 5px; padding: 0 2px; color: var(--muted); font-size: var(--fs-12); font-weight: 650; white-space: nowrap; }

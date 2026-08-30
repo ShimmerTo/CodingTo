@@ -2,7 +2,7 @@
 
 > 一个本地优先、轻量流畅的多 Agent 桌面工作台。
 >
-> 多 Agent 隔离 · 使用简单 · IM远程操控 · 界面清爽 · 高度自定义 · 低内存占用
+> 多 Agent 隔离 · 使用简单 · IM远程操控 · 界面清爽 · 高度自定义 · 低内存占用 · 终端 · Git管理
 
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://www.apache.org/licenses/LICENSE-2.0)
@@ -48,8 +48,15 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 
 ![Agent列表](./assets/imgs/img2.png)
 ![Agent配置](./assets/imgs/img3.png)
-
+![终端](./assets/imgs/img10.png)
+![Git](./assets/imgs/img11.png)
+![文件对比](./assets/imgs/img12.png)
 ## 📝 更新日志
+
+# 2026-08-30
+- feat 新增chatgpt plus 5小时额度显示；增加额度快捷展示
+- feat 新增终端(git bash/powershell/cmd/ssh)
+- feat 新增git管理（提交/回退/推送/切换分支，仿jetbrains）
 
 # 2026-08-24
 - feat 新增chatgpt授权安全接入

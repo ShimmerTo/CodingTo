@@ -18,3 +18,9 @@
 .topbar-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--muted); background: transparent; cursor: pointer; transition: color .15s, background .15s; }
 .topbar-btn:hover { color: var(--text); background: var(--hover); }
 .topbar-btn[aria-pressed="true"] { color: var(--accent-fg); background: var(--accent); }
+.git-topbar-btn { position: relative; }
+.git-topbar-btn.has-conflict { color: #ef4444; }
+.git-topbar-btn__push-dot { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border: 2px solid var(--surface-2); border-radius: 50%; background: #ef4444; }
+.git-topbar-btn__badge { position: absolute; top: -4px; right: -5px; min-width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border: 2px solid var(--bg); border-radius: 999px; color: #fff; background: #ef4444; font-size: 9px; font-weight: 700; line-height: 1; }
+.terminal-slide-enter-active, .terminal-slide-leave-active { transition: transform .16s ease, opacity .16s ease; }
+.terminal-slide-enter-from, .terminal-slide-leave-to { transform: translateY(18px); opacity: 0; }

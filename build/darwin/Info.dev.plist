@@ -9,11 +9,11 @@
         <key>CFBundleIdentifier</key>
             <string>dev.codingto.desktop.dev</string>
         <key>CFBundleVersion</key>
-            <string>0.1.10</string>
+            <string>0.1.11</string>
         <key>CFBundleGetInfoString</key>
             <string>Local-first desktop workspace for Pi Agent (development)</string>
         <key>CFBundleShortVersionString</key>
-            <string>0.1.10</string>
+            <string>0.1.11</string>
         <key>CFBundleIconFile</key>
             <string>icons</string>
         <key>CFBundleIconName</key>

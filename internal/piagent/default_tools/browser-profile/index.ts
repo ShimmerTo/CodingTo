@@ -46,6 +46,8 @@ const authenticatedTaskHeaded = process.env.CODINGTO_BROWSER_PROFILE_AUTHENTICAT
 
 const IDENTITY_DIALOG_TITLE = '选择浏览器身份';
 const NEW_PROFILE_OPTION = '+ 新建 Profile';
+const AUTH_EVIDENCE_VALUES = ['login_form', 'login_redirect', 'session_expired', 'continue_existing_lease'] as const;
+const AUTH_EVIDENCE = new Set<string>(AUTH_EVIDENCE_VALUES);
 const LOGIN_PATH_RE = /\/(login|signin|sign-in|sign_in|signup|sso|oauth|auth)([/?#]|$)/i;
 const RETURN_URL_KEYS = ['ref', 'return_url', 'returnUrl', 'redirect', 'redirect_uri', 'continue'];
 
@@ -270,6 +272,7 @@ export default function (api: ExtensionAPI) {
     name: 'codingto_browser_prepare',
     description: [
       'Browser Profile 登录态管理器。仅当你已经访问目标 URL 并发现页面需要登录时调用，公开页面不要调用。',
+      '首次调用必须提供明确认证证据：可见登录表单、跳转到登录页或已登录会话失效。HTTP 403/429、Access Denied、验证码、WAF、安全检查或反机器人提示本身不属于认证证据，不得因此调用本工具或弹出 Profile 选择；应继续使用普通浏览器处理或向用户说明站点限制。',
       '必须传入用户最初给出的目标页面 URL，不要传登录重定向 URL。',
       '本工具让用户选择同域 Profile（最多展示 20 个），选择“+ 新建 Profile”会在同一对话框内联输入新 Key 并由 Go 服务创建；然后由 CodingTo 的 Go 服务启动并持有 Chrome。',
       'status=ready 时会返回 leaseId 和实际 headed 模式；目标页已经打开，后续必须调用 codingto_browser_execute。',
@@ -283,14 +286,23 @@ export default function (api: ExtensionAPI) {
       type: 'object',
       properties: {
         url: { type: 'string', description: '已确认需要登录的 http/https 目标页面地址。' },
+        evidence: {
+          type: 'string',
+          enum: [...AUTH_EVIDENCE_VALUES],
+          description: '认证证据：login_form=可见登录表单，login_redirect=跳转登录页，session_expired=明确会话失效，continue_existing_lease=仅用于继续当前会话已有租约。403/429、WAF 或反机器人限制不能作为认证证据。',
+        },
         headed: { type: 'boolean', description: '可选。true 为有头，false 为无头；需要用户登录时会强制有头。' },
       },
-      required: ['url'],
+      required: ['url', 'evidence'],
     },
     async execute(_id: string, params: any, _signal?: any, onUpdate?: any, ctx?: any) {
       const target = normalizeTarget(String(params?.url || ''));
       if (!target) {
         return toolResult({ status: 'error', code: 'INVALID_URL', message: '仅支持不带内嵌凭据的 http/https URL。' });
+      }
+      const evidence = String(params?.evidence || '');
+      if (!AUTH_EVIDENCE.has(evidence)) {
+        return toolResult({ status: 'error', code: 'AUTH_EVIDENCE_REQUIRED', message: '调用 Browser Profile 前必须确认页面存在明确的登录证据；HTTP 403/429 或反机器人限制不属于登录证据。' });
       }
       const headed = typeof params?.headed === 'boolean' ? params.headed : existingProfileHeaded;
       const progress = (text: string) => onUpdate?.({
@@ -328,6 +340,10 @@ export default function (api: ExtensionAPI) {
           if (response.code !== 'LEASE_NOT_FOUND') return toolResult(response);
         }
         if (active) await closeRememberedLease(active);
+
+        if (evidence === 'continue_existing_lease') {
+          return toolResult({ status: 'error', code: 'LEASE_NOT_FOUND', message: '当前会话没有可继续的 Browser Profile 租约，请先重新确认页面是否确实需要登录。' });
+        }
 
         for (;;) {
           const candidates = await listProfilesForOrigin(target.origin);
@@ -465,7 +481,7 @@ export default function (api: ExtensionAPI) {
           '# Browser Profile 登录继续',
           '',
           '用户已在等待登录的流程中发来一条消息。',
-          `立即调用 codingto_browser_prepare，参数 url 为 ${pending.targetUrl}、headed 为 ${pending.headed !== false}，通过现有 lease 验证页面。`,
+          `立即调用 codingto_browser_prepare，参数 url 为 ${pending.targetUrl}、evidence 为 continue_existing_lease、headed 为 ${pending.headed !== false}，通过现有 lease 验证页面。`,
           '不要重新访问匿名浏览器，也不要再次询问用户选择 Profile。',
         ].join('\n')],
         exclude: [],

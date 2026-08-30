@@ -91,9 +91,9 @@ func main() {
 	mainWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "CodingTo",
-		Width:            1360,
+		Width:            1440,
 		Height:           860,
-		MinWidth:         980,
+		MinWidth:         1080,
 		MinHeight:        680,
 		Frameless:        true,
 		EnableFileDrop:   true,
@@ -170,6 +170,12 @@ func main() {
 		if len(files) > 0 {
 			application.Get().Event.Emit("attachments:dropped", map[string]any{"files": files})
 		}
+	})
+	mainWindow.OnWindowEvent(events.Common.WindowMaximise, func(event *application.WindowEvent) {
+		application.Get().Event.Emit("window:maximised")
+	})
+	mainWindow.OnWindowEvent(events.Common.WindowUnMaximise, func(event *application.WindowEvent) {
+		application.Get().Event.Emit("window:unmaximised")
 	})
 	appService.SetWindow(mainWindow)
 	setupSystemTray(app, mainWindow, appService.GetBootstrap().Config.Preferences.Language, beginShutdown)

@@ -14,6 +14,7 @@ import (
 	"codingto/internal/steward"
 	"codingto/internal/steward/connectors"
 	"codingto/internal/subagentbridge"
+	terminaldomain "codingto/internal/terminal"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -23,9 +24,12 @@ type App struct {
 	store      *ConfigStore
 	agent      *AgentService
 	extensions *extensions.Manager
+	terminal   *terminaldomain.Manager
 	window     *application.WebviewWindow
 	piInstall  sync.Mutex
 	moduleMu   sync.Mutex
+	// gitWriteMu serializes repository mutations while allowing concurrent reads.
+	gitWriteMu sync.Mutex
 	modules    []RuntimeModule
 	// steward is the always-on bot-relay service (nil when construction fails
 	// so the desktop app keeps working without it).
@@ -118,6 +122,13 @@ func NewApp(modules ...RuntimeModule) (*App, error) {
 		store:      store,
 		extensions: extensions,
 	}
+	result.terminal = terminaldomain.NewManager(func(name string, payload any) {
+		if app := application.Get(); app != nil && app.Event != nil {
+			app.Event.Emit(name, payload)
+		}
+	}, func(format string, args ...any) {
+		applog.Errorf(format, args...)
+	})
 	result.agent = NewAgentService(store, result.runtimeEnvironment)
 	result.agent.runtimeRelease = result.releaseRuntimeSession
 	for _, module := range modules {
@@ -281,6 +292,7 @@ func (a *App) ServiceShutdown() error {
 
 func (a *App) shutdown() error {
 	a.cancelChatGPTFlow()
+	terminalErr := a.terminal.Close()
 	agentErr := a.agent.Close()
 	a.moduleMu.Lock()
 	modules := append([]RuntimeModule(nil), a.modules...)
@@ -298,6 +310,9 @@ func (a *App) shutdown() error {
 	applog.Close()
 	if agentErr != nil {
 		return agentErr
+	}
+	if terminalErr != nil {
+		return terminalErr
 	}
 	if moduleErr != nil {
 		return moduleErr

@@ -351,7 +351,7 @@ func (s *Service) prepare(ctx context.Context, req PrepareRequest, targetURL, or
 				existing.TargetURL, existing.Origin = targetURL, origin
 			}
 			response := s.assessResponseUntil(ctx, existing, 5*time.Second)
-			response = s.ensureLoginVisible(ctx, existing, response)
+			response = s.ensureInteractiveVisible(ctx, existing, response)
 			existing.opMu.Unlock()
 			if shouldCloseAfterResponse(response) {
 				_ = s.closeLease(existing.ID)
@@ -393,7 +393,7 @@ func (s *Service) prepare(ctx context.Context, req PrepareRequest, targetURL, or
 	err = s.launchChrome(ctx, l)
 	if err == nil {
 		response := s.assessResponseUntil(ctx, l, 8*time.Second)
-		response = s.ensureLoginVisible(ctx, l, response)
+		response = s.ensureInteractiveVisible(ctx, l, response)
 		l.opMu.Unlock()
 		if response.Code == "CHROME_LAUNCH_FAILED" {
 			_ = s.closeLease(leaseID)
@@ -447,7 +447,7 @@ func (s *Service) handleVerify(w http.ResponseWriter, r *http.Request, leaseID s
 		return
 	}
 	response := s.assessResponseUntil(r.Context(), l, 5*time.Second)
-	response = s.ensureLoginVisible(r.Context(), l, response)
+	response = s.ensureInteractiveVisible(r.Context(), l, response)
 	l.opMu.Unlock()
 	if shouldCloseAfterResponse(response) {
 		_ = s.closeLease(l.ID)
@@ -484,7 +484,7 @@ func (s *Service) handleExecute(w http.ResponseWriter, r *http.Request, leaseID 
 		}
 	}
 	assessment := s.assessResponseUntil(r.Context(), l, 5*time.Second)
-	if assessment = s.ensureLoginVisible(r.Context(), l, assessment); assessment.Status != "ready" {
+	if assessment = s.ensureInteractiveVisible(r.Context(), l, assessment); assessment.Status != "ready" {
 		l.opMu.Unlock()
 		if shouldCloseAfterResponse(assessment) {
 			_ = s.closeLease(l.ID)
@@ -564,6 +564,17 @@ func (s *Service) assessResponse(ctx context.Context, l *lease) Response {
 		return responseForLease(l, "ready", "")
 	}
 	l.State = StateWaiting
+	if assessment.status == "visibility_required" {
+		response := responseForLease(l, "not_ready", "")
+		if l.Headed {
+			response.Code = "HTTP_ACCESS_BLOCKED"
+			response.Message = "目标页面返回访问限制（HTTP 403/429），请在已打开的窗口中完成站点安全检查或确认访问权限后继续。"
+		} else {
+			response.Code = "HEADLESS_ACCESS_BLOCKED"
+			response.Message = "目标页面拒绝了无头浏览器访问，正在切换到可见浏览器重试。"
+		}
+		return response
+	}
 	message := "浏览器页面尚未就绪，请在已打开的浏览器中完成登录后继续。"
 	if assessment.status == "not_ready" {
 		message = "浏览器页面尚未加载完成，请稍后重试。"
@@ -576,17 +587,21 @@ func (s *Service) assessResponse(ctx context.Context, l *lease) Response {
 	return response
 }
 
-// ensureLoginVisible enforces the security invariant that interactive login is
-// never left in a headless browser. The same persistent profile and lease are
-// retained while Chrome is restarted in headed mode.
-func (s *Service) ensureLoginVisible(ctx context.Context, l *lease, response Response) Response {
-	if response.Status != "login_required" || l.Headed {
+// ensureInteractiveVisible keeps login, security checks and headless access
+// blocks out of an invisible browser. The same persistent profile and lease
+// are retained while Chrome is restarted once in headed mode.
+func (s *Service) ensureInteractiveVisible(ctx context.Context, l *lease, response Response) Response {
+	if !shouldOpenVisibleBrowser(l, response) {
 		return response
 	}
 	if err := s.restartChrome(ctx, l, true); err != nil {
 		return responseErrorForLease(l, "CHROME_LAUNCH_FAILED", "could not open a visible browser for login")
 	}
 	return s.assessResponseUntil(ctx, l, 5*time.Second)
+}
+
+func shouldOpenVisibleBrowser(l *lease, response Response) bool {
+	return !l.Headed && (response.Status == "login_required" || response.Code == "HEADLESS_ACCESS_BLOCKED")
 }
 
 func requestedHeaded(value *bool, fallback bool) bool {

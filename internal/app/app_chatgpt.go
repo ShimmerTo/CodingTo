@@ -302,8 +302,9 @@ func (a *App) ChatGPTUsage() (ProviderUsage, error) {
 		return ProviderUsage{}, errors.New("无法查询 ChatGPT 使用额度，请稍后重试")
 	}
 	return ProviderUsage{
-		Rolling: UsageWindow{Percent: usage.Rolling.Percent, ResetSeconds: usage.Rolling.ResetSeconds},
-		Weekly:  UsageWindow{Percent: usage.Weekly.Percent, ResetSeconds: usage.Weekly.ResetSeconds},
+		PlanType: usage.PlanType,
+		Rolling:  UsageWindow{Percent: usage.Rolling.Percent, ResetSeconds: usage.Rolling.ResetSeconds},
+		Weekly:   UsageWindow{Percent: usage.Weekly.Percent, ResetSeconds: usage.Weekly.ResetSeconds},
 	}, nil
 }
 

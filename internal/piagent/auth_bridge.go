@@ -46,8 +46,9 @@ type CodexUsageWindow struct {
 
 // CodexUsage contains the rolling and weekly ChatGPT subscription quotas.
 type CodexUsage struct {
-	Rolling CodexUsageWindow `json:"rolling"`
-	Weekly  CodexUsageWindow `json:"weekly"`
+	PlanType string           `json:"planType,omitempty"`
+	Rolling  CodexUsageWindow `json:"rolling"`
+	Weekly   CodexUsageWindow `json:"weekly"`
 }
 
 // RunOpenAICodexLogin delegates the complete OpenAI Codex OAuth flow and

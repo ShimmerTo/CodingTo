@@ -634,7 +634,6 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
         </div>
       </div>
     </div>
-    <p class="chat-ai-disclaimer" aria-live="polite">{{ t.ai_task_disclaimer }}</p>
   </footer>
 </template>
 

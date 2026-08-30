@@ -71,6 +71,7 @@ async function main() {
 		const response = await fetch("https://chatgpt.com/backend-api/wham/usage", { headers });
 		if (!response.ok) throw new Error(`ChatGPT usage request failed (${response.status})`);
 		const body = await response.json();
+		const planType = typeof body?.plan_type === "string" ? body.plan_type.trim().toLowerCase() : "";
 		const primaryWindow = body?.rate_limit?.primary_window;
 		const secondaryWindow = body?.rate_limit?.secondary_window;
 		const weeklyWindow = secondaryWindow ?? primaryWindow;
@@ -93,6 +94,7 @@ async function main() {
 		emit({
 			type: "completed",
 			usage: {
+				planType,
 				rolling: secondaryWindow ? toWindow(primaryWindow) : {},
 				weekly: toWindow(weeklyWindow),
 			},

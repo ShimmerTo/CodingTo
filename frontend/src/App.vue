@@ -9,8 +9,8 @@ import { Call } from '@wailsio/runtime'
 import { extensionIcon } from './extensionIcons'
 import {
   abortPrompt, chooseSessionDir, chooseWorkspace, closeWindow, createSession, deleteAgent,
-  chatgptAccount,
-  getBootstrap, getSessionChanges, getSessionHistory, getSessionRuntimeState, getStewardProfile, listSessions, minimise, onEvent,
+  chatgptAccount, chatgptUsage,
+  getBootstrap, getProviderBalance, getProviderUsage, getSessionChanges, getSessionHistory, getSessionRuntimeState, getStewardProfile, listSessions, minimise, onEvent,
   getExtensions, getAgentExtensions, installPi, manageExtension, restartAgent, saveConfig,
   saveFigmaConfig, sendAgentCommand, startPrompt, testModel, toggleMaximise,
   saveBrowserProfile,
@@ -27,12 +27,19 @@ import {
   installAgentExtension as beInstallAgentExtension,
   uninstallAgentExtension as beUninstallAgentExtension,
   deleteAgentExtensionDir as beDeleteAgentExtensionDir,
-  listBotChannels,
+  listBotChannels, getSessionGitAvailability,
   testDBConnection, getDBAuditLogs,
   testSSHConnection, chooseSSHKeyFile
 } from './backend'
 import { buildT } from './i18n'
 import { reconcileSshConfigResult } from './utils/sshConfig'
+import {
+  fetchProviderQuota,
+  getProviderQuotaCache,
+  normalizeChatGPTUsage,
+  normalizeOpenCodeUsage,
+  PROVIDER_QUOTA_CACHE_MS
+} from './utils/providerQuota'
 import ChatView from './ChatView.vue'
 import logo from './assets/logo.png'
 import AppDialogs from './components/AppDialogs.vue'
@@ -49,6 +56,7 @@ const PluginsPage = defineAsyncComponent(() => import('./components/pages/Plugin
 const MemoryConfigDialog = defineAsyncComponent(() => import('./components/MemoryConfigDialog.vue'))
 const PlanConfigDialog = defineAsyncComponent(() => import('./components/PlanConfigDialog.vue'))
 const GlobalPromptConfigDialog = defineAsyncComponent(() => import('./components/GlobalPromptConfigDialog.vue'))
+const GitManagementDialog = defineAsyncComponent(() => import('./components/chat/GitManagementDialog.vue'))
 const SettingsPage = defineAsyncComponent(() => import('./components/pages/SettingsPage.vue'))
 const SkillsPage = defineAsyncComponent(() => import('./components/pages/SkillsPage.vue'))
 const StewardPage = defineAsyncComponent(() => import('./components/pages/StewardPage.vue'))
@@ -103,6 +111,8 @@ const sidebarOpen = ref(true)
 // 让后台清理（关闭 agent 进程、steward 渠道等，最多数秒）期间有即时反馈，
 // 避免界面看起来像卡死。
 const shuttingDown = ref(false)
+// 窗口最大化状态：用于切换 border-radius 等样式，避免最大化时出现边角空隙。
+const isMaximised = ref(false)
 // 管家是否已连接任意渠道：用于底部按钮的手机图标颜色（绿色=已连接 / 灰色=未连接）。
 const stewardConnected = ref(false)
 async function refreshStewardConnected() {
@@ -183,6 +193,9 @@ const config = reactive({
   systemNotificationEnabled: true
 })
 const draft = ref('')
+// 「添加到对话」功能最近一次新建并仍在使用的对话 id。当用户从 Git 管理
+// 文件列表反复添加时，只要当前仍停留在该对话就复用而非重复新建。
+const addToChatSessionId = ref('')
 // 未发送内容（输入框草稿）按工作空间分别持久化：每个工作空间各自保存一份，
 // 刷新页面后按当前激活的工作空间恢复，切换工作空间时自动保存/载入对应草稿。
 // 输入框内容变化时，实时保存当前工作空间的草稿。
@@ -493,6 +506,48 @@ const messagesList = ref([])
 const loadingHistory = ref(false)
 const tasks = ref([])
 const activeTaskId = ref('')
+const gitDialogOpen = ref(false)
+const gitAvailability = ref({ isRepository: false, root: '', currentBranch: '', changeCount: 0, ahead: 0, hasConflicts: false })
+let gitAvailabilityRequest = 0
+
+async function refreshGitAvailability() {
+  const sessionId = Number(activeTaskId.value) || 0
+  const request = ++gitAvailabilityRequest
+  try {
+    const result = await getSessionGitAvailability(sessionId)
+    if (request !== gitAvailabilityRequest || sessionId !== (Number(activeTaskId.value) || 0)) return
+    gitAvailability.value = { isRepository: false, root: '', currentBranch: '', changeCount: 0, ahead: 0, hasConflicts: false, ...(result || {}) }
+    if (!gitAvailability.value.isRepository) gitDialogOpen.value = false
+  } catch {
+    if (request !== gitAvailabilityRequest) return
+    gitAvailability.value = { isRepository: false, root: '', currentBranch: '', changeCount: 0, ahead: 0, hasConflicts: false }
+    gitDialogOpen.value = false
+  }
+}
+
+watch(activeTaskId, () => { void refreshGitAvailability() }, { immediate: true })
+// 终端与 Git 只跟当前工作目录相关：切换活动工作区时刷新可用性（首页模式 activeTaskId 不变）。
+watch(() => config.activeEnvId, () => { void refreshGitAvailability() })
+
+function openGitManager() {
+  if (!gitAvailability.value.isRepository) return
+  gitDialogOpen.value = true
+}
+
+function updateGitAvailability(value) {
+  gitAvailability.value = { ...gitAvailability.value, ...(value || {}) }
+}
+
+function requestAgentConflictResolution(payload) {
+  const files = Array.isArray(payload?.files) && payload.files.length ? payload.files.join(', ') : t.value.gitConflictFilesUnknown
+  const prompt = t.value.gitConflictAgentPrompt
+    .replace('{branch}', payload?.branch || 'HEAD')
+    .replace('{root}', payload?.root || gitAvailability.value.root || '')
+    .replace('{files}', files)
+  draft.value = draft.value.trim() ? `${draft.value.trim()}\n\n${prompt}` : prompt
+  gitDialogOpen.value = false
+  activePage.value = 'chat'
+}
 // 首页 / 新建对话 模式：未绑定任何历史会话。草稿（未发送内容）只在此模式下
 // 显示并持久化；查看历史对话时输入框用于续写该对话，不显示也不覆盖工作空间草稿。
 const isHomeMode = computed(() => activeTaskId.value === '')
@@ -549,6 +604,8 @@ let offSubagentEvent
 let offExtensionsChanged
 let offStewardStatus
 let offStewardPermission
+let offMaximised
+let offUnmaximised
 let changeRefreshTimer
 let changeRefreshRequest = 0
 // Detached subagent events can race ahead of the parent tool message. Keep a
@@ -645,6 +702,10 @@ const nav = computed(() => [
   { id: 'models', label: t.value.modelsMenu, icon: Brain }
   // { id: 'docs', label: t.value.docs, icon: BookOpen }
 ])
+function openPrimaryNav(item) {
+  activePage.value = item.id
+  if (item.id === 'models') void refreshCurrentProviderQuota({ force: true })
+}
 const selectedAgent = computed(() => {
   // 配置页内：始终以 editingAgentId 为准，避免被 newAgentDraft 分支劫持，
   // 否则顶部切换 agent 后整个配置页仍停留在上一个智能体。
@@ -745,6 +806,108 @@ const selectedModelValue = computed({
   }
 })
 const selectedModelUnavailable = computed(() => modelOptions.value.find(option => option.value === selectedModelValue.value)?.disabled === true)
+
+// 左侧“模型”主菜单只展示当前对话 provider 的额度。缓存与模型页共享，
+// 避免切换对话或反复打开模型页时高频访问服务商接口。
+const currentProviderQuota = ref(null)
+let providerQuotaTimer = null
+const currentQuotaProvider = computed(() => {
+  const option = modelOptions.value.find(item => item.value === selectedModelValue.value)
+  return config.providers.find(provider => provider.name === option?.provider) || null
+})
+
+function providerQuotaKind(provider) {
+  if (isOpenAICodexProvider(provider)) return 'chatgpt'
+  if (/opencode\.ai\/zen\/go/i.test(provider?.baseUrl || '')) return 'opencode'
+  if (/^https:\/\/api\.deepseek\.com(?:[/:]|$)/i.test((provider?.baseUrl || '').trim())) return 'deepseek'
+  return ''
+}
+
+async function queryProviderQuota(provider, kind) {
+  if (kind === 'chatgpt') {
+    const usage = normalizeChatGPTUsage(await chatgptUsage())
+    return usage ? { kind, ...usage } : null
+  }
+  if (kind === 'opencode') {
+    const usage = normalizeOpenCodeUsage(await getProviderUsage(provider.name))
+    return usage?.rolling && usage?.weekly && usage?.monthly
+      ? { kind, rolling: usage.rolling, weekly: usage.weekly, monthly: usage.monthly }
+      : null
+  }
+  if (kind === 'deepseek') {
+    const balance = await getProviderBalance(provider.name)
+    return balance?.available && balance?.balances?.length
+      ? { ...balance, kind }
+      : null
+  }
+  return null
+}
+
+const currentProviderQuotaText = computed(() => {
+  const quota = currentProviderQuota.value
+  const percent = window => {
+    const value = Number(window?.percent)
+    return Number.isFinite(value) ? `${Math.max(0, Math.min(100, Math.round(value)))}%` : ''
+  }
+  if (quota?.kind === 'chatgpt') {
+    const windows = [
+      ...(quota.planType === 'plus' ? [[t.value.providerQuotaFiveHours, percent(quota.rolling)]] : []),
+      [t.value.providerQuotaWeek, percent(quota.weekly)]
+    ].filter(([, value]) => value)
+    return windows.map(([label, value]) => `${label} ${value}`).join(' · ')
+  }
+  if (quota?.kind === 'opencode') {
+    const windows = [
+      [t.value.providerQuotaFiveHours, percent(quota.rolling)],
+      [t.value.providerQuotaWeek, percent(quota.weekly)],
+      [t.value.providerQuotaMonth, percent(quota.monthly)]
+    ].filter(([, value]) => value)
+    return windows.map(([label, value]) => `${label} ${value}`).join(' · ')
+  }
+  if (quota?.kind === 'deepseek') {
+    const balances = (quota.balances || []).flatMap(balance => {
+      const amount = Number(balance?.totalBalance)
+      if (!Number.isFinite(amount)) return []
+      const value = amount.toLocaleString(config.preferences.language || undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      })
+      return [`${balance.currency || ''} ${value}`.trim()]
+    })
+    return balances.length ? `${t.value.providerQuotaBalance} ${balances.join(' · ')}` : ''
+  }
+  return ''
+})
+
+async function refreshCurrentProviderQuota({ force = false } = {}) {
+  const provider = currentQuotaProvider.value
+  const kind = providerQuotaKind(provider)
+  if (!provider || !kind) {
+    currentProviderQuota.value = null
+    return
+  }
+
+  const cached = getProviderQuotaCache(kind, provider.name)
+  currentProviderQuota.value = cached?.data ?? null
+  if (!force && cached?.expiresAt > Date.now()) return
+
+  const data = await fetchProviderQuota({
+    kind,
+    providerName: provider.name,
+    force,
+    fetcher: () => queryProviderQuota(provider, kind)
+  })
+  const latestProvider = currentQuotaProvider.value
+  if (latestProvider?.name === provider.name && providerQuotaKind(latestProvider) === kind) {
+    currentProviderQuota.value = data
+  }
+}
+
+watch(
+  () => `${activeTaskId.value}\u0000${currentQuotaProvider.value?.name || ''}\u0000${selectedModelValue.value}`,
+  () => { void refreshCurrentProviderQuota() },
+  { immediate: true }
+)
 
 function applyTheme() {
   const pref = config.preferences.theme
@@ -2216,9 +2379,12 @@ function syncCurrentTask() {
   task.execDurationMs = executionElapsedMs.value
 }
 
-async function ensureConversation(title) {
-  let task = currentTask()
-  if (task) return task
+async function ensureConversation(title, options = {}) {
+  const forceNew = options.forceNew === true
+  if (!forceNew) {
+    const existing = currentTask()
+    if (existing) return existing
+  }
   const agent = selectedAgent.value
   const requestedModel = agent?.defaultModel || config.defaultModel
   // 智能体默认模型可能仍指向已改名/删除的服务商旧标识，创建前解析到当前
@@ -2226,9 +2392,9 @@ async function ensureConversation(title) {
   const providerName = resolveProviderName(agent?.defaultProvider || config.defaultProvider, requestedModel)
   const provider = config.providers.find(p => p.name === providerName)
   const modelName = provider?.models.some(m => m.id === requestedModel) ? requestedModel : provider?.models?.[0]?.id || ''
-  task = await createSession({
+  const task = await createSession({
     agentId: agent?.id || config.activeAgentId,
-    environmentId: config.activeEnvId,
+    environmentId: options.environmentId ?? config.activeEnvId,
     title: Array.from(title.trim()).slice(0, 50).join('') || t.value.chatNewSession,
     provider: providerName,
     model: modelName
@@ -2236,6 +2402,48 @@ async function ensureConversation(title) {
   tasks.value.unshift(task)
   activeTaskId.value = task.id
   return task
+}
+
+// 「添加到对话」：在当前会话绑定的工作空间中新建对话（标题为“新对话”），
+// 并把文件相对路径写入输入框。若当前已停留在本次添加任务打开的对话，
+// 则直接复用并继续追加；追加前输入框已有内容用分号分隔，避免拼接成不可
+// 解析的路径串。全程不关闭 Git 管理弹窗。
+async function addFileToChat(filePath) {
+  const normalized = String(filePath || '').replaceAll('\\', '/').trim()
+  if (!normalized) return
+  // 只有在当前查看的正是本次添加任务打开的对话时才复用，避免误合并到
+  // 用户手动切到的其他会话。
+  const reusable = !!addToChatSessionId.value && String(activeTaskId.value) === String(addToChatSessionId.value)
+  if (!reusable) {
+    await ensureConversation(t.value.chatNewSession, {
+      forceNew: true,
+      environmentId: currentTask()?.environmentId || config.activeEnvId,
+    })
+    addToChatSessionId.value = activeTaskId.value
+    // 把界面切到该新建对话并重置为空对话状态，输入框随后写入文件路径。
+    thinkingLevel.value = defaultThinkingLevelForModel(selectedModel.value)
+    sessionDcgDisabled.value = false
+    changeRefreshRequest += 1
+    messagesList.value = []
+    sessionChanges.value = { root: '', nodes: [], files: [], added: 0, deleted: 0 }
+    sessionChangesLoading.value = false
+    activeAssistant = null
+    error.value = ''
+    pendingPrompts.value = []
+    selectedSkill.value = null
+    promptImages.value = []
+    attachments.value = []
+    tokenStats.value = { input: 0, cached: 0, cacheWrite: 0, output: 0, total: 0 }
+    contextUsage.value = { tokens: 0, contextWindow: contextWindow.value, percent: 0 }
+    executionElapsedMs.value = 0
+    executionRunning.value = false
+    planItems.value = []
+    executionPlan.value = []
+    extensionDialog.value = null
+    draft.value = ''
+    goHome()
+  }
+  draft.value = draft.value.trim() ? `${draft.value.trim()};${normalized}` : normalized
 }
 
 // 后端列表已合并权威运行时状态，可用于修复漏收终态事件后残留的 running。
@@ -4513,6 +4721,9 @@ onMounted(async () => {
   })
   offCleanupEvent = onEvent('session-cleanup:done', applySessionCleanupResult)
   await load()
+  providerQuotaTimer = window.setInterval(() => {
+    void refreshCurrentProviderQuota({ force: true })
+  }, PROVIDER_QUOTA_CACHE_MS)
   // 启动异步清理会话数据的结果通常在 window 渲染后不久就绪，主动拉取一次并展示。
   void fetchSessionCleanupNotice()
   void refreshStewardConnected()
@@ -4545,6 +4756,11 @@ onMounted(async () => {
       sourceTaskId !== ''
       && String(sourceTaskId) === String(activeTaskId.value)
     ) executionRunning.value = !!state?.running
+    if (
+      state?.running === false
+      && targetTaskId !== ''
+      && String(targetTaskId) === String(activeTaskId.value)
+    ) void refreshGitAvailability()
   })
   onEvent('agent:restart_deferred', () => {
     if (extensionRestartPending.value) pushToast('info', t.value.extensionRestartDeferred.replace('{name}', extensionRestartPending.value))
@@ -4570,6 +4786,8 @@ onMounted(async () => {
     void refreshResidentSessionId()
   })
   offStewardPermission = onEvent('steward:permission', handleStewardPermissionUpdate)
+  offMaximised = onEvent('window:maximised', () => { isMaximised.value = true })
+  offUnmaximised = onEvent('window:unmaximised', () => { isMaximised.value = false })
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme)
 })
 
@@ -4578,6 +4796,8 @@ document.addEventListener('click', closeArchivePop)
 
 onBeforeUnmount(() => {
   window.clearTimeout(changeRefreshTimer)
+  window.clearInterval(providerQuotaTimer)
+  providerQuotaTimer = null
   offEvent?.()
   offSubagentEvent?.()
   offState?.()
@@ -4588,12 +4808,14 @@ onBeforeUnmount(() => {
   offExtensionsChanged?.()
   offStewardStatus?.()
   offStewardPermission?.()
+  offMaximised?.()
+  offUnmaximised?.()
   document.removeEventListener('click', closeArchivePop)
 })
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'window--maximised': isMaximised }">
     <header class="titlebar">
       <div class="titlebar__drag">
         <img class="brand-mark" :src="logo" alt="CodingTo" />
@@ -4611,9 +4833,14 @@ onBeforeUnmount(() => {
       <aside class="sidebar" :class="{ 'sidebar--closed': !sidebarOpen, 'sidebar--resizing': sidebarResizing }" :style="sidebarOpen ? { width: sidebarWidth + 'px', flexBasis: sidebarWidth + 'px' } : null">
         <div v-if="sidebarOpen" class="sidebar-resizer" @pointerdown="startSidebarResize"></div>
         <nav class="primary-nav">
-          <button v-for="item in nav" :key="item.id" :class="{ active: activePage === item.id }" @click="activePage = item.id">
+          <button v-for="item in nav" :key="item.id" :class="{ active: activePage === item.id }" @click="openPrimaryNav(item)">
             <component :is="item.icon" :size="14" />
-            <span v-if="sidebarOpen">{{ item.label }}</span>
+            <span v-if="sidebarOpen" class="primary-nav__label">{{ item.label }}</span>
+            <span
+              v-if="sidebarOpen && item.id === 'models' && currentProviderQuotaText"
+              class="primary-nav__quota"
+              :title="`${t.providerQuotaRemainingTitle}: ${currentProviderQuotaText}`"
+            >{{ currentProviderQuotaText }}</span>
             <span v-if="sidebarOpen && item.dev" class="nav-dev">{{ t.devBadge }}</span>
           </button>
         </nav>
@@ -4759,6 +4986,7 @@ onBeforeUnmount(() => {
             :execution-running="executionRunning"
             :session-changes="sessionChanges"
             :session-changes-loading="sessionChangesLoading"
+            :git-availability="gitAvailability"
             :document-preview-request="documentPreviewRequest"
             :document-artifact-focus="documentArtifactFocus"
             :plan-items="planItems"
@@ -4793,6 +5021,7 @@ onBeforeUnmount(() => {
             @respond-subagent-dialog="respondSubagentDialog"
             @ack-subagent-dialog="ackSubagentDialog"
             @refresh-session-changes="refreshSessionChanges"
+            @open-git="openGitManager"
             @artifact-error="pushToast('error', localizeError(String($event)))"
           />
         </section>
@@ -4807,6 +5036,19 @@ onBeforeUnmount(() => {
     <MemoryConfigDialog v-model="showMemoryConfig" />
     <PlanConfigDialog v-model="showPlanConfig" />
     <GlobalPromptConfigDialog v-model="showGlobalPromptConfig" />
+    <GitManagementDialog
+      :open="gitDialogOpen"
+      :session-id="Number(activeTaskId) || 0"
+      :language="config.preferences.language || 'zh-CN'"
+      :agent-running="activeTaskRunning"
+      :model-options="modelOptions"
+      :selected-model-value="selectedModelValue"
+      :t="t"
+      @close="gitDialogOpen = false"
+      @updated="updateGitAvailability"
+      @resolve-conflicts="requestAgentConflictResolution"
+      @add-to-chat="addFileToChat"
+    />
 
     <div v-if="shuttingDown" class="shutdown-overlay" role="status" aria-live="polite">
       <div class="shutdown-overlay__card">

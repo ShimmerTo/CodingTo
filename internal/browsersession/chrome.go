@@ -396,6 +396,12 @@ func assessPage(ctx context.Context, port int, targetOrigin string) (pageAssessm
 			break
 		}
 	}
+	if page.ResponseStatus == http.StatusUnauthorized {
+		return pageAssessment{status: "login_required", reason: "navigation requires authentication"}, nil
+	}
+	if page.ResponseStatus == http.StatusForbidden || page.ResponseStatus == http.StatusTooManyRequests {
+		return pageAssessment{status: "visibility_required", reason: "navigation was blocked by site access controls"}, nil
+	}
 	if page.Challenge || page.Password || page.LoginAction || loginPath || !strings.EqualFold(pageOrigin, targetOrigin) {
 		return pageAssessment{status: "login_required", reason: "login or security challenge"}, nil
 	}

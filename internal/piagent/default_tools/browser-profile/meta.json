@@ -1,7 +1,7 @@
 {
   "name": "Browser Profile",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "tool_name": "codingto_browser_prepare",
-  "description": "Browser Profile 登录态管理器：在需要登录的目标页面上，让用户选择同域 Profile 或由 Go 服务启动并持有可见 Chrome；支持内联新建 Profile（最多展示 20 个）。",
-  "tool_description": "Browser Profile manager: select a same-origin Profile or create one inline, then let the Go service launch and hold a visible Chrome for login."
+  "description": "Browser Profile 登录态管理器：仅在页面有明确认证证据时选择同域 Profile；HTTP 403/429 或反机器人限制不会触发身份选择。",
+  "tool_description": "Browser Profile manager: select a same-origin profile only with explicit authentication evidence; HTTP 403/429 or anti-bot blocks do not trigger identity selection."
 }

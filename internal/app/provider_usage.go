@@ -54,11 +54,13 @@ func (w *UsageWindow) UnmarshalJSON(data []byte) error {
 }
 
 // ProviderUsage carries normalized provider quota windows. OpenCode Go fills
-// rolling (5h), weekly (7d), and monthly (30d); ChatGPT fills the weekly window.
+// rolling (5h), weekly (7d), and monthly (30d); ChatGPT also includes its
+// non-secret subscription plan type so clients can select applicable windows.
 type ProviderUsage struct {
-	Rolling UsageWindow `json:"rolling"`
-	Weekly  UsageWindow `json:"weekly"`
-	Monthly UsageWindow `json:"monthly"`
+	PlanType string      `json:"planType,omitempty"`
+	Rolling  UsageWindow `json:"rolling"`
+	Weekly   UsageWindow `json:"weekly"`
+	Monthly  UsageWindow `json:"monthly"`
 }
 
 // usageEnvelope matches the real API shape: {"usage":{"rolling":...,...}}

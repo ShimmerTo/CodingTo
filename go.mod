@@ -3,6 +3,7 @@ module codingto
 go 1.26.1
 
 require (
+	github.com/aymanbagabas/go-pty v0.2.3
 	github.com/coder/websocket v1.8.14
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.10
@@ -26,6 +27,7 @@ require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/easierway/concurrent_map v1.0.0 // indirect
@@ -65,6 +67,7 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.15 // indirect
 	github.com/tklauser/numcpus v0.10.0 // indirect
+	github.com/u-root/u-root v0.16.0 // indirect
 	github.com/xuri/efp v0.0.0-20241211021726-c4e992084aa6 // indirect
 	github.com/xuri/nfp v0.0.0-20240318013403-ab9948c2c4a7 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

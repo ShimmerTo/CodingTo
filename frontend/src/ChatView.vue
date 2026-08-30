@@ -1,12 +1,13 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { FileCog, Paperclip, PanelRightClose, PanelRightOpen } from 'lucide-vue-next'
+import { FileCog, GitBranch, Paperclip, PanelRightClose, PanelRightOpen, SquareTerminal } from 'lucide-vue-next'
 import { buildT } from './i18n.js'
 import ChatComposer from './components/chat/ChatComposer.vue'
 import ChatHeader from './components/chat/ChatHeader.vue'
 import ChatImagePreview from './components/chat/ChatImagePreview.vue'
 import ChatMessages from './components/chat/ChatMessages.vue'
 import ChatRightSidebar from './components/chat/ChatRightSidebar.vue'
+import TerminalPanel from './components/chat/TerminalPanel.vue'
 
 const props = defineProps({
   config: { type: Object, required: true },
@@ -41,6 +42,7 @@ const props = defineProps({
   executionRunning: { type: Boolean, default: false },
   sessionChanges: { type: Object, default: () => ({ root: '', files: [], added: 0, deleted: 0 }) },
   sessionChangesLoading: { type: Boolean, default: false },
+  gitAvailability: { type: Object, default: () => ({ isRepository: false, currentBranch: '', changeCount: 0, ahead: 0, hasConflicts: false }) },
   documentPreviewRequest: { type: Object, default: null },
   documentArtifactFocus: { type: Object, default: null },
   planItems: { type: Array, default: () => [] },
@@ -62,10 +64,11 @@ const emit = defineEmits([
   'compact', 'respond-extension', 'ack-extension', 'clear-error',
   'respond-subagent-dialog', 'ack-subagent-dialog',
   'update-thinking-open', 'refresh-session-changes', 'edit-pending', 'delete-pending',
-  'artifact-error', 'open-settings'
+  'artifact-error', 'open-settings', 'open-git'
 ])
 
 const rightSidebarOpen = ref(false)
+const terminalOpen = ref(false)
 const previewImage = ref(null)
 const changeFocusRequest = ref(null)
 // 变更消息行尾斜箭头：请求打开 Git 对比框（由 ChatRightSidebar 复用 GitDiffDialog 处理）。
@@ -163,6 +166,22 @@ function toggleSidebar() {
   rightSidebarOpen.value = !rightSidebarOpen.value
 }
 const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
+// 是否存在可支撑终端/Git 的工作区：终端与 Git 只依赖工作目录，与会话无关。
+// 已有会话自带其绑定的工作区；新建对话（尚无会话）只要存在活动工作区，就应展示终端/Git 入口。
+const hasWorkspace = computed(() => {
+  if (props.sessionId > 0) return true
+  const c = props.config || {}
+  const envId = c.activeEnvId
+  return Boolean(envId && (c.environments || []).some(env => env.id === envId && env.path))
+})
+const gitTopbarTitle = computed(() => {
+  const title = `${t.value.gitMenu} · ${props.gitAvailability?.currentBranch || 'HEAD'}`
+  const ahead = Number(props.gitAvailability?.ahead) || 0
+  return ahead > 0 ? `${title} · ${t.value.gitPendingPush.replace('{count}', ahead)}` : title
+})
+
+// 终端是工作区能力：仅在没有任何工作区时才收起顶栏终端面板。
+watch(() => hasWorkspace.value, has => { if (!has) terminalOpen.value = false })
 </script>
 
 <template>
@@ -186,6 +205,32 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
             <span v-if="inputArtifactCount" class="change-summary__attach" :title="t.changesInputArtifacts">
               <Paperclip :size="13" />
               {{ inputArtifactCount }}
+            </span>
+          </button>
+          <button
+            v-if="hasWorkspace"
+            class="topbar-btn"
+            type="button"
+            :title="terminalOpen ? t.terminalHide : t.terminalOpen"
+            :aria-label="terminalOpen ? t.terminalHide : t.terminalOpen"
+            :aria-pressed="terminalOpen"
+            @click="terminalOpen = !terminalOpen"
+          >
+            <SquareTerminal :size="18" />
+          </button>
+          <button
+            v-if="gitAvailability.isRepository"
+            class="topbar-btn git-topbar-btn"
+            :class="{ 'has-conflict': gitAvailability.hasConflicts }"
+            type="button"
+            :title="gitTopbarTitle"
+            :aria-label="t.gitMenu"
+            @click="emit('open-git')"
+          >
+            <GitBranch :size="18" />
+            <span v-if="gitAvailability.ahead > 0" class="git-topbar-btn__push-dot" aria-hidden="true"></span>
+            <span v-if="gitAvailability.changeCount" class="git-topbar-btn__badge">
+              {{ gitAvailability.changeCount > 99 ? '99+' : gitAvailability.changeCount }}
             </span>
           </button>
           <button
@@ -281,6 +326,17 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
         @respond-subagent-dialog="emit('respond-subagent-dialog', $event)"
         @ack-subagent-dialog="emit('ack-subagent-dialog', $event)"
       />
+
+      <transition name="terminal-slide">
+        <TerminalPanel
+          v-if="terminalOpen && hasWorkspace"
+          :open="terminalOpen"
+          :session-id="sessionId"
+          :t="t"
+          @close="terminalOpen = false"
+          @error="emit('artifact-error', $event)"
+        />
+      </transition>
     </main>
 
     <ChatRightSidebar
@@ -290,6 +346,9 @@ const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
       :loading="sessionChangesLoading"
       :focus-request="changeFocusRequest"
       :diff-request="changeDiffRequest"
+      :language="config.preferences?.language || 'zh-CN'"
+      :model-options="modelOptions"
+      :selected-model-value="selectedModelValue"
       :t="t"
       @close="closeSidebar"
       @refresh="emit('refresh-session-changes')"
