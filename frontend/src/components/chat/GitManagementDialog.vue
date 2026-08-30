@@ -871,7 +871,7 @@ function statusLabel(file) {
           </div>
           <div v-if="repository.isRepository" class="git-manager__head-status">
             <span class="git-manager__branch"><GitBranch :size="13" />{{ repository.currentBranch || repository.head || 'HEAD' }}</span>
-            <span v-if="repository.upstream" class="git-manager__sync">
+            <span v-if="repository.upstream || repository.ahead > 0 || repository.behind > 0" class="git-manager__sync">
               <span>↓{{ repository.behind || 0 }}</span>
               <button
                 v-if="repository.ahead > 0"

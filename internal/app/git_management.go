@@ -121,10 +121,10 @@ func (a *App) GetSessionGitAvailability(id int64) (GitAvailability, error) {
 	}
 	root := filepath.Clean(strings.TrimSpace(rootText))
 	branch := gitTrimmed(ctx, root, "branch", "--show-current")
-	upstream := gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	base := gitUpstreamOrBase(ctx, root)
 	ahead := 0
-	if upstream != "" {
-		_, ahead = gitAheadBehind(ctx, root, upstream, "HEAD")
+	if base != "" {
+		_, ahead = gitAheadBehind(ctx, root, base, "HEAD")
 	}
 	statusBytes, statusErr := runGitBytes(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if statusErr != nil {
@@ -173,8 +173,10 @@ func (a *App) GetSessionGitRepository(id int64) (GitRepositoryView, error) {
 	view.CurrentBranch = rawBranch
 	view.Head = gitTrimmed(ctx, view.Root, "rev-parse", "--short", "HEAD")
 	view.Upstream = gitTrimmed(ctx, view.Root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-	if view.Upstream != "" {
-		view.Behind, view.Ahead = gitAheadBehind(ctx, view.Root, view.Upstream, "HEAD")
+	// When a branch has no configured upstream yet, compare against its
+	// remote-tracking branch (e.g. origin/main) so a first push is still detected.
+	if base := gitUpstreamOrBase(ctx, view.Root); base != "" {
+		view.Behind, view.Ahead = gitAheadBehind(ctx, view.Root, base, "HEAD")
 	}
 	view.State = detectGitRepositoryState(ctx, view.Root)
 	for _, file := range view.Worktree.Files {
@@ -204,11 +206,11 @@ func (a *App) GetSessionGitOutgoingCommits(id int64) ([]GitCommit, error) {
 		return nil, errors.New("failed to locate the Git repository")
 	}
 	root := filepath.Clean(strings.TrimSpace(rootText))
-	upstream := gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-	if upstream == "" {
+	base := gitUpstreamOrBase(ctx, root)
+	if base == "" {
 		return []GitCommit{}, nil
 	}
-	commits, err := listGitOutgoingCommits(ctx, root, upstream)
+	commits, err := listGitOutgoingCommits(ctx, root, base)
 	if err != nil {
 		applog.Errorf("read outgoing Git commits failed: session=%d root=%q", id, root)
 		return nil, errors.New("failed to read outgoing Git commits")
@@ -400,6 +402,31 @@ func gitTrimmed(ctx context.Context, root string, args ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(output)
+}
+
+// gitUpstreamOrBase resolves the reference used to count "commits to push".
+// It prefers the configured upstream; when the branch has no upstream yet, it
+// falls back to the current branch's remote-tracking branch under the preferred
+// remote (e.g. origin/main). This lets a locally committed but not-yet-tracked
+// first push still be detected instead of being reported as "nothing to push".
+func gitUpstreamOrBase(ctx context.Context, root string) string {
+	upstream := gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	if upstream != "" {
+		return upstream
+	}
+	branch := gitTrimmed(ctx, root, "branch", "--show-current")
+	if branch == "" {
+		return ""
+	}
+	remote := preferredGitRemote(ctx, root)
+	if remote == "" {
+		return ""
+	}
+	remoteBranch := remote + "/" + branch
+	if _, err := runGit(ctx, root, "show-ref", "--verify", "--quiet", "refs/remotes/"+remoteBranch); err == nil {
+		return remoteBranch
+	}
+	return ""
 }
 
 func gitAheadBehind(ctx context.Context, root, left, right string) (int, int) {
