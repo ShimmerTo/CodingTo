@@ -41,7 +41,7 @@ import {
   PROVIDER_QUOTA_CACHE_MS
 } from './utils/providerQuota'
 import ChatView from './ChatView.vue'
-import logo from './assets/logo.png'
+import logo from './assets/logo.png?no-inline'
 import AppDialogs from './components/AppDialogs.vue'
 import PiInstallGate from './components/PiInstallGate.vue'
 // 页面组件按需懒加载：每个菜单页独立 chunk，仅首次打开时加载，减小首屏主包体积。

@@ -53,7 +53,6 @@ func NewEngine(rulesByConnection func(connectionID string) []dbsecurity.Rule) *E
 //  1. effect 优先级 deny > confirm > allow；
 //  2. 同 effect 内 action 更具体（Level 更深）者胜出；
 //  3. 同具体度 Override > 预设，仍并列取声明序靠前者。
-//
 // 无任何规则命中（或命中规则的条件均不满足）时默认 deny。
 func (e *Engine) Decide(connectionID string, stmt AnalyzedStatement) Result {
 	rules := e.rulesByConnection(connectionID)

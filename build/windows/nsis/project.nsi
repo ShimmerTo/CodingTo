@@ -33,6 +33,14 @@ Unicode true
 ####
 ## Include the wails tools
 ####
+# Keep installer-facing identity independent from the generated template defaults.
+!define INFO_PROJECTNAME   "CodingTo"
+!define INFO_COMPANYNAME   "CodingTo"
+!define INFO_PRODUCTNAME   "CodingTo"
+!define INFO_COPYRIGHT     "(c) 2026 CodingTo"
+!define PRODUCT_EXECUTABLE "CodingTo.exe"
+!define UNINST_KEY_NAME    "CodingTo"
+
 !include "wails_tools.nsh"
 
 # The version information for this two must consist of 4 parts
@@ -76,7 +84,7 @@ OutFile "..\..\..\bin\${INFO_PROJECTNAME}-windows-${ARCH}-installer.exe" # Name 
 !if "${WAILS_INSTALL_SCOPE}" == "user"
     InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
 !else
-    InstallDir "$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}"
+    InstallDir "$PROGRAMFILES64\${INFO_PRODUCTNAME}"
 !endif
 ShowInstDetails show # This will always show the installation details.
 

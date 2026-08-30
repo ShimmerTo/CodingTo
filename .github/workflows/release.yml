@@ -156,7 +156,7 @@ jobs:
           retention-days: 14
 
   macos:
-    name: macOS universal (.app.zip)
+    name: macOS universal (ZIP + DMG)
     needs: validate
     runs-on: macos-15
     steps:
@@ -193,11 +193,28 @@ jobs:
       - name: Archive app bundle
         run: ditto -c -k --sequesterRsrc --keepParent bin/CodingTo.app bin/CodingTo-darwin-universal.zip
 
+      - name: Create DMG installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging_dir="$(mktemp -d "${RUNNER_TEMP}/codingto-dmg.XXXXXX")"
+          trap 'rm -rf "${staging_dir}"' EXIT
+          ditto "bin/CodingTo.app" "${staging_dir}/CodingTo.app"
+          ln -s /Applications "${staging_dir}/Applications"
+          hdiutil create \
+            -volname "CodingTo" \
+            -srcfolder "${staging_dir}" \
+            -ov \
+            -format UDZO \
+            "bin/CodingTo-darwin-universal.dmg"
+
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
           name: CodingTo-darwin-universal
-          path: bin/CodingTo-darwin-universal.zip
+          path: |
+            bin/CodingTo-darwin-universal.zip
+            bin/CodingTo-darwin-universal.dmg
           if-no-files-found: error
           retention-days: 14
 
