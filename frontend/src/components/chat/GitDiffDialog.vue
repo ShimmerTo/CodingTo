@@ -2,10 +2,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Brain, Columns2, FileCode2, Image as ImageIcon,
-  LoaderCircle, PackageOpen, Rows3, Settings2, Sparkles, X
+  LoaderCircle, MessageSquarePlus, PackageOpen, Rows3, Settings2, Sparkles, X
 } from 'lucide-vue-next'
 import {
-  generateSessionGitFileAnalysis, getSessionGitCommitFileDetail, getSessionGitFileDetail
+  generateSessionGitFileAnalysis, getSessionGitCommitFileDetail, getSessionGitCompareFileDetail, getSessionGitFileDetail
 } from '../../backend.js'
 import GitAIPromptDialog from '../GitAIPromptDialog.vue'
 import { renderMarkdown } from './chatFormatters.js'
@@ -23,6 +23,8 @@ const props = defineProps({
   files: { type: Array, default: () => [] },
   index: { type: Number, default: 0 },
   baseBranch: { type: String, default: '' },
+  compareLeft: { type: String, default: '' },
+  compareRight: { type: String, default: '' },
   commit: { type: String, default: '' },
   t: { type: Object, required: true },
   language: { type: String, default: 'zh-CN' },
@@ -30,7 +32,7 @@ const props = defineProps({
   selectedModelValue: { type: String, default: '' }
 })
 
-const emit = defineEmits(['close', 'update:index'])
+const emit = defineEmits(['close', 'update:index', 'add-selection-to-chat'])
 const loading = ref(false)
 const error = ref('')
 const detail = ref(null)
@@ -45,7 +47,10 @@ const splitOldPane = ref(null)
 const splitGutter = ref(null)
 const splitNewPane = ref(null)
 const splitOldContent = ref(null)
+const unifiedPane = ref(null)
 const diffBody = ref(null)
+const selectionMenu = ref(null)
+const selectionMenuEl = ref(null)
 const activeChangeIndex = ref(-1)
 let requestNonce = 0
 let analysisRequestNonce = 0
@@ -70,6 +75,25 @@ const fullSplitRows = computed(() => buildFullSplitRows(detail.value))
 const splitSides = computed(() => buildSplitView(fullSplitRows.value))
 const fullUnifiedRows = computed(() => buildFullUnifiedRows(fullSplitRows.value))
 const changeCount = computed(() => detail.value?.hunks?.length || 0)
+const overviewMarkers = computed(() => {
+  const rows = isHorizontal.value ? splitSides.value : fullUnifiedRows.value
+  const total = Math.max(1, rows.length)
+  return (detail.value?.hunks || []).map((hunk, index) => {
+    let first = rows.findIndex(row => row.changeIndex === index)
+    if (first < 0) first = Math.min(index, total - 1)
+    const hasAdded = (hunk.lines || []).some(line => line.kind === 'added')
+    const hasDeleted = (hunk.lines || []).some(line => line.kind === 'deleted')
+    const kind = hasAdded && hasDeleted ? 'modified' : hasAdded ? 'added' : 'deleted'
+    return {
+      index,
+      kind,
+      style: {
+        top: `${(first / total) * 100}%`,
+        height: '3px',
+      },
+    }
+  })
+})
 
 function loadLayout() {
   try {
@@ -86,7 +110,7 @@ function setLayout(value) {
 
 // 切换文件/布局时先把三栏滚动位置归零，避免残留旧偏移或越界值
 watch([detail, isHorizontal], () => {
-  for (const pane of [splitOldPane.value, splitGutter.value, splitNewPane.value]) {
+  for (const pane of [splitOldPane.value, splitGutter.value, splitNewPane.value, unifiedPane.value]) {
     if (!pane) continue
     pane.scrollTop = 0
     pane.scrollLeft = 0
@@ -121,13 +145,14 @@ function cacheAnalysisModel() {
 watch(
   // 包含 props.files：节点产物入口每次点击都会传入新数组（引用变化），
   // 确保跨节点点击同路径同 index 的文件时也会重载，避免显示陈旧快照。
-  [() => props.open, () => props.index, () => activeFile.value?.path, activeScope, () => props.files, () => props.baseBranch, () => props.commit],
+  [() => props.open, () => props.index, () => activeFile.value?.path, activeScope, () => props.files, () => props.baseBranch, () => props.compareLeft, () => props.compareRight, () => props.commit],
   loadDetail,
   { immediate: true }
 )
 
 async function loadDetail() {
   if (!props.open || !activeFile.value?.path) return
+  closeSelectionMenu()
   const nonce = ++requestNonce
   resetAnalysis()
   loading.value = true
@@ -136,7 +161,9 @@ async function loadDetail() {
   try {
     const result = activeScope.value === 'commit'
       ? await getSessionGitCommitFileDetail(props.sessionId, props.commit, activeFile.value.path, props.language)
-      : await getSessionGitFileDetail(props.sessionId, activeScope.value, activeFile.value.path, props.baseBranch)
+      : activeScope.value === 'compare'
+        ? await getSessionGitCompareFileDetail(props.sessionId, props.compareLeft, props.compareRight, activeFile.value.path)
+        : await getSessionGitFileDetail(props.sessionId, activeScope.value, activeFile.value.path, props.baseBranch)
     if (nonce === requestNonce) detail.value = result
   } catch (cause) {
     if (nonce === requestNonce) {
@@ -170,6 +197,7 @@ watch(
   () => [props.open, props.selectedModelValue, props.modelOptions],
   ([open, selected]) => {
     if (!open) {
+      closeSelectionMenu()
       resetAnalysis()
       analysisPromptOpen.value = false
       return
@@ -201,6 +229,8 @@ async function analyzeCurrentFile() {
       scope: activeScope.value,
       path: activeFile.value.path,
       baseBranch: props.baseBranch,
+      left: props.compareLeft,
+      right: props.compareRight,
       commit: props.commit,
       language: props.language,
       provider: selected.provider,
@@ -251,15 +281,36 @@ function scrollToChange(index) {
     }
     return
   }
-  const target = diffBody.value?.querySelector(`[data-change-index="${index}"]`)
-  if (!target || !diffBody.value) return
-  diffBody.value.scrollTop = Math.max(0, target.offsetTop - 46)
+  const target = unifiedPane.value?.querySelector(`[data-change-index="${index}"]`)
+  if (!target || !unifiedPane.value) return
+  unifiedPane.value.scrollTop = Math.max(0, target.offsetTop - 18)
+}
+
+function activateOverviewMarker(index) {
+  activeChangeIndex.value = index
+  void nextTick(() => scrollToChange(index))
+}
+
+function overviewMarkerLabel(marker) {
+  const labels = {
+    added: props.t.gitDiffMarkerAdded,
+    modified: props.t.gitDiffMarkerModified,
+    deleted: props.t.gitDiffMarkerDeleted,
+  }
+  return `${labels[marker.kind]} · ${marker.index + 1} / ${changeCount.value}`
 }
 
 function onKeydown(event) {
   if (!props.open) return
   if (analysisPromptOpen.value) return
-  if (event.key === 'Escape') emit('close')
+  if (event.key === 'Escape') {
+    if (selectionMenu.value) {
+      closeSelectionMenu()
+      return
+    }
+    emit('close')
+    return
+  }
   if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(event.target?.tagName)) return
   if (event.key === 'F7') {
     event.preventDefault()
@@ -270,8 +321,51 @@ function onKeydown(event) {
   if (event.key === 'ArrowRight') navigate(1)
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+// 在 diff 内容区选中文本后，于鼠标位置弹出「添加到对话」菜单
+function onDiffMouseUp(event) {
+  const selection = window.getSelection()
+  const text = selection?.toString().trim()
+  const body = event.target.closest?.('.git-diff-dialog__body')
+  const inBody = node => {
+    if (!node) return false
+    const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node
+    return !!element?.closest?.('.git-diff-dialog__body')
+  }
+  if (!text || !body || !inBody(selection?.anchorNode) || !inBody(selection?.focusNode)) {
+    selectionMenu.value = null
+    return
+  }
+  const menuWidth = 180
+  const menuHeight = 42
+  selectionMenu.value = {
+    left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+    top: event.clientY + menuHeight + 8 > window.innerHeight ? Math.max(8, event.clientY - menuHeight - 4) : event.clientY + 4,
+    text,
+  }
+}
+
+function closeSelectionMenu() {
+  selectionMenu.value = null
+}
+
+function onDocumentMouseDown(event) {
+  if (selectionMenuEl.value && !selectionMenuEl.value.contains(event.target)) closeSelectionMenu()
+}
+
+function addSelectionToChat() {
+  if (!selectionMenu.value?.text) return
+  emit('add-selection-to-chat', selectionMenu.value.text)
+  closeSelectionMenu()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  document.addEventListener('mousedown', onDocumentMouseDown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('mousedown', onDocumentMouseDown)
+})
 
 // 三栏垂直滚动同步：改动块行高一致，锁内直接对齐 scrollTop。
 // 来源 pane 先置位再广播，防止反向回调把自己拉回造成抖动。
@@ -591,8 +685,9 @@ function buildFullUnifiedRows(rows) {
           <span class="git-diff-dialog__title">
             <strong :title="activeFile?.path">{{ activeFile?.path }}</strong>
             <small>
-              {{ activeScope === 'staged' ? t.gitStagedChanges : activeScope === 'unstaged' || activeScope === 'untracked' ? t.gitUnstagedChanges : activeScope === 'worktree' ? t.gitWorkspaceChanges : activeScope === 'commit' ? t.gitCommitChanges : t.gitBranchChanges }}
+              {{ activeScope === 'staged' ? t.gitStagedChanges : activeScope === 'unstaged' || activeScope === 'untracked' ? t.gitUnstagedChanges : activeScope === 'worktree' ? t.gitWorkspaceChanges : activeScope === 'commit' ? t.gitCommitChanges : activeScope === 'compare' ? t.gitManagerCompare : t.gitBranchChanges }}
               <template v-if="activeScope === 'branch' && baseBranch"> · {{ baseBranch }}</template>
+              <template v-if="activeScope === 'compare' && compareLeft && compareRight"> · {{ compareLeft }} ↔ {{ compareRight }}</template>
               <template v-if="activeScope === 'commit' && commit"> · {{ commit.slice(0, 8) }}</template>
             </small>
           </span>
@@ -653,7 +748,7 @@ function buildFullUnifiedRows(rows) {
         </header>
 
         <div class="git-diff-dialog__content" :class="{ 'has-analysis': analysisVisible }">
-          <main ref="diffBody" class="git-diff-dialog__body" :class="{ 'is-split-text': detail?.kind === 'text' && isHorizontal }">
+          <main ref="diffBody" class="git-diff-dialog__body" :class="{ 'is-text-diff': detail?.kind === 'text', 'is-split-text': detail?.kind === 'text' && isHorizontal }" @mouseup="onDiffMouseUp">
             <div v-if="loading" class="git-diff-dialog__state">
               <LoaderCircle class="spin" :size="20" />
               <span>{{ t.gitLoadingCompare }}</span>
@@ -667,7 +762,7 @@ function buildFullUnifiedRows(rows) {
                   <span v-if="isHorizontal" aria-hidden="true"></span>
                   <span>{{ t.gitAfterChange }} · {{ detail.after.lineCount || 0 }} {{ t.gitLines }}</span>
                 </div>
-                <template v-if="detail.hunks?.length">
+                <div v-if="detail.hunks?.length" class="git-diff-viewport">
                   <div v-if="isHorizontal" class="git-split-compare">
                     <div
                       ref="splitOldPane"
@@ -730,7 +825,7 @@ function buildFullUnifiedRows(rows) {
                       </div>
                     </div>
                   </div>
-                  <template v-else>
+                  <div v-else ref="unifiedPane" class="git-unified-pane">
                     <div
                       v-for="(row, rowIndex) in fullUnifiedRows"
                       :key="rowIndex"
@@ -743,8 +838,21 @@ function buildFullUnifiedRows(rows) {
                       <span class="git-diff-line__sign">{{ lineSign(row.kind) }}</span>
                       <code><span v-for="(part, partIndex) in row.parts" :key="partIndex" :class="{ 'is-inline-change': part.changed }">{{ part.text }}</span></code>
                     </div>
-                  </template>
-                </template>
+                  </div>
+                  <nav class="git-diff-overview" :aria-label="t.gitDifferenceNavigation">
+                    <button
+                      v-for="marker in overviewMarkers"
+                      :key="marker.index"
+                      type="button"
+                      class="git-diff-overview__marker"
+                      :class="[`is-${marker.kind}`, { 'is-active': marker.index === activeChangeIndex }]"
+                      :style="marker.style"
+                      :title="overviewMarkerLabel(marker)"
+                      :aria-label="overviewMarkerLabel(marker)"
+                      @click="activateOverviewMarker(marker.index)"
+                    ></button>
+                  </nav>
+                </div>
                 <div v-else class="git-diff-dialog__state">{{ t.gitNoDiffContent }}</div>
               </div>
 
@@ -808,11 +916,32 @@ function buildFullUnifiedRows(rows) {
       </section>
     </div>
   </Teleport>
+  <Teleport to="body">
+    <div
+      v-if="selectionMenu"
+      ref="selectionMenuEl"
+      class="git-diff-selection-menu"
+      role="menu"
+      :aria-label="t.gitAddToChat"
+      :style="{ left: `${selectionMenu.left}px`, top: `${selectionMenu.top}px` }"
+      @mousedown.stop
+      @click.stop
+    >
+      <button type="button" role="menuitem" :title="t.gitAddToChat" @click="addSelectionToChat">
+        <MessageSquarePlus :size="15" />
+        <span>{{ t.gitAddToChat }}</span>
+      </button>
+    </div>
+  </Teleport>
   <GitAIPromptDialog v-model="analysisPromptOpen" kind="file_analysis" :language="language" :t="t" />
 </template>
 
 <style scoped>
 .git-diff-backdrop { position: fixed; z-index: 1300; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(8 9 9 / .5); backdrop-filter: blur(2px); }
+.git-diff-selection-menu { position: fixed; z-index: 1500; min-width: 180px; padding: 5px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface); box-shadow: var(--shadow); }
+.git-diff-selection-menu button { width: 100%; min-height: 32px; display: flex; align-items: center; gap: 9px; padding: 6px 8px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; font: inherit; font-size: var(--fs-12); text-align: left; }
+.git-diff-selection-menu button:hover, .git-diff-selection-menu button:focus-visible { color: var(--text); background: var(--hover); outline: none; }
+.git-diff-selection-menu button svg { color: var(--faint); }
 .git-diff-dialog { width: min(1180px, 96vw); height: min(820px, 92vh); min-height: 480px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: 0 28px 90px rgb(0 0 0 / .3); }
 .git-diff-dialog__head { flex: 0 0 auto; min-height: 62px; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .git-diff-dialog__icon { flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
@@ -845,9 +974,9 @@ function buildFullUnifiedRows(rows) {
 .git-diff-dialog__nav span { min-width: 52px; color: var(--muted); font-size: var(--fs-12); text-align: center; font-variant-numeric: tabular-nums; }
 .git-diff-dialog__content { flex: 1 1 auto; min-height: 0; display: flex; }
 .git-diff-dialog__body { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; background: color-mix(in srgb, var(--surface-2) 52%, var(--surface)); }
-.git-diff-dialog__body.is-split-text { overflow: hidden; }
+.git-diff-dialog__body.is-text-diff { overflow: hidden; }
 .git-text-diff { --split-row-height: 20px; --split-gutter-width: 104px; min-height: 100%; }
-.git-diff-dialog__body.is-split-text .git-text-diff { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.git-diff-dialog__body.is-text-diff .git-text-diff { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .git-diff-dialog__state { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: var(--fs-13); }
 .git-diff-dialog__state.is-error { color: var(--danger); }
 .git-diff-dialog__foot { flex: 0 0 auto; min-height: 38px; display: flex; justify-content: space-between; gap: 16px; padding: 9px 14px; border-top: 1px solid var(--border); color: var(--faint); background: var(--surface); font-size: var(--fs-12); }
@@ -857,10 +986,20 @@ function buildFullUnifiedRows(rows) {
 .git-diff-version-bar span:last-child { text-align: right; }
 .git-diff-hunk + .git-diff-hunk { border-top: 1px solid var(--border); }
 .git-diff-hunk__head { padding: 7px 14px; color: #667ab0; background: rgb(80 110 175 / .09); font: var(--fs-12)/1.5 Consolas, "Cascadia Mono", monospace; }
+.git-diff-viewport { position: relative; min-width: 0; min-height: 0; flex: 1 1 auto; overflow: hidden; }
+.git-unified-pane { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; padding-right: 15px; }
+.git-diff-overview { position: absolute; z-index: 6; top: 4px; right: 7px; bottom: 12px; width: 8px; border-left: 1px solid color-mix(in srgb, var(--border) 55%, transparent); background: color-mix(in srgb, var(--surface) 82%, transparent); pointer-events: none; }
+.git-diff-overview__marker { position: absolute; left: 1px; width: 7px; min-height: 2px; padding: 0; border: 0; border-radius: 1px; cursor: pointer; opacity: .72; pointer-events: auto; transition: opacity .12s ease, transform .12s ease; }
+.git-diff-overview__marker:hover,.git-diff-overview__marker:focus-visible,.git-diff-overview__marker.is-active { z-index: 1; opacity: 1; transform: scaleX(1.35); outline: none; }
+.git-diff-overview__marker.is-added { background: #22a05a; }
+.git-diff-overview__marker.is-modified { background: #4b8fe2; }
+.git-diff-overview__marker.is-deleted { background: #dc5a52; }
 /* --- JetBrains 式三栏：旧代码 | 行号 gutter | 新代码 ---
    总宽度锁定为弹窗宽度（grid 用 minmax(0,1fr)），左右两栏各自横向滚动，
    中间 gutter 列固定不参与横向滚动；三栏垂直滚动由脚本同步。 */
 .git-split-compare {
+  width: 100%;
+  height: 100%;
   flex: 1 1 auto;
   min-height: 0;
   display: grid;

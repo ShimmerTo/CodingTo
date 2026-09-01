@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { FolderOpen, RotateCcw, Save, ShieldAlert, X } from 'lucide-vue-next'
+import { FolderOpen, RotateCcw, Save, Search, ShieldAlert, X } from 'lucide-vue-next'
 import { getDcgSettings, saveDcgSettings } from '../backend'
 import { useAppContext } from '../composables/appContext'
 
@@ -15,22 +15,28 @@ const ui = computed(() => chinese.value ? {
   actionAsk: '询问', actionAllow: '放行', actionDeny: '拒绝',
   severityLevels: [
     { key: 'critical', zh: '灾难级', en: 'Critical', hint: '如 rm -rf /、git reset --hard' },
-    { key: 'high', zh: '高危', en: 'High', hint: '如强制推送、删除文件树' },
-    { key: 'medium', zh: '中危', en: 'Medium', hint: '如危险管道、权限修改' },
-    { key: 'low', zh: '低危', en: 'Low', hint: '如高风险单条命令' },
+    { key: 'high', zh: '高危', en: 'High', hint: '如强制推送（git push --force）、递归删除文件树（rm -rf ./dir）' },
+    { key: 'medium', zh: '中危', en: 'Medium', hint: '如危险管道（curl ... | bash）、权限修改（chmod -R 777 /）' },
+    { key: 'low', zh: '低危', en: 'Low', hint: '如高风险单条命令（wget 未知来源、eval 动态执行）' },
   ],
   workspaceAllow: '工作目录放行', workspaceAllowHint: '开启后，DCG 会在其用户级放行列表（allowlist）中为当前全部工作空间目录生成放行规则（含子目录递归），工作空间内的危险命令直接放行、不受上方等级策略限制；关闭时移除全部工作目录放行规则，不影响手动添加的规则。', workspaceCount: '当前 {count} 个工作空间', workspaceEmpty: '尚未配置工作空间，放行规则将为空',
+  scriptAiTitle: '未知脚本AI检测',
+  scriptAiDesc: '遇到脚本先使用AI检测该脚本执行后是否会导致灾难性后果',
+  scriptAiBadge: '待开发',
 } : {
   title: 'DCG dangerous command policy', loading: 'Loading policy…', loadFailed: 'Unable to load policy', close: 'Close', save: 'Save', saving: 'Saving…', reset: 'Discard changes', saved: 'DCG policy saved', syncFailed: 'Policy saved, but syncing DCG allow rules failed: ',
   severityHint: 'Choose how DCG detections are disposed per severity level: allow runs the command, ask requests authorization, deny blocks it. Unset levels default to ask for critical/high and allow for medium/low.',
   actionAsk: 'Ask', actionAllow: 'Allow', actionDeny: 'Deny',
   severityLevels: [
     { key: 'critical', zh: 'Critical', en: 'Critical', hint: 'e.g. rm -rf /, git reset --hard' },
-    { key: 'high', zh: 'High', en: 'High', hint: 'e.g. force push, recursive delete' },
-    { key: 'medium', zh: 'Medium', en: 'Medium', hint: 'e.g. dangerous pipelines, permission changes' },
-    { key: 'low', zh: 'Low', en: 'Low', hint: 'e.g. high-risk single commands' },
+    { key: 'high', zh: 'High', en: 'High', hint: 'e.g. force push (git push --force), recursive delete (rm -rf ./dir)' },
+    { key: 'medium', zh: 'Medium', en: 'Medium', hint: 'e.g. dangerous pipelines (curl ... | bash), permission changes (chmod -R 777 /)' },
+    { key: 'low', zh: 'Low', en: 'Low', hint: 'e.g. high-risk single commands (wget unknown source, eval dynamic code)' },
   ],
   workspaceAllow: 'Allow workspace directories', workspaceAllowHint: 'When enabled, DCG generates allow rules for every workspace directory (including subdirectories) in its user-level allowlist, so dangerous commands inside them run without interception and ignore the severity policy above. Disabling removes only those rules; manually added rules stay untouched.', workspaceCount: '{count} workspace(s) currently', workspaceEmpty: 'No workspace configured yet; the allow rules will be empty',
+  scriptAiTitle: 'Unknown script AI detection',
+  scriptAiDesc: 'Before executing a script, use AI to detect if it could lead to catastrophic consequences',
+  scriptAiBadge: 'TODO',
 })
 
 const ACTIONS = ['ask', 'allow', 'deny']
@@ -151,6 +157,15 @@ watch(() => props.modelValue, (open) => { if (open) void load() }, { immediate: 
             <small>{{ ui.workspaceAllowHint }}</small>
             <small class="dcg-policy-workspace__count">{{ workspaces.length ? ui.workspaceCount.replace('{count}', workspaces.length) : ui.workspaceEmpty }}</small>
           </label>
+
+          <div class="dcg-policy-ai-detect">
+            <span class="dcg-policy-ai-detect__head">
+              <span><Search :size="15" /></span>
+              <strong>{{ ui.scriptAiTitle }}</strong>
+              <span class="dcg-policy-ai-detect__badge">{{ ui.scriptAiBadge }}</span>
+            </span>
+            <small>{{ ui.scriptAiDesc }}</small>
+          </div>
         </div>
 
         <footer class="dcg-policy-dialog__footer">
@@ -189,6 +204,12 @@ watch(() => props.modelValue, (open) => { if (open) void load() }, { immediate: 
 .dcg-policy-workspace__head input { width: 15px; height: 15px; margin-left: auto; accent-color: var(--accent); cursor: pointer; }
 .dcg-policy-workspace > small { color: var(--muted); font-size: var(--fs-11); line-height: 1.5; }
 .dcg-policy-workspace__count { color: var(--faint) !important; }
+.dcg-policy-ai-detect { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px dashed var(--border-soft); border-radius: 9px; background: var(--surface-2); opacity: .65; }
+.dcg-policy-ai-detect__head { display: flex; align-items: center; gap: 8px; }
+.dcg-policy-ai-detect__head svg { color: var(--accent); }
+.dcg-policy-ai-detect__head strong { color: var(--text); font-size: var(--fs-13); }
+.dcg-policy-ai-detect__badge { margin-left: auto; padding: 2px 7px; border-radius: 5px; color: #fff; background: var(--faint); font-size: var(--fs-10); font-weight: 600; line-height: 1.4; letter-spacing: .3px; text-transform: uppercase; }
+.dcg-policy-ai-detect > small { color: var(--muted); font-size: var(--fs-11); line-height: 1.5; }
 .dcg-policy-dialog__error { padding: 9px 11px; border: 1px solid rgba(209,75,66,.3); border-radius: 8px; color: var(--danger); background: rgba(209,75,66,.07); font-size: var(--fs-12); line-height: 1.5; }
 .dcg-policy-dialog__state { flex: 1; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 40px; color: var(--muted); font-size: var(--fs-13); }
 .dcg-policy-dialog__state.dcg-policy-dialog__error { color: var(--danger); }

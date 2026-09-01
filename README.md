@@ -53,6 +53,14 @@ CodingTo 基于 Pi Agent，将 AI 编程 Agent 封装为跨平台桌面应用。
 ![文件对比](./assets/imgs/img12.png)
 ## 📝 更新日志
 
+# 2026-09-01
+- feat Git管理增加搁置功能
+- feat 终端增加最小化
+- perf 大幅优化Git管理加载速度
+- style 优化对话框口页面结构与风格
+- fix 修复全局插件安装与卸载和部分文案错误问题
+- fix 修复终端输入中文时整个终端窗口往左偏移问题
+
 # 2026-08-30
 - feat 新增chatgpt plus 5小时额度显示；增加额度快捷展示
 - feat 新增终端(git bash/powershell/cmd/ssh)

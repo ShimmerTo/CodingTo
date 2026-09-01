@@ -75,11 +75,28 @@ func (a *App) SaveDCGSettings(settings DCGSettings) (DCGSettings, error) {
 	// Pure severity-policy edits (e.g. changing "ask" to "deny") should
 	// not require a working dcg binary.
 	if wsAllowChanged {
-		if err := syncDCGWorkspaceAllow(cfg); err != nil {
-			return normalized, err
+		a.dcgSyncMu.Lock()
+		syncErr := syncDCGWorkspaceAllow(cfg)
+		a.dcgSyncMu.Unlock()
+		if syncErr != nil {
+			return normalized, syncErr
 		}
 	}
 	return normalized, nil
+}
+
+// syncDCGWorkspaceAllowAsync refreshes the dcg workspace allow rules in the
+// background using the latest saved config. GetBootstrap launches this instead
+// of syncing inline so startup never blocks on the dcg binary. All syncs are
+// serialized so the background refresh cannot race a user-triggered one on the
+// allowlist file.
+func (a *App) syncDCGWorkspaceAllowAsync() {
+	a.dcgSyncMu.Lock()
+	defer a.dcgSyncMu.Unlock()
+	cfg := a.store.Get()
+	if err := syncDCGWorkspaceAllow(cfg); err != nil {
+		applog.Warnf("sync dcg workspace allow: %v", err)
+	}
 }
 
 // writeDCGPolicyFile writes the severity -> action map for the dcg bridge. The
@@ -129,6 +146,8 @@ func (a *App) ensureDCGRuntime(cfg, previous AppConfig) {
 	if !dcgRuntimeInputChanged(cfg, previous) {
 		return
 	}
+	a.dcgSyncMu.Lock()
+	defer a.dcgSyncMu.Unlock()
 	if err := syncDCGWorkspaceAllow(cfg); err != nil {
 		applog.Warnf("sync dcg workspace allow: %v", err)
 	}

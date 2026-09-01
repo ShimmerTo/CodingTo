@@ -17,6 +17,9 @@ const props = defineProps({
   running: { type: Boolean, default: false },
   stopping: { type: Boolean, default: false },
   connected: { type: Boolean, default: false },
+  currentWorkDir: { type: String, default: '' },
+  workspaceRevision: { type: Number, default: 0 },
+  workspaceActivating: { type: Boolean, default: false },
   selectedAgent: { type: Object, default: null },
   dcgStatus: { type: Object, default: null },
   sessionDcgDisabled: { type: Boolean, default: false },
@@ -69,6 +72,7 @@ const emit = defineEmits([
 
 const rightSidebarOpen = ref(false)
 const terminalOpen = ref(false)
+const terminalMinimized = ref(false)
 const previewImage = ref(null)
 const changeFocusRequest = ref(null)
 // 变更消息行尾斜箭头：请求打开 Git 对比框（由 ChatRightSidebar 复用 GitDiffDialog 处理）。
@@ -168,12 +172,7 @@ function toggleSidebar() {
 const t = computed(() => buildT(props.config.preferences?.language || 'zh-CN'))
 // 是否存在可支撑终端/Git 的工作区：终端与 Git 只依赖工作目录，与会话无关。
 // 已有会话自带其绑定的工作区；新建对话（尚无会话）只要存在活动工作区，就应展示终端/Git 入口。
-const hasWorkspace = computed(() => {
-  if (props.sessionId > 0) return true
-  const c = props.config || {}
-  const envId = c.activeEnvId
-  return Boolean(envId && (c.environments || []).some(env => env.id === envId && env.path))
-})
+const hasWorkspace = computed(() => Boolean(props.currentWorkDir))
 const gitTopbarTitle = computed(() => {
   const title = `${t.value.gitMenu} · ${props.gitAvailability?.currentBranch || 'HEAD'}`
   const ahead = Number(props.gitAvailability?.ahead) || 0
@@ -181,14 +180,37 @@ const gitTopbarTitle = computed(() => {
 })
 
 // 终端是工作区能力：仅在没有任何工作区时才收起顶栏终端面板。
-watch(() => hasWorkspace.value, has => { if (!has) terminalOpen.value = false })
+watch(() => hasWorkspace.value, has => {
+  if (!has) {
+    terminalOpen.value = false
+    terminalMinimized.value = false
+  }
+})
+// 顶栏终端按钮：面板打开可见时只最小化（保留全部终端资源），隐藏/关闭时打开。
+// 只有面板内叉叉（@close）才关闭并释放资源。
+function toggleTerminal() {
+  if (terminalOpen.value && !terminalMinimized.value) {
+    terminalMinimized.value = true
+  } else {
+    terminalOpen.value = true
+    terminalMinimized.value = false
+  }
+}
 </script>
 
 <template>
   <div class="chat-view">
     <main class="chat-main">
-      <div class="chat-main__topbar">
-        <div class="chat-main__topbar__actions">
+      <ChatHeader
+        :title="activeTitle"
+        :session-id="sessionId"
+        :created-at="activeCreatedAt"
+        :execution-elapsed-ms="executionElapsedMs"
+        :execution-running="executionRunning"
+        :t="t"
+      >
+        <template #actions>
+          <div class="chat-main__topbar__actions">
           <button
             v-if="changeSummaryVisible"
             class="change-summary"
@@ -211,10 +233,10 @@ watch(() => hasWorkspace.value, has => { if (!has) terminalOpen.value = false })
             v-if="hasWorkspace"
             class="topbar-btn"
             type="button"
-            :title="terminalOpen ? t.terminalHide : t.terminalOpen"
-            :aria-label="terminalOpen ? t.terminalHide : t.terminalOpen"
-            :aria-pressed="terminalOpen"
-            @click="terminalOpen = !terminalOpen"
+            :title="terminalOpen && !terminalMinimized ? t.terminalMinimize : t.terminalOpen"
+            :aria-label="terminalOpen && !terminalMinimized ? t.terminalMinimize : t.terminalOpen"
+            :aria-pressed="terminalOpen && !terminalMinimized"
+            @click="toggleTerminal"
           >
             <SquareTerminal :size="18" />
           </button>
@@ -243,18 +265,9 @@ watch(() => hasWorkspace.value, has => { if (!has) terminalOpen.value = false })
           >
             <component :is="rightSidebarOpen ? PanelRightClose : PanelRightOpen" :size="18" />
           </button>
-        </div>
-      </div>
-
-      <ChatHeader
-        :title="activeTitle"
-        :session-id="sessionId"
-        :created-at="activeCreatedAt"
-        :connected="connected"
-        :execution-elapsed-ms="executionElapsedMs"
-        :execution-running="executionRunning"
-        :t="t"
-      />
+          </div>
+        </template>
+      </ChatHeader>
 
       <ChatMessages
         :messages="messagesList"
@@ -294,6 +307,7 @@ watch(() => hasWorkspace.value, has => { if (!has) terminalOpen.value = false })
         :token-stats="tokenStats"
         :context-window="contextWindow"
         :context-usage="contextUsage"
+        :current-work-dir="currentWorkDir"
         :plan-items="planItems"
         :execution-plan="executionPlan"
         :extension-dialog="extensionDialog"
@@ -327,13 +341,19 @@ watch(() => hasWorkspace.value, has => { if (!has) terminalOpen.value = false })
         @ack-subagent-dialog="emit('ack-subagent-dialog', $event)"
       />
 
-      <transition name="terminal-slide">
+      <transition name="terminal-scan">
         <TerminalPanel
           v-if="terminalOpen && hasWorkspace"
+          v-show="!terminalMinimized"
           :open="terminalOpen"
+          :minimized="terminalMinimized"
           :session-id="sessionId"
+          :workspace="currentWorkDir"
+          :workspace-revision="workspaceRevision"
+          :workspace-activating="workspaceActivating"
           :t="t"
-          @close="terminalOpen = false"
+          @close="terminalOpen = false; terminalMinimized = false"
+          @update:minimized="terminalMinimized = $event"
           @error="emit('artifact-error', $event)"
         />
       </transition>

@@ -17,10 +17,13 @@ type GitFileAnalysisRequest struct {
 	Scope      string `json:"scope"`
 	Path       string `json:"path"`
 	BaseBranch string `json:"baseBranch,omitempty"`
-	Commit     string `json:"commit,omitempty"`
-	Language   string `json:"language,omitempty"`
-	Provider   string `json:"provider,omitempty"`
-	Model      string `json:"model,omitempty"`
+	// Left and Right select the two refs of a "compare" scope review.
+	Left     string `json:"left,omitempty"`
+	Right    string `json:"right,omitempty"`
+	Commit   string `json:"commit,omitempty"`
+	Language string `json:"language,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // GitFileAnalysisResult contains an isolated model review of one file change.
@@ -50,6 +53,14 @@ func (a *App) GenerateSessionGitFileAnalysis(req GitFileAnalysisRequest) (GitFil
 	switch scope {
 	case "worktree", "staged", "unstaged", "untracked", "branch":
 		detail, err = a.GetSessionGitFileDetail(req.SessionID, scope, path, strings.TrimSpace(req.BaseBranch))
+	case "compare":
+		detail, err = a.GetSessionGitCompareFileDetail(GitCompareFileDetailRequest{
+			SessionID: req.SessionID,
+			Left:      strings.TrimSpace(req.Left),
+			Right:     strings.TrimSpace(req.Right),
+			Path:      path,
+			Language:  req.Language,
+		})
 	case "commit":
 		detail, err = a.GetSessionGitCommitFileDetail(GitCommitFileDetailRequest{
 			SessionID: req.SessionID,

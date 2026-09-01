@@ -1,9 +1,9 @@
 <script setup>
-import { Bot, Box, Check, Database, Folder, FolderKanban, GitBranch, Globe2, KeyRound, LoaderCircle, Plus, Settings, Trash2 } from 'lucide-vue-next'
+import { Bot, Box, Database, Folder, FolderKanban, GitBranch, Globe2, KeyRound, LoaderCircle, Plus, Settings, Trash2 } from 'lucide-vue-next'
 import IconPlay from '../icons/IconPlay.vue'
 import { useAppContext } from '../../composables/appContext'
 
-const { t, environmentTab, config, openWsEditor, openSshEditor, selectedWorkspace, selectedWorkspaceId, wsDraft, newWsId, wsBusy, requestDeleteWs, workspaceRemotes, remoteSsh, setActiveWorkspace, requestDeleteSsh, openDbEditor, requestDeleteDb, testDb, dbTestStates, dbBusy, workspaceDbConnections, testSsh, sshTestStates } = useAppContext()
+const { t, environmentTab, config, openWsEditor, openSshEditor, selectedWorkspace, selectedWorkspaceId, wsDraft, newWsId, wsBusy, requestDeleteWs, workspaceRemotes, remoteSsh, requestDeleteSsh, openDbEditor, requestDeleteDb, testDb, dbTestStates, dbBusy, workspaceDbConnections, testSsh, sshTestStates } = useAppContext()
 
 function dbKindLabel(kind) {
   if (kind === 'postgres') return 'PostgreSQL'
@@ -112,8 +112,6 @@ function workspaceDefaultAgent(ws) {
                   <span v-if="workspaceDefaultAgent(selectedWorkspace)" class="workspace-default-agent" :title="t.wsDefaultAgentHint">
                     <Bot :size="12" />{{ t.wsDefaultAgent }}：{{ workspaceDefaultAgent(selectedWorkspace).name }}
                   </span>
-                  <span v-if="selectedWorkspace.id === config.activeEnvId" class="active-pill"><Check :size="12" />{{ t.wsActive }}</span>
-                  <button v-else class="secondary-button" :disabled="wsBusy" @click="setActiveWorkspace(selectedWorkspace)">{{ t.wsSetActive }}</button>
                 </div>
               </div>
             </div>

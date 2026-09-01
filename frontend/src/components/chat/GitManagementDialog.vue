@@ -1,13 +1,14 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
-  AlertTriangle, Brain, Check, ChevronDown, ChevronRight, Download, Folder, FolderOpen,
+  AlertTriangle, Archive, ArchiveRestore, Brain, Check, ChevronDown, ChevronRight, Download, Folder, FolderOpen,
   Ellipsis, Eye, EyeOff, GitBranch, GitCommitHorizontal, LoaderCircle, MessageSquarePlus, Plus, RefreshCw,
   RotateCcw, Search, Settings2, Sparkles, Trash2, Upload, X
 } from 'lucide-vue-next'
 import {
-  applyGitFileOperation, applyGitFileOperations, generateSessionGitCommitMessage,
-  getSessionGitOutgoingCommits, getSessionGitRepository, runSessionGitOperation
+  applyGitFileOperation, applyGitFileOperations, compareSessionGitBranches, generateSessionGitCommitMessage,
+  getSessionGitOutgoingCommits, getSessionGitRepository,
+  onEvent, refreshSessionGitRepository, runSessionGitOperation
 } from '../../backend.js'
 import { useAppContext } from '../../composables/appContext.js'
 import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
@@ -33,11 +34,13 @@ const props = defineProps({
   t: { type: Object, required: true },
   language: { type: String, default: 'zh-CN' },
   agentRunning: { type: Boolean, default: false },
+  workspace: { type: String, default: '' },
+  workspaceRevision: { type: Number, default: 0 },
   modelOptions: { type: Array, default: () => [] },
   selectedModelValue: { type: String, default: '' },
 })
 
-const emit = defineEmits(['close', 'resolve-conflicts', 'updated', 'add-to-chat'])
+const emit = defineEmits(['close', 'resolve-conflicts', 'updated', 'add-to-chat', 'add-selection-to-chat'])
 const { pushToast } = useAppContext()
 const dialogRoot = ref(null)
 const loading = ref(false)
@@ -49,8 +52,9 @@ const fileFilter = ref('')
 const commitMessage = ref('')
 const branchFilter = ref('')
 const newBranchName = ref('')
+const newBranchStartPoint = ref('HEAD')
 const showNewBranch = ref(false)
-const diffDialog = ref({ open: false, files: [], index: 0, scope: 'worktree', commit: '' })
+const diffDialog = ref({ open: false, files: [], index: 0, scope: 'worktree', commit: '', compareLeft: '', compareRight: '' })
 const conflictDialog = ref({ open: false, files: [], index: 0 })
 const outgoingDialogRoot = ref(null)
 const outgoingDialogOpen = ref(false)
@@ -75,18 +79,47 @@ const reloadingFileSections = ref(new Set())
 const collapsedFolders = ref(new Set())
 const collapsedSections = ref(new Set())
 const visibleRowLimits = ref({ conflicts: 240, both_deleted: 240, staged: 240, changed: 240 })
+
+// 分支对比 tab 状态
+const compareSnapshot = ref(null)
+const compareLoading = ref(false)
+const compareLoaded = ref(false)
+const compareTypeFilter = ref('')
+const compareError = ref('')
+const comparePickers = reactive({
+  left: { open: false, filter: '', selected: '', root: null, input: null },
+  right: { open: false, filter: '', selected: '', root: null, input: null },
+})
+const compareSides = [
+  { key: 'left', labelKey: 'gitCompareLeft' },
+  { key: 'right', labelKey: 'gitCompareRight' },
+]
+let compareRequestNonce = 0
 const moreMenu = ref(null)
 const moreMenuEl = ref(null)
+const stashCreateOpen = ref(false)
+const stashName = ref('')
+const stashIncludeStaged = ref(true)
+const stashIncludeChanged = ref(true)
+const stashRestoreOpen = ref(false)
+const stashRestoreTarget = ref(null)
+const stashDeleteOpen = ref(false)
+const stashDeleteTarget = ref(null)
 
 const GIT_FILE_ROW_BATCH = 240
 const GIT_AUTO_COLLAPSE_FILE_COUNT = 80
 
 function emptyRepository() {
   return {
-    isRepository: false, root: '', worktreePath: '', currentBranch: '', detached: false,
+    isRepository: false, warming: false, root: '', worktreePath: '', currentBranch: '', detached: false,
     head: '', upstream: '', ahead: 0, behind: 0, state: '', hasConflicts: false,
-    conflicts: [], worktree: { files: [], added: 0, deleted: 0 }, remotes: [], branches: [], commits: [],
+    conflicts: [], worktree: { files: [], added: 0, deleted: 0 }, remotes: [], branches: [], commits: [], stashes: [],
   }
+}
+
+function normalizedWorkspace(value) {
+  const normalized = String(value || '').trim().replaceAll('\\', '/').replace(/\/$/, '')
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized
 }
 
 const worktreeFiles = computed(() => repository.value.worktree?.files || [])
@@ -137,6 +170,60 @@ const selectedCommitModelLabel = computed(() => {
   const selected = props.modelOptions.find(option => option.value === gitCommitModel.value)
   return selected?.model || selected?.label || gitCommitModel.value
 })
+const selectedStashPaths = computed(() => {
+  const paths = new Set()
+  if (stashIncludeStaged.value) for (const file of stagedFiles.value) paths.add(file.path)
+  if (stashIncludeChanged.value) for (const file of changedFiles.value) paths.add(file.path)
+  return [...paths]
+})
+
+// 分支对比响应式数据
+const compareData = computed(() => compareSnapshot.value || {
+  isRepository: false, left: '', right: '', root: '',
+  files: [], added: 0, deleted: 0, ahead: 0, behind: 0,
+})
+const compareFiles = computed(() => compareData.value.files || [])
+const compareBranchOptions = computed(() => {
+  const all = repository.value.branches || []
+  return {
+    local: all.filter(branch => !branch.remote),
+    remote: all.filter(branch => branch.remote),
+  }
+})
+const filteredCompareOptions = computed(() => {
+  const match = (branches, query) => {
+    const q = query.trim().toLowerCase()
+    return q ? branches.filter(branch => branch.name.toLowerCase().includes(q)) : branches
+  }
+  return {
+    left: {
+      local: match(compareBranchOptions.value.local, comparePickers.left.filter),
+      remote: match(compareBranchOptions.value.remote, comparePickers.left.filter),
+    },
+    right: {
+      local: match(compareBranchOptions.value.local, comparePickers.right.filter),
+      remote: match(compareBranchOptions.value.remote, comparePickers.right.filter),
+    },
+  }
+})
+const hasCompareBranches = computed(() => compareBranchOptions.value.local.length > 0 || compareBranchOptions.value.remote.length > 0)
+const compareTypeFilterOptions = computed(() => {
+  const files = compareFiles.value
+  const count = status => files.filter(file => file.status === status).length
+  return [
+    { key: '', labelKey: 'gitCompareAll', count: files.length },
+    { key: 'added', labelKey: 'gitCompareAdded', count: count('added') },
+    { key: 'modified', labelKey: 'gitCompareModified', count: count('modified') },
+    { key: 'deleted', labelKey: 'gitCompareDeleted', count: count('deleted') },
+  ]
+})
+const filteredCompareFiles = computed(() => {
+  const files = compareFiles.value
+  if (!compareTypeFilter.value) return files
+  return files.filter(file => file.status === compareTypeFilter.value)
+})
+const compareTreeRows = computed(() => buildFileTreeRows(filteredCompareFiles.value, 'compare', !!compareTypeFilter.value))
+const visibleCompareTreeRows = computed(() => limitedRows('compare', compareTreeRows.value))
 let outgoingRequestNonce = 0
 let repositoryRequestNonce = 0
 
@@ -172,7 +259,7 @@ function showMoreRows(scope) {
 }
 
 function resetVisibleRowLimits() {
-  visibleRowLimits.value = { conflicts: GIT_FILE_ROW_BATCH, both_deleted: GIT_FILE_ROW_BATCH, staged: GIT_FILE_ROW_BATCH, changed: GIT_FILE_ROW_BATCH }
+  visibleRowLimits.value = { conflicts: GIT_FILE_ROW_BATCH, both_deleted: GIT_FILE_ROW_BATCH, staged: GIT_FILE_ROW_BATCH, changed: GIT_FILE_ROW_BATCH, compare: GIT_FILE_ROW_BATCH }
 }
 
 function filterBranches(branches) {
@@ -183,6 +270,11 @@ function filterBranches(branches) {
 
 watch(() => [props.open, props.sessionId], async ([open, sessionId], previous = []) => {
   if (!open) {
+    compareRequestNonce += 1
+    compareSnapshot.value = null
+    compareLoading.value = false
+    compareLoaded.value = false
+    resetComparePickers()
     repositoryRequestNonce += 1
     outgoingRequestNonce += 1
     outgoingDialogOpen.value = false
@@ -205,6 +297,11 @@ watch(() => [props.open, props.sessionId], async ([open, sessionId], previous = 
   selectedBothDeletedPaths.value = new Set()
   collapsedFolders.value = new Set()
   resetVisibleRowLimits()
+  compareRequestNonce += 1
+  compareSnapshot.value = null
+  compareLoading.value = false
+  compareLoaded.value = false
+  resetComparePickers()
   const cached = cachedCommitModel()
   gitCommitModel.value = enabledCommitModels.value.some(option => option.value === cached)
     ? cached
@@ -219,6 +316,7 @@ watch(() => [props.open, props.sessionId], async ([open, sessionId], previous = 
   collapsedSections.value = repository.value.hasConflicts ? new Set(['staged', 'changed']) : new Set()
   await nextTick()
   dialogRoot.value?.focus()
+  void revalidate()
 }, { immediate: true })
 
 watch(
@@ -234,6 +332,13 @@ watch(
 )
 
 watch(fileFilter, resetVisibleRowLimits)
+watch(() => props.workspaceRevision, () => {
+  if (props.open) void refresh(true)
+})
+
+watch(activeTab, (tab) => {
+  if (tab === 'compare' && props.open && !compareLoaded.value) void runCompare()
+})
 
 async function refresh(silent = false) {
   const requestNonce = ++repositoryRequestNonce
@@ -261,6 +366,20 @@ async function refresh(silent = false) {
   }
 }
 
+// 重新计算后端工作目录缓存。完成后后端广播 git:workspace，事件订阅随即静默刷新弹窗，
+// 因此打开弹窗时先渲染缓存模型，再自动替换为实时结果，不会展示过期的预热数据。
+async function revalidate(showLoading = false) {
+  if (showLoading) loading.value = true
+  try {
+    await refreshSessionGitRepository(props.sessionId)
+  } catch (cause) {
+    console.warn('refresh Git repository cache failed', cause)
+    if (showLoading) error.value = formatError(cause)
+  } finally {
+    if (showLoading) loading.value = false
+  }
+}
+
 function setFileSectionsReloading(scopes, reloading) {
   if (!scopes.length) return
   const next = new Set(reloadingFileSections.value)
@@ -268,8 +387,83 @@ function setFileSectionsReloading(scopes, reloading) {
   reloadingFileSections.value = next
 }
 
+function applyOptimisticFileOperation(op, files) {
+  const targets = new Set((files || []).map(file => file.path))
+  if (!targets.size) return
+  const nextFiles = []
+  for (const current of worktreeFiles.value) {
+    if (!targets.has(current.path)) {
+      nextFiles.push(current)
+      continue
+    }
+    if (op === 'delete_untracked') continue
+    if (op === 'discard_tracked') {
+      if (current.staged) {
+        nextFiles.push({
+          ...current,
+          unstaged: false,
+          untracked: false,
+          unstagedAdded: 0,
+          unstagedDeleted: 0,
+          added: current.stagedAdded || 0,
+          deleted: current.stagedDeleted || 0,
+        })
+      }
+      continue
+    }
+    if (op === 'stage' || op === 'track') {
+      nextFiles.push({
+        ...current,
+        status: current.untracked ? 'added' : current.status,
+        staged: true,
+        unstaged: false,
+        untracked: false,
+        stagedAdded: (current.stagedAdded || 0) + (current.unstagedAdded || current.added || 0),
+        stagedDeleted: (current.stagedDeleted || 0) + (current.unstagedDeleted || current.deleted || 0),
+        unstagedAdded: 0,
+        unstagedDeleted: 0,
+      })
+      continue
+    }
+    if (op === 'unstage') {
+      const becomesUntracked = current.status === 'added'
+      nextFiles.push({
+        ...current,
+        staged: false,
+        unstaged: !becomesUntracked,
+        untracked: becomesUntracked,
+        unstagedAdded: current.stagedAdded || current.added || 0,
+        unstagedDeleted: current.stagedDeleted || current.deleted || 0,
+        stagedAdded: 0,
+        stagedDeleted: 0,
+      })
+      continue
+    }
+    if (op === 'resolve_both_deleted') {
+      nextFiles.push({ ...current, status: 'deleted', conflictStatus: '', conflicted: false, staged: true, unstaged: false })
+      continue
+    }
+    nextFiles.push(current)
+  }
+  repository.value = {
+    ...repository.value,
+    worktree: { ...repository.value.worktree, files: nextFiles },
+    conflicts: nextFiles.filter(file => file.conflicted),
+    hasConflicts: nextFiles.some(file => file.conflicted),
+  }
+  reconcileSelections()
+  emit('updated', {
+    isRepository: repository.value.isRepository,
+    root: repository.value.root,
+    currentBranch: repository.value.currentBranch,
+    changeCount: nextFiles.length,
+    ahead: repository.value.ahead || 0,
+    hasConflicts: repository.value.hasConflicts,
+  })
+}
+
 function close() {
-  if (busy.value || diffDialog.value.open || conflictDialog.value.open || outgoingDialogOpen.value || confirmFileOpen.value || resetConfirmOpen.value || checkoutConfirmOpen.value || commitPromptOpen.value) return
+  if (busy.value || diffDialog.value.open || conflictDialog.value.open || outgoingDialogOpen.value || confirmFileOpen.value || resetConfirmOpen.value || checkoutConfirmOpen.value || stashCreateOpen.value || stashRestoreOpen.value || stashDeleteOpen.value || commitPromptOpen.value) return
   emit('close')
 }
 
@@ -282,22 +476,36 @@ function closeMoreMenu() {
   moreMenu.value = null
 }
 
-function openMoreMenu(event, target) {
-  if (operationsLocked.value || target.conflicted) return
-  const key = `${target.isDirectory ? 'folder' : 'file'}:${target.path}`
+function positionMoreMenu(event, target, key, menuHeight = 76) {
   if (moreMenu.value?.key === key) {
     closeMoreMenu()
     return
   }
   const rect = event.currentTarget.getBoundingClientRect()
   const menuWidth = 210
-  const menuHeight = 76
   moreMenu.value = {
     ...target,
     key,
     left: Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8)),
     top: rect.bottom + menuHeight + 8 > window.innerHeight ? rect.top - menuHeight - 4 : rect.bottom + 4,
   }
+}
+
+function openMoreMenu(event, target) {
+  if (operationsLocked.value || target.conflicted) return
+  const key = `${target.isDirectory ? 'folder' : 'file'}:${target.path}`
+  positionMoreMenu(event, { ...target, kind: 'file' }, key)
+}
+
+function openCommitMoreMenu(event, commit) {
+  if (operationsLocked.value || repository.value.detached || repository.value.state || !commit?.hash) return
+  positionMoreMenu(event, { kind: 'commit', commit }, `commit:${commit.hash}`)
+}
+
+function resetCommitFromMoreMenu(hard = false) {
+  const commit = moreMenu.value?.commit
+  closeMoreMenu()
+  if (commit) void requestResetCommit(commit, hard)
 }
 
 function selectCommitModel(option) {
@@ -307,21 +515,36 @@ function selectCommitModel(option) {
   commitModelMenuOpen.value = false
 }
 
+let offGitWorkspace = null
+
 onMounted(() => {
   document.addEventListener('pointerdown', onDocumentPointerDown)
+  document.addEventListener('click', closeCompareSelectIfOutside)
   document.addEventListener('scroll', closeMoreMenu, true)
   window.addEventListener('resize', closeMoreMenu)
+  // 后端完成工作目录缓存刷新后推送事件，弹窗借此把缓存模型替换为实时结果。
+  offGitWorkspace = onEvent('git:workspace', payload => {
+    const expected = normalizedWorkspace(props.workspace || repository.value.worktreePath || repository.value.root)
+    if (!expected || normalizedWorkspace(payload?.workspace) !== expected) return
+    if (props.open) void refresh(true)
+  })
 })
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocumentPointerDown)
+  document.removeEventListener('click', closeCompareSelectIfOutside)
   document.removeEventListener('scroll', closeMoreMenu, true)
   window.removeEventListener('resize', closeMoreMenu)
+  offGitWorkspace?.()
 })
 
 function onKeydown(event) {
   if (event.key !== 'Escape') return
   if (moreMenu.value) {
     closeMoreMenu()
+    return
+  }
+  if (comparePickers.left.open || comparePickers.right.open) {
+    closeCompareSelects()
     return
   }
   close()
@@ -335,15 +558,21 @@ async function runOperation(op, extra = {}, busyKey = op) {
   error.value = ''
   try {
     const result = await runSessionGitOperation({ sessionId: props.sessionId, op, language: props.language, ...extra })
-    pushToast('success', result?.message || props.t.gitOperationCompleted)
+    pushToast(result?.hasConflicts || result?.stashKept ? 'info' : 'success', result?.message || props.t.gitOperationCompleted)
     if (op === 'commit') {
       commitMessage.value = ''
     }
     if (op === 'create_branch') {
       newBranchName.value = ''
+      newBranchStartPoint.value = 'HEAD'
       showNewBranch.value = false
     }
     await refresh(true)
+    if (result?.hasConflicts) {
+      activeTab.value = 'changes'
+      const conflicts = result?.conflicts?.length ? result.conflicts : repository.value.conflicts
+      if (conflicts?.length) openConflict(conflicts, 0)
+    }
     return true
   } catch (cause) {
     error.value = formatError(cause)
@@ -356,22 +585,23 @@ async function runOperation(op, extra = {}, busyKey = op) {
 }
 
 async function runFileOperation(op, file) {
-  if (busy.value || props.agentRunning) return
-  const reloadScopes = ['stage', 'unstage'].includes(op) ? ['staged', 'changed'] : []
+  if (busy.value || props.agentRunning) return false
   busy.value = `${op}:${file.path}`
-  setFileSectionsReloading(reloadScopes, true)
   error.value = ''
   try {
     await applyGitFileOperation(props.sessionId, op, file.path, !!file.isDirectory)
     const successMessage = op === 'ignore'
       ? (file.pendingCommit ? props.t.gitIgnoreAddedPending : props.t.gitIgnoreAdded)
       : props.t.gitOperationCompleted
+    applyOptimisticFileOperation(op, [file])
     pushToast('success', successMessage)
-    await refresh(true)
+    if (op === 'ignore') void refresh(true)
+    return true
   } catch (cause) {
     error.value = formatError(cause)
+    void refresh(true)
+    return false
   } finally {
-    setFileSectionsReloading(reloadScopes, false)
     busy.value = ''
   }
 }
@@ -409,26 +639,23 @@ async function runBatchFileOperation(op, files, scope) {
     ? (files || []).filter(file => file.conflictStatus === 'DD')
     : (files || []).filter(file => !file.conflicted)
   const paths = Array.from(new Set(eligibleFiles.map(file => file.path)))
-  if (busy.value || props.agentRunning || !paths.length) return
-  const reloadScopes = ['stage', 'unstage'].includes(op)
-    ? ['staged', 'changed']
-    : op === 'resolve_both_deleted' ? ['both_deleted', 'conflicts', 'staged'] : []
+  if (busy.value || props.agentRunning || !paths.length) return false
   busy.value = `${op}:batch`
-  setFileSectionsReloading(reloadScopes, true)
   error.value = ''
   try {
     await applyGitFileOperations(props.sessionId, op, paths)
     const message = op === 'resolve_both_deleted'
       ? props.t.gitBothDeletedResolved.replace('{count}', paths.length)
       : props.t.gitBatchOperationCompleted.replace('{count}', paths.length)
+    applyOptimisticFileOperation(op, eligibleFiles)
     pushToast('success', message)
     clearSelectedPaths(scope, paths)
-    await refresh(true)
+    return true
   } catch (cause) {
     error.value = formatError(cause)
-    await refresh(true)
+    void refresh(true)
+    return false
   } finally {
-    setFileSectionsReloading(reloadScopes, false)
     busy.value = ''
   }
 }
@@ -467,8 +694,10 @@ async function confirmDestructiveFileOperation() {
     confirmFileOperation.value = null
     return
   }
-  if (target.files.length === 1) await runFileOperation(target.op, target.files[0])
-  else await runBatchFileOperation(target.op, target.files, target.scope || 'changed')
+  const completed = target.files.length === 1
+    ? await runFileOperation(target.op, target.files[0])
+    : await runBatchFileOperation(target.op, target.files, target.scope || 'changed')
+  if (!completed) return
   confirmFileOpen.value = false
   confirmFileOperation.value = null
 }
@@ -552,6 +781,7 @@ function allFolderKeys() {
     ...collectFolderKeys(bothDeletedFiles.value, 'both_deleted'),
     ...collectFolderKeys(stagedFiles.value, 'staged'),
     ...collectFolderKeys(changedFiles.value, 'changed'),
+    ...collectFolderKeys(compareFiles.value, 'compare'),
   ])
 }
 
@@ -696,7 +926,14 @@ async function submitCommitAndPush() {
 function createBranch() {
   const branch = newBranchName.value.trim()
   if (!branch) return
-  void runOperation('create_branch', { branch, startPoint: 'HEAD' })
+  void runOperation('create_branch', { branch, startPoint: newBranchStartPoint.value })
+}
+
+function openNewBranch(branch) {
+  if (operationsLocked.value) return
+  newBranchName.value = ''
+  newBranchStartPoint.value = branch.fullName || branch.name || 'HEAD'
+  showNewBranch.value = true
 }
 
 function requestCheckoutBranch(branch, remote = false) {
@@ -712,6 +949,54 @@ function confirmCheckout() {
   if (!target) return
   const op = target.remote ? 'checkout_remote' : 'checkout'
   void runOperation(op, { branch: target.branch.name }, `${op}:${target.branch.fullName || target.branch.name}`)
+}
+
+function openCreateStash() {
+  if (operationsLocked.value || repository.value.hasConflicts || repository.value.state || !worktreeFiles.value.length) return
+  stashName.value = ''
+  stashIncludeStaged.value = stagedFiles.value.length > 0
+  stashIncludeChanged.value = changedFiles.value.length > 0
+  stashCreateOpen.value = true
+}
+
+async function createStash() {
+  const message = stashName.value.trim()
+  const paths = selectedStashPaths.value
+  if (!message || !paths.length) return
+  const completed = await runOperation('stash_create', { message, paths })
+  if (!completed) return
+  stashCreateOpen.value = false
+  stashName.value = ''
+}
+
+function requestRestoreStash(stash) {
+  if (operationsLocked.value || !stash?.hash) return
+  stashRestoreTarget.value = stash
+  stashRestoreOpen.value = true
+}
+
+async function confirmRestoreStash() {
+  const stash = stashRestoreTarget.value
+  if (!stash?.hash) return
+  const completed = await runOperation('stash_apply', { stashHash: stash.hash }, `stash_apply:${stash.hash}`)
+  if (!completed) return
+  stashRestoreOpen.value = false
+  stashRestoreTarget.value = null
+}
+
+function requestDeleteStash(stash) {
+  if (operationsLocked.value || !stash?.hash) return
+  stashDeleteTarget.value = stash
+  stashDeleteOpen.value = true
+}
+
+async function confirmDeleteStash() {
+  const stash = stashDeleteTarget.value
+  if (!stash?.hash) return
+  const completed = await runOperation('stash_drop', { stashHash: stash.hash }, `stash_drop:${stash.hash}`)
+  if (!completed) return
+  stashDeleteOpen.value = false
+  stashDeleteTarget.value = null
 }
 
 function openDiff(files, index) {
@@ -741,6 +1026,88 @@ function openOutgoingDiff(file) {
     index: Math.max(0, (commit.files || []).findIndex(item => item.path === file.path)),
     scope: 'commit',
     commit: commit.hash,
+  }
+}
+
+function resetComparePickers() {
+  comparePickers.left = { open: false, filter: '', selected: '', root: null, input: null }
+  comparePickers.right = { open: false, filter: '', selected: '', root: null, input: null }
+  compareTypeFilter.value = ''
+  compareError.value = ''
+}
+
+async function runCompare() {
+  if (compareLoading.value) return
+  const nonce = ++compareRequestNonce
+  compareLoading.value = true
+  compareError.value = ''
+  try {
+    const result = await compareSessionGitBranches(props.sessionId, comparePickers.left.selected, comparePickers.right.selected)
+    if (nonce !== compareRequestNonce || !props.open) return
+    compareSnapshot.value = result
+    compareLoaded.value = true
+    if (result?.left) comparePickers.left.selected = result.left
+    if (result?.right) comparePickers.right.selected = result.right
+    compareTypeFilter.value = ''
+  } catch {
+    if (nonce === compareRequestNonce && props.open) compareError.value = props.t.gitCompareFailed
+  } finally {
+    if (nonce === compareRequestNonce) compareLoading.value = false
+  }
+}
+
+function toggleCompareSelect(side) {
+  if (compareLoading.value) return
+  const picker = comparePickers[side]
+  if (picker.open) {
+    closeCompareSelects()
+    return
+  }
+  closeCompareSelects()
+  picker.open = true
+  picker.filter = ''
+  nextTick(() => picker.input?.focus())
+}
+
+function chooseCompareBranch(side, branch) {
+  comparePickers[side].selected = branch
+  closeCompareSelects()
+}
+
+function closeCompareSelects() {
+  comparePickers.left.open = false
+  comparePickers.right.open = false
+  comparePickers.left.filter = ''
+  comparePickers.right.filter = ''
+}
+
+function closeCompareSelectIfOutside(event) {
+  const insideLeft = comparePickers.left.root?.contains(event.target)
+  const insideRight = comparePickers.right.root?.contains(event.target)
+  if (insideLeft || insideRight) return
+  if (comparePickers.left.open || comparePickers.right.open) closeCompareSelects()
+}
+
+function onCompareFilterKeydown(side, event) {
+  if (event.key === 'Escape') {
+    closeCompareSelects()
+    return
+  }
+  if (event.key !== 'Enter') return
+  const grouped = filteredCompareOptions.value[side]
+  const first = [...grouped.local, ...grouped.remote][0]
+  if (first) chooseCompareBranch(side, first.name)
+}
+
+function openBranchDiff(files, index) {
+  diffDialog.value = {
+    open: true,
+    files,
+    index,
+    scope: 'compare',
+    commit: '',
+    compareLeft: comparePickers.left.selected || compareData.value.left || '',
+    compareRight: comparePickers.right.selected || compareData.value.right || '',
   }
 }
 
@@ -871,8 +1238,8 @@ function statusLabel(file) {
           </div>
           <div v-if="repository.isRepository" class="git-manager__head-status">
             <span class="git-manager__branch"><GitBranch :size="13" />{{ repository.currentBranch || repository.head || 'HEAD' }}</span>
-            <span v-if="repository.upstream || repository.ahead > 0 || repository.behind > 0" class="git-manager__sync">
-              <span>↓{{ repository.behind || 0 }}</span>
+            <span v-if="repository.ahead > 0 || repository.behind > 0" class="git-manager__sync">
+              <span v-if="repository.behind > 0">↓{{ repository.behind }}</span>
               <button
                 v-if="repository.ahead > 0"
                 type="button"
@@ -880,13 +1247,17 @@ function statusLabel(file) {
                 :aria-label="t.gitPendingPush.replace('{count}', repository.ahead)"
                 @click="openOutgoingDialog"
               >↑{{ repository.ahead }}</button>
-              <span v-else>↑0</span>
             </span>
           </div>
           <button class="git-manager__close" type="button" :title="t.close" :disabled="!!busy" @click="close"><X :size="17" /></button>
         </header>
 
-        <div v-if="!loading && !repository.isRepository" class="git-manager__empty">
+        <div v-if="repository.warming" class="git-manager__empty">
+          <LoaderCircle class="spin" :size="24" />
+          <strong>{{ t.gitManagerLoading }}</strong>
+        </div>
+
+        <div v-else-if="!loading && !repository.isRepository" class="git-manager__empty">
           <GitBranch :size="30" />
           <strong>{{ t.gitNotRepository }}</strong>
           <p>{{ t.gitNotRepositoryHint }}</p>
@@ -900,6 +1271,9 @@ function statusLabel(file) {
               </button>
               <button :class="{ active: activeTab === 'branches' }" type="button" @click="activeTab = 'branches'">
                 {{ t.gitManagerBranches }}<span>{{ repository.branches?.length || 0 }}</span>
+              </button>
+              <button :class="{ active: activeTab === 'compare' }" type="button" @click="activeTab = 'compare'">
+                {{ t.gitManagerCompare }}<span>{{ compareFiles.length }}</span>
               </button>
               <button :class="{ active: activeTab === 'history' }" type="button" @click="activeTab = 'history'">
                 {{ t.gitManagerHistory }}
@@ -915,7 +1289,7 @@ function statusLabel(file) {
               <button type="button" :title="t.gitPush" :disabled="operationsLocked || !repository.remotes?.length || repository.detached" @click="openOutgoingDialog">
                 <Upload :size="14" />{{ t.gitPush }}
               </button>
-              <button class="is-icon" type="button" :title="t.refreshChanges" :disabled="!!busy || loading" @click="refresh()">
+              <button class="is-icon" type="button" :title="t.refreshChanges" :disabled="!!busy || loading" @click="revalidate(true)">
                 <LoaderCircle v-if="loading" class="spin" :size="14" /><RefreshCw v-else :size="14" />
               </button>
             </div>
@@ -945,6 +1319,7 @@ function statusLabel(file) {
             </label>
             <span v-if="fileFilter.trim()">{{ t.gitMatchingFiles.replace('{matched}', filteredWorktreeFiles.length).replace('{total}', worktreeFiles.length) }}</span>
             <span v-else>{{ t.gitTotalFiles.replace('{count}', worktreeFiles.length) }}</span>
+            <button type="button" :title="t.gitStashCreate" :disabled="operationsLocked || repository.hasConflicts || !!repository.state || !worktreeFiles.length" @click="openCreateStash"><Archive :size="13" />{{ t.gitStashCreate }}</button>
             <button type="button" :title="t.gitCollapseAllFolders" @click="collapseAllFolders"><Folder :size="13" />{{ t.gitCollapseAllFolders }}</button>
             <button type="button" :title="t.gitExpandAllFolders" @click="expandAllFolders"><FolderOpen :size="13" />{{ t.gitExpandAllFolders }}</button>
           </div>
@@ -1033,6 +1408,34 @@ function statusLabel(file) {
                 <p v-if="!sectionCollapsed('both_deleted') && fileFilter.trim() && !filteredBothDeletedFiles.length" class="git-manager__section-empty">{{ t.gitNoMatchingFiles }}</p>
                 <button v-if="!sectionCollapsed('both_deleted') && remainingRowCount('both_deleted', bothDeletedTreeRows)" class="git-manager__show-more" type="button" @click="showMoreRows('both_deleted')">{{ t.gitShowMoreRows.replace('{count}', Math.min(GIT_FILE_ROW_BATCH, remainingRowCount('both_deleted', bothDeletedTreeRows))) }}</button>
                 <div v-if="!sectionCollapsed('both_deleted') && bothDeletedSectionReloading" class="git-manager__section-loading is-overlay" role="status" :aria-label="t.gitChangesReloading"><LoaderCircle class="spin" :size="22" /><span>{{ t.gitChangesReloading }}</span></div>
+              </section>
+
+              <section v-if="repository.stashes?.length" class="git-manager__file-section is-stashes">
+                <header>
+                  <div class="git-manager__section-title">
+                    <button class="git-manager__section-toggle" type="button" :aria-expanded="!sectionCollapsed('stashes')" :title="sectionCollapsed('stashes') ? t.gitExpandSection : t.gitCollapseSection" @click="toggleSection('stashes')">
+                      <ChevronRight v-if="sectionCollapsed('stashes')" :size="14" /><ChevronDown v-else :size="14" />
+                    </button>
+                    <Archive :size="15" />
+                    <strong>{{ t.gitStashSection }}</strong><span>{{ repository.stashes.length }}</span>
+                  </div>
+                </header>
+                <div v-if="!sectionCollapsed('stashes')" class="git-manager__files git-manager__stash-list">
+                  <article v-for="stash in repository.stashes" :key="stash.hash" class="git-manager__stash-item">
+                    <Archive :size="15" />
+                    <div>
+                      <strong :title="stash.name">{{ stash.name }}</strong>
+                      <small>{{ stash.branch || t.gitStashUnknownBranch }} · {{ formatDate(stash.timestamp) }}</small>
+                    </div>
+                    <code>{{ stash.ref }}</code>
+                    <button type="button" :disabled="operationsLocked || !!repository.state" @click="requestRestoreStash(stash)">
+                      <LoaderCircle v-if="busy === `stash_apply:${stash.hash}`" class="spin" :size="13" /><ArchiveRestore v-else :size="13" />{{ t.gitStashRestore }}
+                    </button>
+                    <button class="is-danger" type="button" :disabled="operationsLocked" @click="requestDeleteStash(stash)">
+                      <LoaderCircle v-if="busy === `stash_drop:${stash.hash}`" class="spin" :size="13" /><Trash2 v-else :size="13" />{{ t.delete }}
+                    </button>
+                  </article>
+                </div>
               </section>
 
               <section class="git-manager__file-section is-staged" :aria-busy="stagedSectionReloading">
@@ -1275,15 +1678,14 @@ function statusLabel(file) {
           <div v-else-if="activeTab === 'branches'" class="git-manager__branches">
             <div class="git-manager__branch-tools">
               <label><Search :size="14" /><input v-model="branchFilter" :placeholder="t.gitFilterBranches" /></label>
-              <button type="button" @click="showNewBranch = !showNewBranch"><Plus :size="14" />{{ t.gitNewBranch }}</button>
             </div>
             <div v-if="showNewBranch" class="git-manager__new-branch">
               <input v-model="newBranchName" :placeholder="t.gitNewBranchPlaceholder" :disabled="busy === 'create_branch'" @keydown.enter="createBranch" />
-              <span>{{ t.gitBranchFrom }} {{ repository.currentBranch || repository.head }}</span>
-              <button type="button" :disabled="operationsLocked || !newBranchName.trim()" @click="createBranch">
+              <span>{{ t.gitBranchFrom }} {{ newBranchStartPoint }}<template v-if="worktreeFiles.length"> · {{ t.gitBranchAutoStashHint }}</template></span>
+              <button class="git-manager__new-branch-confirm" type="button" :disabled="operationsLocked || !newBranchName.trim()" @click="createBranch">
                 <LoaderCircle v-if="busy === 'create_branch'" class="spin" :size="13" /><Plus v-else :size="13" />{{ t.gitCreateBranchConfirm }}
               </button>
-              <button type="button" @click="showNewBranch = false">{{ t.cancel }}</button>
+              <button type="button" @click="showNewBranch = false; newBranchStartPoint = 'HEAD'">{{ t.cancel }}</button>
             </div>
             <div class="git-manager__branch-columns">
               <section>
@@ -1294,8 +1696,11 @@ function statusLabel(file) {
                     <span class="git-manager__branch-item-name"><strong :title="branch.name">{{ branch.name }}</strong><small>{{ branch.subject }}</small></span>
                     <em v-if="branch.current">{{ t.gitCurrent }}</em>
                     <em v-else-if="branch.worktreePath">{{ t.gitInOtherWorktree }}</em>
-                    <em v-else-if="branch.upstream">↓{{ branch.behind || 0 }} ↑{{ branch.ahead || 0 }}</em>
-                    <button class="git-manager__branch-checkout" type="button" :disabled="operationsLocked || branch.current || (branch.worktreePath && branch.worktreePath !== repository.worktreePath)" @click="requestCheckoutBranch(branch)">{{ t.gitCheckout }}</button>
+                    <em v-else-if="branch.upstream && (branch.behind > 0 || branch.ahead > 0)"><span v-if="branch.behind > 0">↓{{ branch.behind }}</span><span v-if="branch.ahead > 0">↑{{ branch.ahead }}</span></em>
+                    <span class="git-manager__branch-actions">
+                      <button class="git-manager__branch-new" type="button" :disabled="operationsLocked" @click="openNewBranch(branch)"><Plus :size="12" />{{ t.gitNewBranch }}</button>
+                      <button v-if="!branch.current" class="git-manager__branch-checkout" type="button" :disabled="operationsLocked || (branch.worktreePath && branch.worktreePath !== repository.worktreePath)" @click="requestCheckoutBranch(branch)">{{ t.gitCheckout }}</button>
+                    </span>
                   </div>
                 </div>
               </section>
@@ -1306,14 +1711,17 @@ function statusLabel(file) {
                     <LoaderCircle v-if="busy === `checkout_remote:${branch.fullName || branch.name}`" class="spin" :size="15" /><GitBranch v-else :size="15" />
                     <span class="git-manager__branch-item-name"><strong :title="branch.name">{{ branch.name }}</strong><small>{{ branch.subject }}</small></span>
                     <em>{{ branch.sha }}</em>
-                    <button class="git-manager__branch-checkout" type="button" :disabled="operationsLocked" @click="requestCheckoutBranch(branch, true)">{{ t.gitCheckout }}</button>
+                    <span class="git-manager__branch-actions">
+                      <button class="git-manager__branch-new" type="button" :disabled="operationsLocked" @click="openNewBranch(branch)"><Plus :size="12" />{{ t.gitNewBranch }}</button>
+                      <button class="git-manager__branch-checkout" type="button" :disabled="operationsLocked" @click="requestCheckoutBranch(branch, true)">{{ t.gitCheckout }}</button>
+                    </span>
                   </div>
                 </div>
               </section>
             </div>
           </div>
 
-          <div v-else class="git-manager__history">
+          <div v-else-if="activeTab === 'history'" class="git-manager__history">
             <header><strong>{{ t.gitRecentCommits }}</strong><span>{{ t.gitRecentCommitsHint }}</span></header>
             <div v-if="repository.commits?.length" class="git-manager__commit-list">
               <article v-for="commit in repository.commits" :key="commit.hash">
@@ -1321,17 +1729,162 @@ function statusLabel(file) {
                 <div><strong>{{ commit.subject }}</strong><small>{{ commit.author }} · {{ formatDate(commit.timestamp) }}</small></div>
                 <span v-if="commit.decorations" class="git-manager__decorations">{{ commit.decorations }}</span>
                 <code>{{ commit.shortHash }}</code>
-                <div class="git-manager__commit-actions">
-                  <button type="button" :disabled="operationsLocked || repository.detached || !!repository.state" :title="t.gitResetMixedHint" @click="requestResetCommit(commit)">
-                    <LoaderCircle v-if="busy === `reset_mixed:${commit.hash}`" class="spin" :size="13" /><RotateCcw v-else :size="13" />{{ t.gitResetMixed }}
-                  </button>
-                  <button class="is-danger" type="button" :disabled="operationsLocked || repository.detached || !!repository.state" :title="t.gitResetHardHint" @click="requestResetCommit(commit, true)">
-                    <LoaderCircle v-if="busy === `reset_hard:${commit.hash}`" class="spin" :size="13" /><Trash2 v-else :size="13" />{{ t.gitResetHard }}
-                  </button>
-                </div>
+                <button
+                  class="git-manager__commit-more"
+                  type="button"
+                  :title="t.gitMoreActions"
+                  :aria-label="`${t.gitMoreActions}: ${commit.shortHash}`"
+                  aria-haspopup="menu"
+                  :aria-expanded="moreMenu?.key === `commit:${commit.hash}`"
+                  :disabled="operationsLocked || repository.detached || !!repository.state"
+                  @click.stop="openCommitMoreMenu($event, commit)"
+                >
+                  <LoaderCircle v-if="busy === `reset_mixed:${commit.hash}` || busy === `reset_hard:${commit.hash}`" class="spin" :size="14" /><Ellipsis v-else :size="16" />
+                </button>
               </article>
             </div>
             <p v-else class="git-manager__section-empty">{{ t.gitNoCommits }}</p>
+          </div>
+
+          <div v-else-if="activeTab === 'compare'" class="git-manager__compare">
+            <div v-if="compareLoading && !compareLoaded" class="git-manager__empty">
+              <LoaderCircle class="spin" :size="24" />
+            </div>
+            <div v-else-if="!compareData.isRepository" class="git-manager__empty">
+              <GitBranch :size="30" />
+              <strong>{{ t.gitNotRepository }}</strong>
+              <p>{{ t.gitNotRepositoryHint }}</p>
+            </div>
+            <template v-else>
+              <header class="git-manager__compare-header">
+                <div class="git-manager__compare-identity">
+                  <GitBranch :size="15" />
+                  <strong>{{ t.gitManagerCompare }}</strong>
+                </div>
+                <div class="git-manager__compare-pickers">
+                  <label v-for="side in compareSides" :key="side.key" class="git-base-picker">
+                    <span class="git-base-picker__label">{{ t[side.labelKey] }}</span>
+                    <div
+                      :ref="el => comparePickers[side.key].root = el"
+                      class="git-base-select"
+                      :class="{ 'is-open': comparePickers[side.key].open, 'is-disabled': compareLoading }"
+                    >
+                      <button
+                        type="button"
+                        class="git-base-select__trigger"
+                        :disabled="compareLoading"
+                        :title="(comparePickers[side.key].selected || compareData[side.key]) || t.gitComparePlaceholder"
+                        @click="toggleCompareSelect(side.key)"
+                      >
+                        <span class="git-base-select__value">{{ comparePickers[side.key].selected || compareData[side.key] || t.gitComparePlaceholder }}</span>
+                        <span class="git-base-select__caret"></span>
+                      </button>
+                      <div v-if="comparePickers[side.key].open" class="git-base-select__pop">
+                        <input
+                          :ref="el => comparePickers[side.key].input = el"
+                          v-model="comparePickers[side.key].filter"
+                          class="git-base-select__filter"
+                          type="text"
+                          :placeholder="t.gitBaseFilterPlaceholder"
+                          @keydown.stop="onCompareFilterKeydown(side.key, $event)"
+                        />
+                        <template v-if="filteredCompareOptions[side.key].local.length || filteredCompareOptions[side.key].remote.length">
+                          <div v-if="filteredCompareOptions[side.key].local.length" class="git-base-select__group">{{ t.gitCompareLocal }}</div>
+                          <ul v-if="filteredCompareOptions[side.key].local.length" class="git-base-select__list">
+                            <li
+                              v-for="branch in filteredCompareOptions[side.key].local"
+                              :key="`local-${branch.name}`"
+                              class="git-base-select__option"
+                              :class="{ 'is-active': (comparePickers[side.key].selected || compareData[side.key]) === branch.name }"
+                              :title="branch.name"
+                              @click="chooseCompareBranch(side.key, branch.name)"
+                            >{{ branch.name }}</li>
+                          </ul>
+                          <div v-if="filteredCompareOptions[side.key].remote.length" class="git-base-select__group">{{ t.gitCompareRemote }}</div>
+                          <ul v-if="filteredCompareOptions[side.key].remote.length" class="git-base-select__list">
+                            <li
+                              v-for="branch in filteredCompareOptions[side.key].remote"
+                              :key="`remote-${branch.name}`"
+                              class="git-base-select__option"
+                              :class="{ 'is-active': (comparePickers[side.key].selected || compareData[side.key]) === branch.name }"
+                              :title="branch.name"
+                              @click="chooseCompareBranch(side.key, branch.name)"
+                            >{{ branch.name }}</li>
+                          </ul>
+                        </template>
+                        <p v-else class="git-base-select__empty">{{ t.gitBaseNoMatch }}</p>
+                      </div>
+                    </div>
+                  </label>
+                  <span class="git-manager__compare-arrow" aria-hidden="true">→</span>
+                  <button
+                    class="git-manager__compare-action"
+                    type="button"
+                    :disabled="compareLoading || !hasCompareBranches || (comparePickers.left.selected && comparePickers.right.selected && comparePickers.left.selected === comparePickers.right.selected)"
+                    @click="runCompare"
+                  >
+                    <LoaderCircle v-if="compareLoading" class="spin" :size="13" /><GitBranch v-else :size="13" />{{ t.gitCompareButton }}
+                  </button>
+                </div>
+              </header>
+
+              <div class="git-manager__compare-summary">
+                <span v-if="compareLoaded && compareData.left">
+                  <span class="git-manager__compare-arrow">{{ compareData.left }} → {{ compareData.right }}</span>
+                  <span class="git-manager__compare-ahead-behind">{{ t.gitAheadBehind.replace('{ahead}', compareData.ahead || 0).replace('{behind}', compareData.behind || 0) }}</span>
+                </span>
+                <span v-else>{{ t.gitCompareEmpty }}</span>
+                <span class="git-manager__compare-num git-manager__compare-num--added">+{{ compareData.added || 0 }}</span>
+                <span class="git-manager__compare-num git-manager__compare-num--deleted">-{{ compareData.deleted || 0 }}</span>
+              </div>
+
+              <div v-if="compareLoaded && compareFiles.length" class="git-manager__compare-filters">
+                <button
+                  v-for="option in compareTypeFilterOptions"
+                  :key="option.key"
+                  type="button"
+                  class="git-manager__compare-filter"
+                  :class="{ 'is-active': compareTypeFilter === option.key }"
+                  @click="compareTypeFilter = option.key"
+                >{{ t[option.labelKey] }}<span>{{ option.count }}</span></button>
+              </div>
+
+              <div class="git-manager__compare-body">
+                <p v-if="compareError" class="git-manager__compare-error">{{ compareError }}</p>
+                <div v-if="visibleCompareTreeRows.length" class="git-manager__files is-compare">
+                  <template v-for="row in visibleCompareTreeRows" :key="row.key">
+                    <div v-if="row.kind === 'folder'" class="git-manager__folder" :class="{ 'is-nested': row.depth > 0 }" :style="{ '--tree-depth': row.depth }">
+                      <button class="git-manager__folder-toggle" type="button" :title="collapsedFolders.has(row.key) ? t.gitExpandFolder : t.gitCollapseFolder" @click="toggleFolder('compare', row.key)">
+                        <ChevronRight v-if="collapsedFolders.has(row.key)" :size="13" /><ChevronDown v-else :size="13" />
+                        <Folder v-if="collapsedFolders.has(row.key)" :size="15" /><FolderOpen v-else :size="15" />
+                        <strong>{{ row.name }}</strong><span>{{ row.files.length }}</span>
+                      </button>
+                    </div>
+                    <div
+                      v-else
+                      class="git-manager__file is-compare"
+                      :class="{ 'is-nested': row.depth > 0 }"
+                      :style="{ '--tree-depth': row.depth }"
+                      tabindex="0"
+                      :title="t.gitDoubleClickCompare"
+                      @dblclick="openBranchDiff(filteredCompareFiles, fileIndex(filteredCompareFiles, row.file))"
+                      @keydown.enter="openBranchDiff(filteredCompareFiles, fileIndex(filteredCompareFiles, row.file))"
+                    >
+                      <span class="git-manager__file-status" :class="`is-${row.file.status}`" :title="statusLabel(row.file)">{{ statusLabel(row.file) }}</span>
+                      <button class="git-manager__file-name" type="button" :title="row.file.path" @click="openBranchDiff(filteredCompareFiles, fileIndex(filteredCompareFiles, row.file))"><strong>{{ row.file.treeName }}</strong></button>
+                      <span class="git-manager__numbers"><b>+{{ row.file.added || 0 }}</b><i>-{{ row.file.deleted || 0 }}</i></span>
+                    </div>
+                  </template>
+                </div>
+                <button v-if="visibleCompareTreeRows.length && remainingRowCount('compare', compareTreeRows)" class="git-manager__show-more" type="button" @click="showMoreRows('compare')">{{ t.gitShowMoreRows.replace('{count}', Math.min(GIT_FILE_ROW_BATCH, remainingRowCount('compare', compareTreeRows))) }}</button>
+                <p v-if="!visibleCompareTreeRows.length && compareLoaded && !compareError" class="git-manager__section-empty">
+                  {{ t.gitNoBranchChanges }}
+                </p>
+                <p v-else-if="!visibleCompareTreeRows.length && !compareLoaded" class="git-manager__section-empty">
+                  {{ t.gitCompareEmpty }}
+                </p>
+              </div>
+            </template>
           </div>
         </template>
       </section>
@@ -1445,15 +1998,27 @@ function statusLabel(file) {
       :style="{ left: `${moreMenu.left}px`, top: `${moreMenu.top}px` }"
       @click.stop
     >
-      <button type="button" role="menuitem" :title="t.gitAddToChat" @click="addToChatMenuTarget">
-        <MessageSquarePlus :size="15" />
-        <span>{{ t.gitAddToChat }}</span>
-      </button>
-      <button type="button" role="menuitem" :disabled="moreMenu.ignorePending" :title="moreMenu.ignorePending ? t.gitIgnorePendingHint : t.gitAddToIgnore" @click="ignoreMoreMenuTarget">
-        <Check v-if="moreMenu.ignorePending" :size="15" />
-        <EyeOff v-else :size="15" />
-        <span>{{ moreMenu.ignorePending ? t.gitAlreadyIgnored : t.gitAddToIgnore }}</span>
-      </button>
+      <template v-if="moreMenu.kind === 'commit'">
+        <button type="button" role="menuitem" :title="t.gitResetMixedHint" @click="resetCommitFromMoreMenu()">
+          <RotateCcw :size="15" />
+          <span>{{ t.gitResetMixed }}</span>
+        </button>
+        <button class="is-danger" type="button" role="menuitem" :title="t.gitResetHardHint" @click="resetCommitFromMoreMenu(true)">
+          <Trash2 :size="15" />
+          <span>{{ t.gitResetHard }}</span>
+        </button>
+      </template>
+      <template v-else>
+        <button type="button" role="menuitem" :title="t.gitAddToChat" @click="addToChatMenuTarget">
+          <MessageSquarePlus :size="15" />
+          <span>{{ t.gitAddToChat }}</span>
+        </button>
+        <button type="button" role="menuitem" :disabled="moreMenu.ignorePending" :title="moreMenu.ignorePending ? t.gitIgnorePendingHint : t.gitAddToIgnore" @click="ignoreMoreMenuTarget">
+          <Check v-if="moreMenu.ignorePending" :size="15" />
+          <EyeOff v-else :size="15" />
+          <span>{{ moreMenu.ignorePending ? t.gitAlreadyIgnored : t.gitAddToIgnore }}</span>
+        </button>
+      </template>
     </div>
   </Teleport>
 
@@ -1463,7 +2028,8 @@ function statusLabel(file) {
     :scope="diffDialog.scope"
     :files="diffDialog.files"
     :index="diffDialog.index"
-    base-branch=""
+    :compare-left="diffDialog.compareLeft || ''"
+    :compare-right="diffDialog.compareRight || ''"
     :commit="diffDialog.commit"
     :t="t"
     :language="language"
@@ -1471,6 +2037,7 @@ function statusLabel(file) {
     :selected-model-value="selectedModelValue"
     @close="diffDialog = { ...diffDialog, open: false }"
     @update:index="diffDialog = { ...diffDialog, index: $event }"
+    @add-selection-to-chat="text => emit('add-selection-to-chat', text)"
   />
   <GitConflictDialog
     :open="conflictDialog.open"
@@ -1486,6 +2053,49 @@ function statusLabel(file) {
     @update:index="conflictDialog = { ...conflictDialog, index: $event }"
   />
   <GitAIPromptDialog v-model="commitPromptOpen" kind="commit" :language="language" :t="t" />
+  <ConfirmDialog
+    v-model="stashCreateOpen"
+    class="git-manager__confirm"
+    :title="t.gitStashCreateTitle"
+    :description="t.gitStashCreateDesc"
+    :confirm-label="t.gitStashCreateConfirm"
+    :confirm-busy-label="t.gitStashCreating"
+    :busy="busy === 'stash_create'"
+    :confirm-disabled="!stashName.trim() || !selectedStashPaths.length"
+    @confirm="createStash"
+    @cancel="stashName = ''"
+  >
+    <div class="git-manager__stash-editor">
+      <label><span>{{ t.gitStashName }}</span><input v-model="stashName" maxlength="200" :placeholder="t.gitStashNamePlaceholder" :disabled="busy === 'stash_create'" /></label>
+      <div>
+        <label><input v-model="stashIncludeStaged" type="checkbox" :disabled="busy === 'stash_create' || !stagedFiles.length" />{{ t.gitStagedChanges }} ({{ stagedFiles.length }})</label>
+        <label><input v-model="stashIncludeChanged" type="checkbox" :disabled="busy === 'stash_create' || !changedFiles.length" />{{ t.gitUnstagedChanges }} ({{ changedFiles.length }})</label>
+      </div>
+      <small v-if="!selectedStashPaths.length" class="is-error">{{ t.gitStashSelectFiles }}</small>
+    </div>
+  </ConfirmDialog>
+  <ConfirmDialog
+    v-model="stashRestoreOpen"
+    class="git-manager__confirm"
+    :title="t.gitStashRestoreTitle"
+    :description="t.gitStashRestoreDesc.replace('{name}', stashRestoreTarget?.name || '')"
+    :confirm-label="t.gitStashRestore"
+    :confirm-busy-label="t.gitStashRestoring"
+    :busy="busy.startsWith('stash_apply:')"
+    @confirm="confirmRestoreStash"
+    @cancel="stashRestoreTarget = null"
+  />
+  <ConfirmDeleteDialog
+    v-model="stashDeleteOpen"
+    class="git-manager__confirm"
+    :title="t.gitStashDeleteTitle"
+    :description="t.gitStashDeleteDesc.replace('{name}', stashDeleteTarget?.name || '')"
+    :confirm-label="t.gitStashDeleteConfirm"
+    :confirm-busy-label="t.gitStashDeleting"
+    :busy="busy.startsWith('stash_drop:')"
+    @confirm="confirmDeleteStash"
+    @cancel="stashDeleteTarget = null"
+  />
   <ConfirmDeleteDialog
     v-model="confirmFileOpen"
     class="git-manager__confirm"
@@ -1500,7 +2110,7 @@ function statusLabel(file) {
     v-model="checkoutConfirmOpen"
     class="git-manager__confirm"
     :title="t.gitCheckoutConfirmTitle"
-    :description="t.gitCheckoutConfirmDesc.replace('{branch}', checkoutConfirmTarget?.branch?.name || '')"
+    :description="(worktreeFiles.length ? t.gitCheckoutConfirmDirtyDesc : t.gitCheckoutConfirmDesc).replace('{branch}', checkoutConfirmTarget?.branch?.name || '')"
     :confirm-label="t.gitCheckout"
     :busy="busy.startsWith('checkout:') || busy.startsWith('checkout_remote:')"
     @confirm="confirmCheckout"

@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
 	github.com/coder/websocket v1.8.14
+	github.com/fsnotify/fsnotify v1.8.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.10
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
@@ -31,7 +32,6 @@ require (
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/easierway/concurrent_map v1.0.0 // indirect
-	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect

@@ -1,13 +1,11 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   ChevronRight, Download, FileCode2, FilePlus2, FileText, FileX2,
-  GitBranch, Image as ImageIcon, LoaderCircle, Plus, RefreshCw, RotateCcw, Search,
-  Trash2, Undo2, X
+  GitBranch, Image as ImageIcon, LoaderCircle, RefreshCw, X
 } from 'lucide-vue-next'
-import { applyGitFileOperation, getSessionGitSnapshot, openSessionArtifact } from '../../backend.js'
+import { openSessionArtifact } from '../../backend.js'
 import GitDiffDialog from './GitDiffDialog.vue'
-import ConfirmDeleteDialog from '../ConfirmDeleteDialog.vue'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -25,9 +23,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'refresh', 'artifact-error'])
 const tabs = computed(() => [
-  { id: 'artifacts', label: props.t.changesTabArtifacts },
-  { id: 'git', label: props.t.changesTabGit },
-  { id: 'web', label: props.t.changesTabWeb }
+  { id: 'artifacts', label: props.t.changesTabArtifacts }
 ])
 const activeTab = ref('artifacts')
 const resizing = ref(false)
@@ -58,66 +54,12 @@ const changedFileCount = computed(() => new Set(changeNodes.value.flatMap(node =
 const browserArtifactCount = computed(() => changeNodes.value.reduce((sum, node) => sum + (node.browserArtifacts?.length || 0), 0))
 const inputArtifactCount = computed(() => changeNodes.value.reduce((sum, node) => sum + (node.inputArtifacts?.length || 0), 0))
 const outputArtifactCount = computed(() => changeNodes.value.reduce((sum, node) => sum + (node.outputArtifacts?.length || 0), 0))
-const gitOverride = ref(null)
-const gitLoading = ref(false)
-const gitLoaded = ref(false)
-const selectedBase = ref('')
-const baseSelectOpen = ref(false)
-const baseFilter = ref('')
-const baseSelectRef = ref(null)
-const baseFilterInput = ref(null)
-const gitTab = ref('worktree') // 默认展示「当前工作区变更」
 const gitDialog = ref({ open: false, scope: 'worktree', files: [], index: 0 })
-let gitRequestNonce = 0
-const gitSnapshot = computed(() => (
-  gitOverride.value || {
-    isRepository: false,
-    baseBranches: [],
-    worktree: { files: [], added: 0, deleted: 0 },
-    branch: { files: [], added: 0, deleted: 0 }
-  }
-))
-const gitWorktree = computed(() => gitSnapshot.value.worktree || { files: [], added: 0, deleted: 0 })
-const gitBranch = computed(() => gitSnapshot.value.branch || { files: [], added: 0, deleted: 0 })
-// 工作区变更文件搜索：输入为空时原样返回，避免额外计算开销。
-const worktreeFilter = ref('')
-const filteredWorktreeFiles = computed(() => {
-  const files = gitWorktree.value.files || []
-  const q = worktreeFilter.value.trim().toLowerCase()
-  if (!q) return files
-  return files.filter(file => String(file.path).toLowerCase().includes(q))
-})
-// 单文件 git 操作：busyPath 标记正在执行的路径（按钮转圈、防重复点击）
-const gitOpBusyPath = ref('')
-const gitOpError = ref('')
-// 破坏性操作（删除未跟踪文件 / 撤销修改）走确认弹窗
-const confirmGitOpen = ref(false)
-const confirmGitOp = ref(null)
 
 watch(
   () => props.sessionId,
   () => {
-    gitRequestNonce++
-    gitOverride.value = null
-    gitLoading.value = false
-    gitLoaded.value = false
-    selectedBase.value = ''
     gitDialog.value = { open: false, scope: 'worktree', files: [], index: 0 }
-    if (props.open && activeTab.value === 'git') void refreshGitSnapshot()
-  }
-)
-
-watch(
-  activeTab,
-  tab => {
-    if (props.open && tab === 'git') void refreshGitSnapshot()
-  }
-)
-
-watch(
-  () => props.open,
-  open => {
-    if (open && activeTab.value === 'git') void refreshGitSnapshot()
   }
 )
 
@@ -287,163 +229,6 @@ function concatPath(path) {
 
 function statusLabel(status) {
   return status === 'added' ? 'A' : status === 'deleted' ? 'D' : 'M'
-}
-
-function gitStatusLabel(status) {
-  if (status === 'added') return 'A'
-  if (status === 'deleted') return 'D'
-  if (status === 'renamed') return 'R'
-  if (status === 'untracked') return 'U'
-  return 'M'
-}
-
-function gitFileState(file) {
-  const states = []
-  if (file.untracked) states.push(props.t.gitUntracked)
-  else {
-    if (file.staged) states.push(props.t.gitStaged)
-    if (file.unstaged) states.push(props.t.gitUnstaged)
-  }
-  return states.join(' · ')
-}
-
-// 按文件状态返回可执行操作（右侧栏 hover 显示）：
-// 未跟踪 → 跟踪/删除；已删除 → 恢复；其余 → 暂存/取消暂存/撤销修改。
-function gitFileActions(file) {
-  const actions = []
-  if (file.untracked) {
-    actions.push({ op: 'track', label: props.t.gitTrack, icon: Plus })
-    actions.push({ op: 'delete_untracked', label: props.t.gitDeleteFile, icon: Trash2, destructive: true })
-  } else if (file.status === 'deleted') {
-    actions.push({ op: 'restore', label: props.t.gitRestore, icon: RotateCcw })
-  } else {
-    if (file.staged) actions.push({ op: 'unstage', label: props.t.gitUnstage, icon: Undo2 })
-    if (file.unstaged) {
-      actions.push({ op: 'stage', label: props.t.gitStage, icon: Plus })
-      actions.push({ op: 'discard_tracked', label: props.t.gitRevertFile, icon: RotateCcw, destructive: true })
-    }
-  }
-  return actions
-}
-
-// 破坏性操作先弹确认框，其余直接执行。
-function requestGitFileOp(op, file) {
-  if (op === 'delete_untracked' || op === 'discard_tracked') {
-    const isUntracked = file.untracked
-    confirmGitOp.value = {
-      op,
-      path: file.path,
-      title: isUntracked ? props.t.gitConfirmDeleteTitle : props.t.gitConfirmDiscardTitle,
-      description: isUntracked ? props.t.gitConfirmDeleteDesc : props.t.gitConfirmDiscardDesc
-    }
-    confirmGitOpen.value = true
-    return
-  }
-  void runGitFileOp(op, file.path)
-}
-
-function confirmDiscardGitOp() {
-  const target = confirmGitOp.value
-  confirmGitOp.value = null
-  confirmGitOpen.value = false
-  if (target) void runGitFileOp(target.op, target.path)
-}
-
-async function runGitFileOp(op, path) {
-  if (gitOpBusyPath.value) return
-  gitOpBusyPath.value = path
-  gitOpError.value = ''
-  try {
-    await applyGitFileOperation(props.sessionId, op, path)
-    await refreshGitSnapshot()
-  } catch (error) {
-    const message = String(error?.message || error)
-    gitOpError.value = formatText(props.t.gitOperationFailed, { error: message })
-  } finally {
-    gitOpBusyPath.value = ''
-  }
-}
-
-async function refreshGitSnapshot(baseBranch = selectedBase.value) {
-  const sessionId = props.sessionId
-  const requestNonce = ++gitRequestNonce
-  gitLoading.value = true
-  try {
-    const snapshot = await getSessionGitSnapshot(sessionId, baseBranch || '')
-    if (requestNonce !== gitRequestNonce || sessionId !== props.sessionId) return
-    gitOverride.value = snapshot
-    gitLoaded.value = true
-    selectedBase.value = snapshot?.baseBranch || ''
-    if (gitDialog.value.open && gitDialog.value.scope === 'branch') {
-      gitDialog.value = { ...gitDialog.value, files: snapshot?.branch?.files || [], index: 0 }
-    }
-  } catch (error) {
-    if (requestNonce === gitRequestNonce && sessionId === props.sessionId) {
-      gitLoaded.value = true
-      emit('artifact-error', String(error))
-    }
-  } finally {
-    if (requestNonce === gitRequestNonce) gitLoading.value = false
-  }
-}
-
-function toggleBaseSelect() {
-  if (gitLoading.value || !gitSnapshot.value.baseBranches?.length) return
-  baseSelectOpen.value = !baseSelectOpen.value
-  if (baseSelectOpen.value) {
-    baseFilter.value = ''
-    nextTick(() => baseFilterInput.value?.focus())
-  }
-}
-
-const filteredBaseBranches = computed(() => {
-  const all = gitSnapshot.value.baseBranches || []
-  const q = baseFilter.value.trim().toLowerCase()
-  if (!q) return all
-  return all.filter(branch => branch.toLowerCase().includes(q))
-})
-
-function chooseBaseBranch(branch) {
-  closeBaseSelect()
-  selectedBase.value = branch
-  refreshGitSnapshot(branch)
-}
-
-function closeBaseSelect() {
-  baseSelectOpen.value = false
-  baseFilter.value = ''
-}
-
-function closeBaseSelectIfOutside(event) {
-  if (baseSelectOpen.value && baseSelectRef.value && !baseSelectRef.value.contains(event.target)) {
-    closeBaseSelect()
-  }
-}
-
-function onBaseSelectKeydown(event) {
-  if (event.key === 'Escape') closeBaseSelect()
-}
-
-function onBaseFilterKeydown(event) {
-  if (event.key === 'Escape') {
-    closeBaseSelect()
-  } else if (event.key === 'Enter') {
-    const first = filteredBaseBranches.value[0]
-    if (first) chooseBaseBranch(first)
-  }
-}
-
-onMounted(() => {
-  document.addEventListener('click', closeBaseSelectIfOutside)
-  document.addEventListener('keydown', onBaseSelectKeydown)
-})
-onUnmounted(() => {
-  document.removeEventListener('click', closeBaseSelectIfOutside)
-  document.removeEventListener('keydown', onBaseSelectKeydown)
-})
-
-function openGitDiff(scope, files, index) {
-  gitDialog.value = { open: true, scope, files, index }
 }
 
 function fileIcon(status) {
@@ -746,209 +531,6 @@ function startResize(event) {
         </template>
       </template>
 
-      <template v-else-if="activeTab === 'git'">
-        <div class="git-panel">
-          <div class="git-panel__toolbar">
-            <span v-if="gitSnapshot.currentBranch" class="git-panel__branch">
-              <GitBranch :size="13" />
-              {{ gitSnapshot.currentBranch }}
-            </span>
-            <span v-else></span>
-            <button type="button" :title="t.refreshChanges" :aria-label="t.refreshChanges" :disabled="gitLoading" @click="refreshGitSnapshot()">
-              <LoaderCircle v-if="gitLoading" class="spin" :size="14" />
-              <RefreshCw v-else :size="14" />
-            </button>
-          </div>
-          <p v-if="gitSnapshot.root" class="git-panel__root" :title="gitSnapshot.root">{{ gitSnapshot.root }}</p>
-
-          <div v-if="gitLoading && !gitLoaded" class="git-panel__not-repository">
-            <LoaderCircle class="spin" :size="22" />
-          </div>
-
-          <div v-else-if="!gitSnapshot.isRepository" class="git-panel__not-repository">
-            <GitBranch :size="22" />
-            <strong>{{ t.gitNotRepository }}</strong>
-            <p>{{ t.gitNotRepositoryHint }}</p>
-          </div>
-
-          <template v-else>
-            <div class="git-panel__tabs">
-              <button
-                type="button"
-                class="git-panel__tab"
-                :class="{ 'is-active': gitTab === 'worktree' }"
-                @click="gitTab = 'worktree'"
-              >{{ t.gitWorkspaceChanges }}</button>
-              <button
-                type="button"
-                class="git-panel__tab"
-                :class="{ 'is-active': gitTab === 'branch' }"
-                @click="gitTab = 'branch'"
-              >{{ t.gitBranchChanges }}</button>
-            </div>
-
-            <section v-if="gitTab === 'worktree'" class="git-section">
-              <header class="git-section__head">
-                <div>
-                  <strong>{{ t.gitWorkspaceChanges }}</strong>
-                  <small>{{ t.gitWorktreeHint }}</small>
-                </div>
-                <span class="git-section__total">{{ gitWorktree.files?.length || 0 }}</span>
-              </header>
-              <div class="git-section__summary">
-                <span>{{ formatText(t.gitFileCount, { count: gitWorktree.files?.length || 0 }) }}</span>
-                <span class="change-count change-count--added">+{{ gitWorktree.added || 0 }}</span>
-                <span class="change-count change-count--deleted">-{{ gitWorktree.deleted || 0 }}</span>
-              </div>
-              <div class="git-file-search">
-                <Search :size="13" />
-                <input
-                  v-model="worktreeFilter"
-                  type="text"
-                  :placeholder="t.gitFilterFiles"
-                  :aria-label="t.gitFilterFiles"
-                />
-                <button v-if="worktreeFilter" type="button" :title="t.gitClearFilter" :aria-label="t.gitClearFilter" @click="worktreeFilter = ''">
-                  <X :size="12" />
-                </button>
-              </div>
-              <p v-if="gitOpError" class="git-section__error" role="alert">{{ gitOpError }}</p>
-              <div v-if="filteredWorktreeFiles.length" class="git-file-list">
-                <div
-                  v-for="(file, fileIndex) in filteredWorktreeFiles"
-                  :key="file.path"
-                  class="git-file"
-                  tabindex="0"
-                  :title="t.gitDoubleClickCompare"
-                  @dblclick="openGitDiff('worktree', filteredWorktreeFiles, fileIndex)"
-                  @keydown.enter="openGitDiff('worktree', filteredWorktreeFiles, fileIndex)"
-                >
-                  <span class="git-file__status" :class="`is-${file.status}`">{{ gitStatusLabel(file.status) }}</span>
-                  <span class="git-file__path">
-                    <strong>{{ concatPath(file.path).name }}</strong>
-                    <small v-if="concatPath(file.path).dir">{{ concatPath(file.path).dir }}</small>
-                    <span v-if="gitFileState(file) || gitFileActions(file).length" class="git-file__meta">
-                      <small v-if="gitFileState(file)" class="git-file__state">{{ gitFileState(file) }}</small>
-                      <span v-if="gitFileActions(file).length" class="git-file__actions" @click.stop>
-                        <button
-                          v-for="action in gitFileActions(file)"
-                          :key="action.op"
-                          type="button"
-                          class="git-file__action"
-                          :class="{ 'is-danger': action.destructive }"
-                          :title="action.label"
-                          :aria-label="action.label"
-                          :disabled="gitOpBusyPath === file.path"
-                          @click.stop="requestGitFileOp(action.op, file)"
-                        >
-                          <LoaderCircle v-if="gitOpBusyPath === file.path" class="spin" :size="13" />
-                          <component :is="action.icon" v-else :size="13" />
-                        </button>
-                      </span>
-                    </span>
-                  </span>
-                  <span class="git-file__numbers">
-                    <span v-if="file.binary" class="change-file__binary">BIN</span>
-                    <template v-else>
-                      <span v-if="file.added" class="change-count change-count--added">+{{ file.added }}</span>
-                      <span v-if="file.deleted" class="change-count change-count--deleted">-{{ file.deleted }}</span>
-                    </template>
-                  </span>
-                </div>
-              </div>
-              <p v-else-if="worktreeFilter.trim()" class="git-section__empty">{{ t.gitNoMatchFiles }}</p>
-              <p v-else class="git-section__empty">{{ t.gitCleanWorktree }}</p>
-            </section>
-
-            <section v-else-if="gitTab === 'branch'" class="git-section">
-              <header class="git-section__head">
-                <div>
-                  <strong>{{ t.gitBranchChanges }}</strong>
-                  <label class="git-base-picker">
-                    <span class="git-base-picker__label">{{ t.gitBaseBranch }}</span>
-                    <div
-                      ref="baseSelectRef"
-                      class="git-base-select"
-                      :class="{ 'is-open': baseSelectOpen, 'is-disabled': gitLoading || !gitSnapshot.baseBranches?.length }"
-                    >
-                      <button
-                        type="button"
-                        class="git-base-select__trigger"
-                        :disabled="gitLoading || !gitSnapshot.baseBranches?.length"
-                        :title="(selectedBase || gitSnapshot.baseBranch) || t.gitBaseUnavailable"
-                        @click="toggleBaseSelect"
-                      >
-                        <span class="git-base-select__value">{{ selectedBase || gitSnapshot.baseBranch || t.gitBaseUnavailable }}</span>
-                        <span class="git-base-select__caret"></span>
-                      </button>
-                      <div v-if="baseSelectOpen && gitSnapshot.baseBranches?.length" class="git-base-select__pop">
-                        <input
-                          ref="baseFilterInput"
-                          v-model="baseFilter"
-                          class="git-base-select__filter"
-                          type="text"
-                          :placeholder="t.gitBaseFilterPlaceholder"
-                          @keydown.stop="onBaseFilterKeydown"
-                        />
-                        <ul class="git-base-select__list">
-                          <li v-if="!filteredBaseBranches.length" class="git-base-select__empty">{{ t.gitBaseNoMatch }}</li>
-                          <li
-                            v-for="branch in filteredBaseBranches"
-                            :key="branch"
-                            class="git-base-select__option"
-                            :class="{ 'is-active': (selectedBase || gitSnapshot.baseBranch) === branch }"
-                            :title="branch"
-                            @click="chooseBaseBranch(branch)"
-                          >{{ branch }}</li>
-                        </ul>
-                      </div>
-                    </div>
-                  </label>
-                  <small v-if="gitSnapshot.baseBranch">{{ gitSnapshot.currentBranch || 'HEAD' }} → {{ gitSnapshot.baseBranch }}</small>
-                </div>
-                <span class="git-section__total">{{ gitBranch.files?.length || 0 }}</span>
-              </header>
-              <div class="git-section__summary">
-                <span v-if="gitSnapshot.baseBranch">
-                  {{ formatText(t.gitAheadBehind, { ahead: gitSnapshot.ahead || 0, behind: gitSnapshot.behind || 0 }) }}
-                </span>
-                <span v-else>{{ t.gitBaseUnavailable }}</span>
-                <span class="change-count change-count--added">+{{ gitBranch.added || 0 }}</span>
-                <span class="change-count change-count--deleted">-{{ gitBranch.deleted || 0 }}</span>
-              </div>
-              <div v-if="gitBranch.files?.length" class="git-file-list">
-                <div
-                  v-for="(file, fileIndex) in gitBranch.files"
-                  :key="file.path"
-                  class="git-file"
-                  tabindex="0"
-                  :title="t.gitDoubleClickCompare"
-                  @dblclick="openGitDiff('branch', gitBranch.files, fileIndex)"
-                  @keydown.enter="openGitDiff('branch', gitBranch.files, fileIndex)"
-                >
-                  <span class="git-file__status" :class="`is-${file.status}`">{{ gitStatusLabel(file.status) }}</span>
-                  <span class="git-file__path">
-                    <strong>{{ concatPath(file.path).name }}</strong>
-                    <small v-if="concatPath(file.path).dir">{{ concatPath(file.path).dir }}</small>
-                  </span>
-                  <span class="git-file__numbers">
-                    <span v-if="file.binary" class="change-file__binary">BIN</span>
-                    <template v-else>
-                      <span v-if="file.added" class="change-count change-count--added">+{{ file.added }}</span>
-                      <span v-if="file.deleted" class="change-count change-count--deleted">-{{ file.deleted }}</span>
-                    </template>
-                  </span>
-                </div>
-              </div>
-              <p v-else class="git-section__empty">
-                {{ gitSnapshot.baseBranch ? t.gitNoBranchChanges : t.gitBaseUnavailableHint }}
-              </p>
-            </section>
-          </template>
-        </div>
-      </template>
-
-      <p v-else class="chat-right-side__placeholder">{{ formatText(t.changesTabPlaceholder, { tab: tabs.find(tab => tab.id === activeTab)?.label || '' }) }}</p>
     </div>
   </aside>
   <GitDiffDialog
@@ -957,21 +539,13 @@ function startResize(event) {
     :scope="gitDialog.scope"
     :files="gitDialog.files"
     :index="gitDialog.index"
-    :base-branch="selectedBase || gitSnapshot.baseBranch || ''"
+    :base-branch="''"
     :language="language"
     :model-options="modelOptions"
     :selected-model-value="selectedModelValue"
     :t="t"
     @close="gitDialog = { ...gitDialog, open: false }"
     @update:index="gitDialog = { ...gitDialog, index: $event }"
-  />
-  <ConfirmDeleteDialog
-    v-model="confirmGitOpen"
-    :title="confirmGitOp?.title || ''"
-    :description="confirmGitOp?.description || ''"
-    :confirm-label="t.gitConfirmDiscardConfirm"
-    @confirm="confirmDiscardGitOp"
-    @cancel="confirmGitOpen = false"
   />
 </template>
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -240,13 +241,15 @@ func (a *App) InstallAgentExtension(req InstallAgentExtensionRequest) (AgentExte
 	}
 	a.store.EnsureAgentDataDirs(&cfg)
 	application.Get().Event.Emit("install:start", map[string]any{
-		"agentId": req.AgentID,
-		"title":   installTerminalName() + " · Agent 扩展安装",
+		"agentId":   req.AgentID,
+		"title":     installTerminalName() + " · Agent 扩展安装",
+		"operation": "install",
 	})
 	res := a.streamAgentCommand(req.AgentID, req.Command)
 	application.Get().Event.Emit("install:done", map[string]any{
-		"agentId": req.AgentID,
-		"success": res.Success,
+		"agentId":   req.AgentID,
+		"success":   res.Success,
+		"operation": "install",
 	})
 	return res, nil
 }
@@ -372,6 +375,7 @@ func (a *App) ManageExtension(req extensions.ActionRequest) (extensions.ActionRe
 	app.Event.Emit("install:start", map[string]any{
 		"installId": installID,
 		"scope":     "global",
+		"operation": req.Action,
 		"title":     displayName + " 全局" + operation,
 	})
 	result, err := a.extensions.ManageWithProgress(req, cfg.Extensions, func(line string) {
@@ -380,14 +384,19 @@ func (a *App) ManageExtension(req extensions.ActionRequest) (extensions.ActionRe
 			"line":      line,
 		})
 	})
-	if err != nil && strings.TrimSpace(result.Output) == "" {
+	if err != nil {
+		message := strings.TrimSpace(result.Message)
+		if message == "" {
+			message = operation + "失败，请查看应用日志"
+		}
 		app.Event.Emit("install:log", map[string]any{
 			"installId": installID,
-			"line":      err.Error(),
+			"line":      message,
 		})
 	}
 	app.Event.Emit("install:done", map[string]any{
 		"installId": installID,
+		"operation": req.Action,
 		"success":   err == nil,
 	})
 	// 安装、卸载等操作会改变全局插件(Plugins 页)与 Agent 扩展状态，
@@ -396,5 +405,12 @@ func (a *App) ManageExtension(req extensions.ActionRequest) (extensions.ActionRe
 		"key":    req.Key,
 		"action": req.Action,
 	})
-	return result, err
+	if err != nil {
+		message := strings.TrimSpace(result.Message)
+		if message == "" {
+			message = operation + "失败，请查看应用日志"
+		}
+		return result, errors.New(message)
+	}
+	return result, nil
 }

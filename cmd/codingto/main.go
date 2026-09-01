@@ -133,11 +133,20 @@ func main() {
 		})
 	}
 
-	// Closing the main window keeps CodingTo and its background services alive.
-	// RegisterHook runs before Wails' built-in close listener, so cancelling here
-	// preserves the window for restoration from the system tray.
+	// Production builds keep CodingTo and its background services alive when the
+	// main window closes. Development builds must really exit: otherwise the
+	// hidden process keeps the single-instance lock and the next `wails3 dev`
+	// launch fails with "已有 CodingTo 实例在运行".
+	// RegisterHook runs before Wails' built-in close listener. Cancelling keeps
+	// the window alive while either the tray hides it or beginShutdown completes
+	// the existing asynchronous cleanup path.
 	mainWindow.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
 		if shutdownStarted.Load() {
+			return
+		}
+		if developmentBuild {
+			beginShutdown()
+			event.Cancel()
 			return
 		}
 		mainWindow.Hide()

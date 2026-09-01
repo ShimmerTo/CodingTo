@@ -338,6 +338,7 @@ func DefaultConfig() AppConfig {
 		ConfigVersion:               5,
 		Preferences:                 Preferences{Theme: "system", Language: "zh-CN", AccentColor: "#d9a441", ChatLayout: "left", ShowIdentity: true, DiffMode: "unified", FontSize: "small"},
 		Providers:                   piagent.DefaultProviders(),
+		LastEnvironment:             DefaultWorkDir(),
 		SessionDir:                  DefaultSessionDir(),
 		Extensions:                  extensions.DefaultConfig(),
 		SubagentConcurrency:         subagentbridge.DefaultConcurrency,
@@ -463,25 +464,11 @@ func (c *AppConfig) Normalize() {
 		}
 	}
 
-	// Environments: ensure exactly one active environment when at least one exists.
-	if len(c.Environments) > 0 {
-		envActive := false
-		for _, env := range c.Environments {
-			if env.ID == c.ActiveEnvID {
-				envActive = true
-				break
-			}
-		}
-		if !envActive {
-			c.ActiveEnvID = c.Environments[0].ID
-		}
-	} else {
-		c.ActiveEnvID = ""
-	}
-	// Keep the legacy lastEnvironment in sync with the active environment path so
-	// command sessions and agent runs continue to target the right directory.
-	if active := c.environmentByID(c.ActiveEnvID); active != nil {
-		c.LastEnvironment = active.Path
+	// The selected workspace is process-local UI state, not a persisted default.
+	// lastEnvironment remains in the transport shape for compatibility only and
+	// always falls back to the dedicated startup directory.
+	if strings.TrimSpace(c.LastEnvironment) == "" {
+		c.LastEnvironment = DefaultWorkDir()
 	}
 }
 
@@ -548,7 +535,6 @@ func (s *ConfigStore) assemble() AppConfig {
 		cfg.Preferences.ConciseChat = setting.ConciseChat
 		cfg.DefaultProvider = setting.DefaultProvider
 		cfg.DefaultModel = setting.DefaultModel
-		cfg.LastEnvironment = setting.LastEnvironment
 		cfg.SessionDir = setting.SessionDir
 		if setting.Figma != "" {
 			var fg extensions.FigmaConfig
@@ -676,7 +662,6 @@ func (s *ConfigStore) assemble() AppConfig {
 	environments, err := s.st.ListEnvironments()
 	if err == nil {
 		spaces := make([]Environment, 0, len(environments))
-		activeEnvID := ""
 		for _, item := range environments {
 			remotes := []RemoteGitDir{}
 			if item.Remotes != "" {
@@ -691,20 +676,16 @@ func (s *ConfigStore) assemble() AppConfig {
 				Name:           item.Name,
 				Path:           item.Path,
 				Description:    item.Description,
-				Active:         item.Active,
+				Active:         false,
 				Remotes:        remotes,
 				DBConnections:  dbConnections,
 				DefaultAgentID: item.DefaultAgentID,
 			})
-			if item.Active {
-				activeEnvID = item.ID
-			}
 		}
 		cfg.Environments = spaces
-		cfg.ActiveEnvID = activeEnvID
-		if activeEnvID == "" && len(spaces) > 0 {
-			cfg.ActiveEnvID = spaces[0].ID
-		}
+		// A previously persisted active flag is intentionally ignored. New
+		// conversations always start in DefaultWorkDir until the user chooses a
+		// workspace for the current process.
 	}
 
 	cfg.Normalize()
@@ -749,7 +730,7 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 		ConciseChat:                 cfg.Preferences.ConciseChat,
 		DefaultProvider:             cfg.DefaultProvider,
 		DefaultModel:                cfg.DefaultModel,
-		LastEnvironment:             cfg.LastEnvironment,
+		LastEnvironment:             "",
 		SessionDir:                  cfg.SessionDir,
 		Figma:                       string(figma),
 		GlobalMCP:                   string(globalMCP),
@@ -851,7 +832,7 @@ func (s *ConfigStore) Save(cfg AppConfig) error {
 			Path:           item.Path,
 			Description:    item.Description,
 			Remotes:        string(remotes),
-			Active:         item.ID == cfg.ActiveEnvID,
+			Active:         false,
 			DBConnections:  string(dbConnections),
 			DefaultAgentID: item.DefaultAgentID,
 		})

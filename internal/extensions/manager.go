@@ -343,6 +343,12 @@ func ValidateNPMPackageName(packageName string) error {
 	if packageName == "" || !npmPackageNamePattern.MatchString(packageName) {
 		return fmt.Errorf("invalid npm package name: %s", packageName)
 	}
+	for _, segment := range strings.Split(packageName, "/") {
+		segment = strings.TrimPrefix(segment, "@")
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("invalid npm package name: %s", packageName)
+		}
+	}
 	return nil
 }
 
@@ -375,28 +381,164 @@ func (m *Manager) InstallGlobalPackage(packageName string, onLine func(string)) 
 	return registration, ActionResult{Message: "Global package installed", Command: commandText, Output: output}, nil
 }
 
-// UninstallGlobalPackage removes one npm package from the shared Node runtime.
-// Failures are surfaced to the caller so callers can decide whether to drop the
-// registration anyway (e.g. a package already gone from the global scope).
+// UninstallGlobalPackage removes one npm package from every detected global
+// Node runtime. An already-absent package is treated as a successful no-op.
 func (m *Manager) UninstallGlobalPackage(packageName string, onLine func(string)) (ActionResult, error) {
 	packageName = strings.TrimSpace(packageName)
 	if err := ValidateNPMPackageName(packageName); err != nil {
 		m.errf("uninstall global package %s: invalid name: %v", packageName, err)
 		return ActionResult{}, err
 	}
-	npm, err := npmExecutable()
-	if err != nil {
+	installations, discoveryErrors := npmGlobalInstallations()
+	if len(installations) == 0 {
 		m.errf("uninstall global package %s: npm not found", packageName)
+		if len(discoveryErrors) > 0 {
+			return ActionResult{Message: "Unable to inspect global npm installations"}, errors.Join(discoveryErrors...)
+		}
 		return ActionResult{}, errors.New("npm was not found; install Node.js first")
 	}
 	commandText := "npm uninstall -g " + packageName
-	output, err := runUnboundedWithProgress(onLine, npm, "uninstall", "-g", packageName)
-	if err != nil {
+	var outputs []string
+	var uninstallErrors []error
+	found := false
+	for _, installation := range installations {
+		packageDir := filepath.Join(installation.Root, filepath.FromSlash(packageName))
+		info, statErr := os.Stat(packageDir)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			uninstallErrors = append(uninstallErrors, fmt.Errorf("inspect global package %s: %w", packageDir, statErr))
+			continue
+		}
+		if !info.IsDir() {
+			uninstallErrors = append(uninstallErrors, fmt.Errorf("global package path is not a directory: %s", packageDir))
+			continue
+		}
+		found = true
+		if onLine != nil {
+			onLine("> " + installation.NPM + " uninstall -g " + packageName)
+		}
+		output, uninstallErr := runUnboundedWithProgress(onLine, installation.NPM, "uninstall", "-g", packageName)
+		if strings.TrimSpace(output) != "" {
+			outputs = append(outputs, output)
+		}
+		if uninstallErr != nil {
+			uninstallErrors = append(uninstallErrors, fmt.Errorf("uninstall %s from %s: %w", packageName, installation.Root, uninstallErr))
+			continue
+		}
+		if _, verifyErr := os.Stat(packageDir); verifyErr == nil {
+			uninstallErrors = append(uninstallErrors, fmt.Errorf("global package still exists after uninstall: %s", packageDir))
+		} else if !os.IsNotExist(verifyErr) {
+			uninstallErrors = append(uninstallErrors, fmt.Errorf("verify global package removal %s: %w", packageDir, verifyErr))
+		}
+	}
+	if len(discoveryErrors) > 0 {
+		uninstallErrors = append(uninstallErrors, discoveryErrors...)
+	}
+	output := joinCommandOutput(outputs...)
+	if len(uninstallErrors) > 0 {
+		err := errors.Join(uninstallErrors...)
 		m.errf("uninstall global package %s failed: %v", packageName, err)
 		return ActionResult{Message: "Global package uninstall failed", Command: commandText, Output: output}, err
 	}
+	if !found && onLine != nil {
+		onLine(packageName + " is already absent from every detected global npm installation")
+	}
 	m.infof("global package uninstalled: %s", packageName)
 	return ActionResult{Message: "Global package uninstalled", Command: commandText, Output: output}, nil
+}
+
+type npmGlobalInstallation struct {
+	NPM  string
+	Root string
+}
+
+func npmGlobalInstallations() ([]npmGlobalInstallation, []error) {
+	candidates := npmExecutableCandidates()
+	installations := make([]npmGlobalInstallation, 0, len(candidates))
+	var discoveryErrors []error
+	seenRoots := make(map[string]struct{})
+	for _, candidate := range candidates {
+		rootOutput, err := run(candidate, "root", "-g")
+		if err != nil {
+			discoveryErrors = append(discoveryErrors, fmt.Errorf("locate global npm root with %s: %w", candidate, err))
+			continue
+		}
+		root := strings.TrimSpace(rootOutput)
+		if root == "" {
+			discoveryErrors = append(discoveryErrors, fmt.Errorf("npm returned an empty global root: %s", candidate))
+			continue
+		}
+		absoluteRoot, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			discoveryErrors = append(discoveryErrors, fmt.Errorf("resolve global npm root %s: %w", root, err))
+			continue
+		}
+		identity := normalizedPathIdentity(absoluteRoot)
+		if _, exists := seenRoots[identity]; exists {
+			continue
+		}
+		seenRoots[identity] = struct{}{}
+		installations = append(installations, npmGlobalInstallation{NPM: candidate, Root: absoluteRoot})
+	}
+	return installations, discoveryErrors
+}
+
+func npmExecutableCandidates() []string {
+	lookupNames := []string{"npm"}
+	fileNames := []string{"npm"}
+	if runtime.GOOS == "windows" {
+		lookupNames = []string{"npm", "npm.cmd", "npm.exe"}
+		fileNames = []string{"npm.cmd", "npm.exe"}
+	}
+	var candidates []string
+	for _, name := range lookupNames {
+		if path, err := exec.LookPath(name); err == nil {
+			candidates = append(candidates, path)
+		}
+	}
+	for _, pathEntry := range filepath.SplitList(os.Getenv("PATH")) {
+		pathEntry = strings.Trim(strings.TrimSpace(pathEntry), "\"")
+		if pathEntry == "" {
+			continue
+		}
+		for _, name := range fileNames {
+			candidate := filepath.Join(pathEntry, name)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		candidates = append(candidates, "/opt/homebrew/bin/npm", "/usr/local/bin/npm")
+	}
+	unique := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{})
+	for _, candidate := range candidates {
+		absolute, err := filepath.Abs(filepath.Clean(candidate))
+		if err != nil {
+			continue
+		}
+		if info, statErr := os.Stat(absolute); statErr != nil || info.IsDir() {
+			continue
+		}
+		identity := normalizedPathIdentity(absolute)
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		unique = append(unique, absolute)
+	}
+	return unique
+}
+
+func normalizedPathIdentity(path string) string {
+	identity := filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		identity = strings.ToLower(identity)
+	}
+	return identity
 }
 
 func globalPackageRegistration(npm, packageName string) (GlobalPackage, error) {
@@ -449,14 +591,14 @@ func packageCommand(raw json.RawMessage, packageName string) string {
 	return ""
 }
 
+// GlobalPackageStatuses reports registered packages across every detected npm
+// global root so Node version-manager prefixes do not hide installed packages.
 func GlobalPackageStatuses(packages []GlobalPackage) []Status {
 	statuses := make([]Status, 0, len(packages))
-	globalRoot := ""
-	if npm, err := npmExecutable(); err == nil {
-		if root, rootErr := run(npm, "root", "-g"); rootErr == nil {
-			globalRoot = strings.TrimSpace(root)
-		}
+	if len(packages) == 0 {
+		return statuses
 	}
+	installations, _ := npmGlobalInstallations()
 	for _, item := range packages {
 		status := Status{
 			Key:         item.Package,
@@ -464,8 +606,8 @@ func GlobalPackageStatuses(packages []GlobalPackage) []Status {
 			Description: item.Command,
 			InstallHint: "npm install -g " + item.Package,
 		}
-		if globalRoot != "" {
-			source := filepath.Join(globalRoot, filepath.FromSlash(item.Package))
+		for _, installation := range installations {
+			source := filepath.Join(installation.Root, filepath.FromSlash(item.Package))
 			if raw, readErr := os.ReadFile(filepath.Join(source, "package.json")); readErr == nil {
 				var manifest struct {
 					Version string `json:"version"`
@@ -475,6 +617,7 @@ func GlobalPackageStatuses(packages []GlobalPackage) []Status {
 					status.Enabled = true
 					status.Version = manifest.Version
 					status.SourcePath = source
+					break
 				}
 			}
 		}
@@ -770,7 +913,12 @@ func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (Ac
 		case "uninstall":
 			output, err := uninstallRTK(onLine)
 			if err != nil {
-				return ActionResult{Message: "RTK uninstall failed", Output: output}, err
+				message := "RTK uninstall failed; check the application log for details"
+				var removalErr *executableRemovalError
+				if errors.As(err, &removalErr) {
+					message = fmt.Sprintf("RTK uninstall is incomplete: unable to remove %s. Allow administrator access and retry.", removalErr.Path)
+				}
+				return ActionResult{Message: message, Output: output}, err
 			}
 			return ActionResult{Message: "RTK uninstalled", Output: output}, nil
 		}
@@ -785,7 +933,12 @@ func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (Ac
 		case "uninstall":
 			output, err := uninstallDCG(onLine)
 			if err != nil {
-				return ActionResult{Message: "DCG uninstall failed", Output: output}, err
+				message := "DCG uninstall failed; check the application log for details"
+				var removalErr *executableRemovalError
+				if errors.As(err, &removalErr) {
+					message = fmt.Sprintf("DCG uninstall is incomplete: unable to remove %s. Allow administrator access and retry.", removalErr.Path)
+				}
+				return ActionResult{Message: message, Output: output}, err
 			}
 			return ActionResult{Message: "DCG uninstalled", Output: output}, nil
 		}
@@ -798,7 +951,9 @@ func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (Ac
 			}
 			return ActionResult{Message: "Agent Browser installed", Output: output}, nil
 		case "uninstall":
-			return m.uninstallNPMRuntime(AgentBrowserPackage, "Agent Browser", &m.agentBrowserCache, &m.agentBrowserCacheAt, onLine)
+			return m.uninstallNPMRuntime(AgentBrowserPackage, "Agent Browser", &m.agentBrowserCache, &m.agentBrowserCacheAt, func() (bool, string) {
+				return detectVersion(AgentBrowserPackage)
+			}, onLine)
 		}
 	case PlaywrightPackage:
 		switch req.Action {
@@ -824,7 +979,7 @@ func (m *Manager) manage(req ActionRequest, cfg Config, onLine func(string)) (Ac
 			}
 			return ActionResult{Message: "Figma MCP installed", Output: output}, nil
 		case "uninstall":
-			return m.uninstallNPMRuntime(FigmaPackage, "Figma MCP", &m.figmaCache, &m.figmaCacheAt, onLine)
+			return m.uninstallNPMRuntime(FigmaPackage, "Figma MCP", &m.figmaCache, &m.figmaCacheAt, detectFigma, onLine)
 		}
 	}
 	return ActionResult{}, fmt.Errorf("unsupported extension action: %s/%s", req.Key, req.Action)
@@ -841,7 +996,7 @@ func installRTK(onLine func(string)) (string, error) {
 		}
 		output, err = runUnboundedWithProgress(onLine, winget, "install", "--id", "rtk-ai.rtk", "--exact", "--silent", "--accept-source-agreements", "--accept-package-agreements")
 	case "darwin":
-		brew, err := exec.LookPath("brew")
+		brew, err := brewExecutable()
 		if err != nil {
 			return "", errors.New("Homebrew was not found; install RTK from the rtk-ai/rtk releases page")
 		}
@@ -903,33 +1058,53 @@ func installDCG(onLine func(string)) (string, error) {
 }
 
 func uninstallDCG(onLine func(string)) (string, error) {
-	dcg, err := DCGExecutable()
+	_, err := DCGExecutable()
 	if err != nil {
-		return "", errors.New("dcg CLI was not found")
+		if onLine != nil {
+			onLine("DCG is already absent; nothing to remove")
+		}
+		return "", nil
 	}
-	resolvedDCG := dcg
-	if resolved, resolveErr := filepath.EvalSymlinks(dcg); resolveErr == nil {
-		resolvedDCG = resolved
-	}
-	if strings.Contains(filepath.ToSlash(resolvedDCG), "/Cellar/dcg/") {
-		if brew, lookErr := exec.LookPath("brew"); lookErr == nil {
-			output, uninstallErr := runUnboundedWithProgress(onLine, brew, "uninstall", "dcg")
+	return removeRemainingDCGExecutables("", onLine)
+}
+
+func removeRemainingDCGExecutables(output string, onLine func(string)) (string, error) {
+	removed := make(map[string]struct{})
+	for attempts := 0; attempts < 32; attempts++ {
+		remaining, findErr := DCGExecutable()
+		if findErr != nil {
+			return output, nil
+		}
+		identity, identityErr := filepath.Abs(filepath.Clean(remaining))
+		if identityErr != nil {
+			return output, fmt.Errorf("resolve DCG executable %s: %w", remaining, identityErr)
+		}
+		identity = normalizedPathIdentity(identity)
+		if _, exists := removed[identity]; exists {
+			return output, fmt.Errorf("DCG executable remained after removal attempt: %s", remaining)
+		}
+		removed[identity] = struct{}{}
+		resolved := remaining
+		if evaluated, resolveErr := filepath.EvalSymlinks(remaining); resolveErr == nil {
+			resolved = evaluated
+		}
+		if strings.Contains(filepath.ToSlash(resolved), "/Cellar/dcg/") {
+			brew, lookErr := brewExecutable()
+			if lookErr != nil {
+				return output, errors.New("Homebrew-managed DCG was detected but brew was not found")
+			}
+			brewOutput, uninstallErr := runUnboundedWithProgress(onLine, brew, "uninstall", "dcg")
+			output = joinCommandOutput(output, brewOutput)
 			if uninstallErr != nil {
 				return output, uninstallErr
 			}
-			if _, findErr := DCGExecutable(); findErr == nil {
-				return output, errors.New("another dcg executable is still discoverable")
-			}
-			return output, nil
+			continue
+		}
+		if removeErr := removeDetectedDCGBinary(remaining, onLine); removeErr != nil {
+			return output, removeErr
 		}
 	}
-	if err := removeDetectedDCGBinary(dcg, onLine); err != nil {
-		return "", err
-	}
-	if remaining, findErr := DCGExecutable(); findErr == nil {
-		return "", fmt.Errorf("another dcg executable is still discoverable at %s", remaining)
-	}
-	return "", nil
+	return output, errors.New("too many DCG executable paths were discovered during uninstall")
 }
 
 func removeDetectedDCGBinary(path string, onLine func(string)) error {
@@ -947,8 +1122,18 @@ func removeDetectedDCGBinary(path string, onLine func(string)) error {
 	if info.IsDir() {
 		return fmt.Errorf("DCG executable path is a directory: %s", target)
 	}
+	base := strings.ToLower(filepath.Base(target))
+	if base != "dcg" && base != "dcg.exe" && base != "dcg.cmd" {
+		return fmt.Errorf("refusing to remove unexpected DCG executable name: %s", target)
+	}
+	versionOutput, versionErr := run(target, "--version")
+	if versionErr != nil || strings.TrimSpace(versionOutput) == "" {
+		return fmt.Errorf("refusing to remove an unverified DCG executable: %s", target)
+	}
 	if err := os.Remove(target); err != nil {
-		return fmt.Errorf("remove DCG executable %s: %w", target, err)
+		if elevatedErr := removeProtectedExecutable(target, "DCG", err, onLine); elevatedErr != nil {
+			return &executableRemovalError{Name: "DCG", Path: target, Cause: elevatedErr}
+		}
 	}
 	if onLine != nil {
 		onLine("removed " + target)
@@ -965,7 +1150,10 @@ func runRTKGlobalInit(onLine func(string), rtk string, runner progressCommandRun
 func uninstallRTK(onLine func(string)) (string, error) {
 	rtk, err := RTKExecutable()
 	if err != nil {
-		return "", errors.New("rtk CLI was not found")
+		if onLine != nil {
+			onLine("RTK is already absent; nothing to remove")
+		}
+		return "", nil
 	}
 	if onLine != nil {
 		onLine("> rtk init -g --uninstall")
@@ -984,7 +1172,7 @@ func uninstallRTK(onLine func(string)) (string, error) {
 			uninstallOutput, packageManagerErr = runUnboundedWithProgress(onLine, winget, "uninstall", "--id", "rtk-ai.rtk", "--exact", "--silent", "--accept-source-agreements")
 		}
 	case "darwin":
-		brew, lookErr := exec.LookPath("brew")
+		brew, lookErr := brewExecutable()
 		if lookErr == nil {
 			uninstallOutput, packageManagerErr = runUnboundedWithProgress(onLine, brew, "uninstall", "rtk")
 		}
@@ -993,25 +1181,53 @@ func uninstallRTK(onLine func(string)) (string, error) {
 		onLine("warn: package manager uninstall did not remove RTK: " + packageManagerErr.Error())
 	}
 
-	if _, statErr := os.Lstat(rtk); statErr == nil {
-		if removeErr := removeDetectedRTKBinary(rtk, onLine); removeErr != nil {
-			return joinCommandOutput(cleanupOutput, uninstallOutput), removeErr
-		}
-	} else if !os.IsNotExist(statErr) {
-		return joinCommandOutput(cleanupOutput, uninstallOutput), fmt.Errorf("inspect RTK executable %s: %w", rtk, statErr)
-	}
-
 	combined := joinCommandOutput(cleanupOutput, uninstallOutput)
-	if remaining, findErr := RTKExecutable(); findErr == nil {
-		return combined, fmt.Errorf("another RTK executable is still discoverable at %s", remaining)
+	removed := make(map[string]struct{})
+	for attempts := 0; attempts < 32; attempts++ {
+		remaining, findErr := RTKExecutable()
+		if findErr != nil {
+			return combined, nil
+		}
+		identity, identityErr := filepath.Abs(filepath.Clean(remaining))
+		if identityErr != nil {
+			return combined, fmt.Errorf("resolve RTK executable %s: %w", remaining, identityErr)
+		}
+		if runtime.GOOS == "windows" {
+			identity = strings.ToLower(identity)
+		}
+		if _, exists := removed[identity]; exists {
+			return combined, fmt.Errorf("RTK executable remained after removal attempt: %s", remaining)
+		}
+		removed[identity] = struct{}{}
+		if removeErr := removeDetectedRTKBinary(remaining, onLine); removeErr != nil {
+			return combined, removeErr
+		}
 	}
-	return combined, nil
+	return combined, errors.New("too many RTK executable paths were discovered during uninstall")
+}
+
+type executableRemovalError struct {
+	Name  string
+	Path  string
+	Cause error
+}
+
+func (e *executableRemovalError) Error() string {
+	return fmt.Sprintf("remove %s executable %s: %v", e.Name, e.Path, e.Cause)
+}
+
+func (e *executableRemovalError) Unwrap() error {
+	return e.Cause
 }
 
 func removeDetectedRTKBinary(path string, onLine func(string)) error {
 	target := filepath.Clean(strings.TrimSpace(path))
 	if target == "" || target == "." {
 		return errors.New("invalid RTK executable path")
+	}
+	base := strings.ToLower(filepath.Base(target))
+	if base != "rtk" && base != "rtk.exe" && base != "rtk.cmd" {
+		return fmt.Errorf("refusing to remove unexpected RTK executable name: %s", target)
 	}
 	info, err := os.Lstat(target)
 	if err != nil {
@@ -1023,8 +1239,15 @@ func removeDetectedRTKBinary(path string, onLine func(string)) error {
 	if info.IsDir() {
 		return fmt.Errorf("RTK executable path is a directory: %s", target)
 	}
+	versionOutput, versionErr := run(target, "--version")
+	versionFields := strings.Fields(strings.TrimSpace(versionOutput))
+	if versionErr != nil || len(versionFields) < 2 || !strings.EqualFold(versionFields[0], "rtk") {
+		return fmt.Errorf("refusing to remove an unverified RTK executable: %s", target)
+	}
 	if err := os.Remove(target); err != nil {
-		return fmt.Errorf("remove RTK executable %s: %w", target, err)
+		if elevatedErr := removeProtectedExecutable(target, "RTK", err, onLine); elevatedErr != nil {
+			return &executableRemovalError{Name: "RTK", Path: target, Cause: elevatedErr}
+		}
 	}
 	if onLine != nil {
 		onLine("Removed " + target)
@@ -1058,15 +1281,18 @@ func (m *Manager) installAgentBrowser(onLine func(string)) (string, error) {
 	return strings.TrimSpace(output), nil
 }
 
-func (m *Manager) uninstallNPMRuntime(packageName, displayName string, cache **binaryDetect, cacheAt *time.Time, onLine func(string)) (ActionResult, error) {
+func (m *Manager) uninstallNPMRuntime(packageName, displayName string, cache **binaryDetect, cacheAt *time.Time, detector func() (bool, string), onLine func(string)) (ActionResult, error) {
 	result, err := m.UninstallGlobalPackage(packageName, onLine)
-	if err != nil {
-		return ActionResult{Message: displayName + " uninstall failed", Command: result.Command, Output: result.Output}, err
-	}
 	m.detectMu.Lock()
 	*cache = nil
 	*cacheAt = time.Time{}
 	m.detectMu.Unlock()
+	if err != nil {
+		return ActionResult{Message: displayName + " uninstall failed", Command: result.Command, Output: result.Output}, err
+	}
+	if installed, _ := detector(); installed {
+		return ActionResult{Message: displayName + " uninstall is incomplete", Command: result.Command, Output: result.Output}, fmt.Errorf("%s executable is still discoverable after npm uninstall", displayName)
+	}
 	result.Message = displayName + " uninstalled"
 	return result, nil
 }
@@ -1108,26 +1334,34 @@ func (m *Manager) installPlaywright(onLine func(string)) (string, error) {
 }
 
 func (m *Manager) uninstallPlaywright(onLine func(string)) (string, error) {
-	playwright, err := playwrightExecutable()
-	if err != nil {
-		return "", errors.New("playwright CLI was not found")
+	var browserOutput string
+	var browserErr error
+	if playwright, findErr := playwrightExecutable(); findErr == nil {
+		if onLine != nil {
+			onLine("> playwright uninstall")
+		}
+		browserOutput, browserErr = runUnboundedWithProgress(onLine, playwright, "uninstall")
+		if browserErr != nil && onLine != nil {
+			onLine("warn: unable to remove Playwright browsers; package uninstall will continue")
+		}
+	} else if onLine != nil {
+		onLine("Playwright CLI is already absent; checking global npm installations")
 	}
-	if onLine != nil {
-		onLine("> playwright uninstall")
-	}
-	browserOutput, err := runUnboundedWithProgress(onLine, playwright, "uninstall")
-	if err != nil {
-		return browserOutput, fmt.Errorf("unable to remove Playwright browsers: %w", err)
-	}
-	result, err := m.UninstallGlobalPackage(PlaywrightPackage, onLine)
+	result, packageErr := m.UninstallGlobalPackage(PlaywrightPackage, onLine)
 	combined := joinCommandOutput(browserOutput, result.Output)
-	if err != nil {
-		return combined, err
-	}
 	m.detectMu.Lock()
 	m.playwrightCache = nil
 	m.playwrightCacheAt = time.Time{}
 	m.detectMu.Unlock()
+	if packageErr != nil {
+		return combined, packageErr
+	}
+	if installed, _ := detectPlaywright(); installed {
+		return combined, errors.New("Playwright executable is still discoverable after npm uninstall")
+	}
+	if browserErr != nil {
+		return combined, fmt.Errorf("Playwright package was removed but browser cleanup failed: %w", browserErr)
+	}
 	return combined, nil
 }
 
@@ -1187,13 +1421,20 @@ func (m *Manager) installFigma(onLine func(string)) (string, error) {
 }
 
 func npmExecutable() (string, error) {
-	names := []string{"npm"}
-	if runtime.GOOS == "windows" {
-		names = []string{"npm.cmd", "npm.exe", "npm"}
+	candidates := npmExecutableCandidates()
+	if len(candidates) > 0 {
+		return candidates[0], nil
 	}
-	for _, name := range names {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
+	return "", exec.ErrNotFound
+}
+
+func brewExecutable() (string, error) {
+	if path, err := exec.LookPath("brew"); err == nil {
+		return path, nil
+	}
+	for _, candidate := range []string{"/opt/homebrew/bin/brew", "/usr/local/bin/brew"} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
 		}
 	}
 	return "", exec.ErrNotFound
@@ -1213,10 +1454,14 @@ func figmaExecutable() (string, error) {
 }
 
 func detectVersion(binary string) (bool, string) {
-	if _, err := exec.LookPath(binary); err != nil {
+	path, err := exec.LookPath(binary)
+	if err != nil {
 		return false, ""
 	}
-	output, _ := run(binary, "--version")
+	output, err := run(path, "--version")
+	if err != nil {
+		return false, ""
+	}
 	if line, _, ok := strings.Cut(strings.TrimSpace(output), "\n"); ok {
 		output = line
 	}
@@ -1335,15 +1580,6 @@ func DCGExecutable() (string, error) {
 			return filepath.Abs(filepath.Clean(explicit))
 		}
 	}
-	names := []string{"dcg"}
-	if runtime.GOOS == "windows" {
-		names = []string{"dcg.exe", "dcg.cmd", "dcg"}
-	}
-	for _, name := range names {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
-		}
-	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{
 		filepath.Join(home, ".local", "bin", "dcg"),
@@ -1360,6 +1596,15 @@ func DCGExecutable() (string, error) {
 			return filepath.Abs(candidate)
 		}
 	}
+	names := []string{"dcg"}
+	if runtime.GOOS == "windows" {
+		names = []string{"dcg.exe", "dcg.cmd", "dcg"}
+	}
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
 	return "", exec.ErrNotFound
 }
 
@@ -1368,7 +1613,10 @@ func detectDCG() (bool, string) {
 	if err != nil {
 		return false, ""
 	}
-	output, _ := run(path, "--version")
+	output, err := run(path, "--version")
+	if err != nil {
+		return false, ""
+	}
 	if line, _, ok := strings.Cut(strings.TrimSpace(output), "\n"); ok {
 		output = line
 	}
@@ -1384,15 +1632,6 @@ func RTKInstalled() bool {
 // RTKExecutable locates RTK on PATH and in the standard user-level locations
 // used by WinGet, Cargo, and the official install script.
 func RTKExecutable() (string, error) {
-	names := []string{"rtk"}
-	if runtime.GOOS == "windows" {
-		names = []string{"rtk.exe", "rtk.cmd", "rtk"}
-	}
-	for _, name := range names {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
-		}
-	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{filepath.Join(home, ".local", "bin", "rtk")}
 	if runtime.GOOS == "windows" {
@@ -1410,6 +1649,15 @@ func RTKExecutable() (string, error) {
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate, nil
+		}
+	}
+	names := []string{"rtk"}
+	if runtime.GOOS == "windows" {
+		names = []string{"rtk.exe", "rtk.cmd", "rtk"}
+	}
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
 		}
 	}
 	return "", exec.ErrNotFound

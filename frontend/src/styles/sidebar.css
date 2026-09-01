@@ -58,8 +58,12 @@
 .sidebar-group .sidebar-group__title[draggable="true"]:active { cursor: grabbing; }
 .sidebar-group__title svg { flex: 0 0 auto; }
 .sidebar-group__title span { flex: 1; min-width: 0; overflow: hidden; font-size: var(--fs-13); font-weight: 400; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar-group .sidebar-group__actions { flex: 0 0 auto; display: flex; align-items: center; gap: 1px; }
-.sidebar-group .sidebar-group__add { flex: 0 0 auto; width: 22px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--faint); background: transparent; cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, background .12s; }
+.sidebar-group .sidebar-group__actions { position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 1px; }
+.sidebar-group .sidebar-group__count { flex: 0 0 auto; min-width: 22px; height: 24px; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px; border-radius: 5px; font-size: var(--fs-12); font-variant-numeric: tabular-nums; color: var(--faint); cursor: default; opacity: 1; transition: opacity .12s; }
+/* 会话数默认靠在整行最右端；hover 时淡出，让位给同位置出现的 + 新建按钮 */
+.sidebar-group__head:hover .sidebar-group__count { opacity: 0; }
+/* + 按钮绝对定位到计数区域最右缘（即会话数原本所在的最右位置），不挤占数字空间 */
+.sidebar-group .sidebar-group__add { position: absolute; top: 50%; right: 0; transform: translateY(-50%); width: 22px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--faint); background: transparent; cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, background .12s; }
 .sidebar-group__head:hover .sidebar-group__add { opacity: 1; }
 .sidebar-group__add:hover { color: var(--text); background: var(--surface); }
 .sidebar-browser__list .sidebar-show-more { display: flex; justify-content: center; width: 100%; padding: 4px 8px; border: 0; border-radius: 7px; color: var(--faint); background: transparent; cursor: pointer; text-align: center; font-size: var(--fs-12); }

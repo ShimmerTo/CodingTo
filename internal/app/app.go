@@ -30,7 +30,20 @@ type App struct {
 	moduleMu   sync.Mutex
 	// gitWriteMu serializes repository mutations while allowing concurrent reads.
 	gitWriteMu sync.Mutex
-	modules    []RuntimeModule
+	gitMonitor *gitWorkspaceMonitor
+	// dcgSyncMu serializes dcg workspace allowlist rebuilds: the startup
+	// background sync must not race a user-triggered sync on the allowlist file.
+	dcgSyncMu sync.Mutex
+	// workspaceActivateMu serializes workspace validation and activation so an
+	// older request cannot overwrite a newer frontend selection after it returns.
+	workspaceActivateMu sync.Mutex
+	// workspaceMu guards the process-local workspace selected for a new,
+	// unsent conversation. This state is deliberately never persisted.
+	workspaceMu          sync.RWMutex
+	defaultWorkDir       string
+	currentWorkDir       string
+	currentEnvironmentID string
+	modules              []RuntimeModule
 	// steward is the always-on bot-relay service (nil when construction fails
 	// so the desktop app keeps working without it).
 	steward        *steward.Service
@@ -57,6 +70,7 @@ type Bootstrap struct {
 	PiPath          string             `json:"piPath"`
 	ConfigDir       string             `json:"configDir"`
 	Version         string             `json:"version"`
+	DefaultWorkDir  string             `json:"defaultWorkDir"`
 }
 
 // PiUpdateStatus reports the result of a Pi Agent update check.
@@ -107,6 +121,10 @@ type SaveBrowserProfileRequest struct {
 }
 
 func NewApp(modules ...RuntimeModule) (*App, error) {
+	defaultWorkDir, err := ensureDefaultWorkDir()
+	if err != nil {
+		return nil, fmt.Errorf("initialize default working directory: %w", err)
+	}
 	store, err := NewConfigStore()
 	if err != nil {
 		return nil, err
@@ -117,10 +135,15 @@ func NewApp(modules ...RuntimeModule) (*App, error) {
 	if _, err := store.EnsureDefaultAgent(); err != nil {
 		return nil, fmt.Errorf("initialize default agent: %w", err)
 	}
+	initialEnvironmentID, initialWorkDir := configuredStartupWorkspace(store.Get(), defaultWorkDir)
 	extensions := extensions.NewManager()
 	result := &App{
-		store:      store,
-		extensions: extensions,
+		store:                store,
+		extensions:           extensions,
+		gitMonitor:           newGitWorkspaceMonitor(),
+		defaultWorkDir:       defaultWorkDir,
+		currentWorkDir:       initialWorkDir,
+		currentEnvironmentID: initialEnvironmentID,
 	}
 	result.terminal = terminaldomain.NewManager(func(name string, payload any) {
 		if app := application.Get(); app != nil && app.Event != nil {
@@ -238,6 +261,10 @@ func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) 
 	// refresh token 被外部进程误用；损坏文件只记录日志，绝不覆盖。
 	go a.removeLegacyChatGPTCredentialsFromAgents()
 	a.reconcileOrphanedSubagents()
+	// Git workspace caches are warmed after startup without blocking the window.
+	// The default temp workspace is always active; the three most recently used
+	// conversation workspaces are prepared alongside it.
+	go a.prewarmRecentGitWorkspaces(3)
 	// 会话数据自动清理：启动后异步执行，不阻塞窗口渲染；结果供前端拉取展示。
 	a.startSessionCleanup()
 	go func() {
@@ -292,6 +319,9 @@ func (a *App) ServiceShutdown() error {
 
 func (a *App) shutdown() error {
 	a.cancelChatGPTFlow()
+	if a.gitMonitor != nil {
+		a.gitMonitor.Close()
+	}
 	terminalErr := a.terminal.Close()
 	agentErr := a.agent.Close()
 	a.moduleMu.Lock()
@@ -328,13 +358,13 @@ func (a *App) GetBootstrap() Bootstrap {
 	cfg := a.store.Get()
 	// 启动时把已保存的 DCG 处置策略与工作目录放行规则同步到运行时产物
 	// （策略文件、dcg 用户配置），即使上次退出前同步失败也能自愈。
+	// 策略文件是纯本地小文件写，保持同步；工作区放行要跑 dcg 子进程，
+	// 改为后台异步，启动链路绝不阻塞在 dcg 二进制上。
 	if err := a.writeDCGPolicyFile(cfg); err != nil {
 		applog.Warnf("write dcg policy file: %v", err)
 	}
 	if cfg.DCGSettings.WorkspaceAllow {
-		if err := syncDCGWorkspaceAllow(cfg); err != nil {
-			applog.Warnf("sync dcg workspace allow: %v", err)
-		}
+		go a.syncDCGWorkspaceAllowAsync()
 	}
 	// 凭据隔离：密码与私钥仅存 App 存储与 0600 快照，下发前统一脱敏；
 	// 前端保存时空凭据由 SaveConfig 沿用已存值。
@@ -347,6 +377,7 @@ func (a *App) GetBootstrap() Bootstrap {
 		PiPath:          path,
 		ConfigDir:       a.store.Dir(),
 		Version:         appVersion,
+		DefaultWorkDir:  a.defaultWorkDir,
 	}
 }
 
@@ -426,7 +457,12 @@ func (a *App) SaveConfig(cfg AppConfig) (AppConfig, error) {
 	}
 	// DCG 处置策略或工作空间列表变化时同步策略文件与 dcg 放行规则。
 	a.ensureDCGRuntime(cfg, previous)
-	return maskConfigCredentials(a.store.Get()), nil
+	saved := a.store.Get()
+	// Preserve the caller's process-local selection in this response only. The
+	// store intentionally no longer persists a default workspace.
+	saved.ActiveEnvID = cfg.ActiveEnvID
+	saved.LastEnvironment = cfg.LastEnvironment
+	return maskConfigCredentials(saved), nil
 }
 
 // enableSubagentExtensionForNewAssignments enables the parent-side bridge when
@@ -537,8 +573,18 @@ func (a *App) DeleteAgent(id string) (AppConfig, error) {
 	return a.store.DeleteAgent(id)
 }
 
-func (a *App) StartPrompt(req PromptRequest) error { return a.agent.StartPrompt(req) }
-func (a *App) AbortPrompt() error                  { return a.agent.AbortPrompt() }
+// StartPrompt warms the selected workspace before delegating the request.
+func (a *App) StartPrompt(req PromptRequest) error {
+	workspace := req.WorkDir
+	if workspace == "" {
+		workspace = a.runtimeWorkspace().Root
+	}
+	if a.gitMonitor != nil {
+		a.gitMonitor.Ensure(workspace)
+	}
+	return a.agent.StartPrompt(req)
+}
+func (a *App) AbortPrompt() error { return a.agent.AbortPrompt() }
 
 // AbortSession is the session-scoped stop boundary used by the frontend. It
 // returns the authoritative state after dispatching the abort so callers can

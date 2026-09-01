@@ -139,12 +139,13 @@ function toolPath(input: unknown): string {
   return '';
 }
 
-function resolveTrackedPath(context: NodeContext, inputPath: string): TrackedPath {
+function resolveTrackedPath(context: NodeContext, inputPath: string): TrackedPath | null {
   if (!inputPath) throw new Error('file mutation tool did not provide a path');
   const absolutePath = path.resolve(context.root, inputPath);
   const relative = path.relative(context.root, absolutePath);
   if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`edited file is outside the active workspace: ${inputPath}`);
+    // outside the workspace root is not a change-capture target: skip instead of blocking
+    return null;
   }
   const relativePath = relative.split(path.sep).join('/');
   return {
@@ -254,6 +255,7 @@ async function captureFinalState(context: NodeContext): Promise<void> {
     const captureDir = path.join(pathsRoot, entry.name);
     const meta = JSON.parse(await readFile(path.join(captureDir, 'meta.json'), 'utf8')) as { path?: string };
     const tracked = resolveTrackedPath(context, String(meta.path || ''));
+    if (!tracked) continue;
     if (path.resolve(tracked.captureDir) !== path.resolve(captureDir)) {
       throw new Error(`change capture path key mismatch: ${meta.path || '<empty>'}`);
     }
@@ -269,6 +271,7 @@ export default function codingToChangeCapture(api: ExtensionAPI) {
         const context = await loadNodeContext();
         if (!context) return;
         const tracked = resolveTrackedPath(context, toolPath(event?.input));
+        if (!tracked) return;
         await captureBefore(
           context,
           tracked,
@@ -290,6 +293,7 @@ export default function codingToChangeCapture(api: ExtensionAPI) {
       const context = await loadNodeContext();
       if (!context) return;
       const tracked = resolveTrackedPath(context, toolPath(event?.input));
+      if (!tracked) return;
       await captureAfter(
         context,
         tracked,

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ChevronDown, LoaderCircle, Plus, Server, SquareTerminal, X } from 'lucide-vue-next'
+import { ChevronDown, LoaderCircle, Minus, Plus, Server, SquareTerminal, X } from 'lucide-vue-next'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -15,11 +15,15 @@ import {
 
 const props = defineProps({
   open: { type: Boolean, default: false },
+  minimized: { type: Boolean, default: false },
   sessionId: { type: Number, required: true },
+  workspace: { type: String, default: '' },
+  workspaceRevision: { type: Number, default: 0 },
+  workspaceActivating: { type: Boolean, default: false },
   t: { type: Object, required: true },
 })
 
-const emit = defineEmits(['close', 'error'])
+const emit = defineEmits(['close', 'error', 'update:minimized'])
 const PANEL_HEIGHT_KEY = 'codingto:terminal-panel-height'
 const PANEL_MIN_HEIGHT = 170
 const PANEL_MAX_RATIO = 0.72
@@ -47,6 +51,7 @@ let themeObserver = null
 let offData = null
 let offExit = null
 let loadRequest = 0
+let workspaceGeneration = 0
 let resizeTimer = null
 let stopPanelResize = null
 
@@ -97,19 +102,29 @@ function persistSelectedTerminal() {
   try { localStorage.setItem(key, activeTerminalId.value) } catch { /* ignore */ }
 }
 
-function terminalTheme(element) {
-  const styles = getComputedStyle(element)
+function normalizedWorkspace(value) {
+  const normalized = String(value || '').trim().replaceAll('\\', '/')
+  const withoutTrailingSlash = normalized === '/' ? normalized : normalized.replace(/\/+$/, '')
+  return /^[a-z]:\//i.test(withoutTrailingSlash) || withoutTrailingSlash.startsWith('//')
+    ? withoutTrailingSlash.toLowerCase()
+    : withoutTrailingSlash
+}
+
+function terminalTheme() {
+  const dark = document.documentElement.dataset.theme === 'dark'
+  const styles = getComputedStyle(document.documentElement)
   const value = (name, fallback) => styles.getPropertyValue(name).trim() || fallback
+  const background = value('--terminal-bg', dark ? '#292928' : '#ffffff')
   const baseTheme = {
-    background: value('--terminal-bg', '#161616'),
+    background,
     foreground: value('--text', '#e7e7e7'),
     // --accent is intentionally the inverse foreground in both themes, while
     // --accent-fg is close to the terminal background and makes a bar vanish.
     cursor: value('--accent', '#d9a441'),
-    cursorAccent: value('--terminal-bg', '#161616'),
+    cursorAccent: background,
     selectionBackground: 'rgba(120, 150, 210, 0.32)',
   }
-  if (document.documentElement.dataset.theme !== 'dark') {
+  if (!dark) {
     return {
       ...baseTheme,
       black: '#1f1f1f', red: '#b42318', green: '#237a3b', yellow: '#7a5d00',
@@ -128,10 +143,7 @@ function terminalTheme(element) {
 }
 
 function refreshTerminalThemes() {
-  for (const [id, view] of terminalViews) {
-    const element = terminalContainers.get(id)
-    if (element) view.instance.options.theme = terminalTheme(element)
-  }
+  for (const view of terminalViews.values()) view.instance.options.theme = terminalTheme()
 }
 
 function setTerminalContainer(id, element) {
@@ -141,6 +153,28 @@ function setTerminalContainer(id, element) {
   } else {
     terminalContainers.delete(id)
   }
+}
+
+function attachCompositionClamp(instance) {
+  // xterm 6.0.0 不限制组合视图宽度：拼音组合文本超出右边缘后，隐藏 textarea 的 caret
+  // 被 WebView2 自动横向滚动出可视区，表现为终端整体左移、候选字跑到最右侧。
+  // 与上游修复（xtermjs #5616/#5747）一致：组合视图限宽 + overflow hidden + rtl，
+  // xterm 同步测量后 textarea 宽度随之被钳制。capture 阶段保证先于 xterm 自身处理器执行。
+  const element = instance.element
+  const screen = element?.querySelector('.xterm-screen')
+  if (!screen) return
+  screen.addEventListener('compositionupdate', () => {
+    const compositionView = element.querySelector('.composition-view')
+    if (!compositionView) return
+    const canvas = element.querySelector('.xterm-screen canvas')
+    const cols = instance.cols
+    const cellWidth = canvas ? canvas.getBoundingClientRect().width / cols : 0
+    if (!cols || !cellWidth) return
+    const cursorLeft = Math.min(instance.buffer.active.cursorX, cols - 1) * cellWidth
+    compositionView.style.maxWidth = `${Math.max(cols * cellWidth - cursorLeft, 1)}px`
+    compositionView.style.overflow = 'hidden'
+    compositionView.style.direction = 'rtl'
+  }, true)
 }
 
 function ensureTerminalView(snapshot) {
@@ -159,10 +193,11 @@ function ensureTerminalView(snapshot) {
     fontSize: 13,
     lineHeight: 1.16,
     scrollback: 10000,
-    theme: terminalTheme(element),
+    theme: terminalTheme(),
   })
   instance.loadAddon(fitAddon)
   instance.open(element)
+  attachCompositionClamp(instance)
   instance.onData(data => queueTerminalInput(snapshot.id, data))
   instance.attachCustomKeyEventHandler(event => handleClipboardShortcut(instance, event))
   terminalViews.set(snapshot.id, { instance, fitAddon })
@@ -191,10 +226,18 @@ function handleClipboardShortcut(instance, event) {
 function queueTerminalInput(terminalId, data) {
   if (!data) return
   const sessionId = props.sessionId
+  const generation = workspaceGeneration
+  const key = workspaceKey.value
   const previous = inputQueues.get(terminalId) || Promise.resolve()
   const next = previous
-    .then(() => writeSessionTerminal({ sessionId, terminalId, data }))
-    .catch(error => emit('error', error))
+    .then(() => {
+      const terminal = terminals.value.find(item => item.id === terminalId)
+      if (generation !== workspaceGeneration || key !== workspaceKey.value || !terminal?.running || !terminalViews.has(terminalId)) return
+      return writeSessionTerminal({ sessionId, terminalId, data })
+    })
+    .catch(error => {
+      if (generation === workspaceGeneration) emit('error', error)
+    })
     .finally(() => {
       if (inputQueues.get(terminalId) === next) inputQueues.delete(terminalId)
     })
@@ -224,12 +267,15 @@ function fitActiveTerminal(immediate = false) {
       view.fitAddon.fit()
       view.instance.focus()
       if (terminal.running) {
+        const generation = workspaceGeneration
         resizeSessionTerminal({
           sessionId: props.sessionId,
           terminalId: terminal.id,
           columns: view.instance.cols,
           rows: view.instance.rows,
-        }).catch(error => emit('error', error))
+        }).catch(error => {
+          if (generation === workspaceGeneration) emit('error', error)
+        })
       }
     } catch { /* hidden or detached terminal containers cannot be fitted */ }
   }
@@ -275,36 +321,58 @@ async function loadWorkspace() {
 }
 
 async function createTerminal(profileId = activeProfile.value?.id || profiles.value[0]?.id) {
-  if (!profileId || creatingProfileId.value) return
+  if (!profileId || creatingProfileId.value) return false
+  const generation = workspaceGeneration
+  const sessionId = props.sessionId
+  const workspace = normalizedWorkspace(props.workspace)
   creatingProfileId.value = profileId
   profileMenuOpen.value = false
   try {
     const currentView = terminalViews.get(activeTerminalId.value)
     const snapshot = await createSessionTerminal({
-      sessionId: props.sessionId,
+      sessionId,
       profileId,
       columns: currentView?.instance.cols || 100,
       rows: currentView?.instance.rows || 24,
     })
-    terminals.value = [...terminals.value, snapshot]
+    if (generation !== workspaceGeneration || workspace !== normalizedWorkspace(props.workspace)) return false
+    // A same-workspace conversation switch can refresh the snapshot while the
+    // create call is in flight. Invalidate that load and merge by terminal ID.
+    loadRequest += 1
+    loading.value = false
+    const existing = terminals.value.findIndex(item => item.id === snapshot.id)
+    terminals.value = existing >= 0
+      ? terminals.value.map((item, index) => index === existing ? snapshot : item)
+      : [...terminals.value, snapshot]
     activeTerminalId.value = snapshot.id
     persistSelectedTerminal()
     await nextTick()
+    if (generation !== workspaceGeneration) return false
     ensureTerminalView(snapshot)
     fitActiveTerminal(true)
+    return true
   } catch (error) {
-    emit('error', error)
+    if (generation === workspaceGeneration) emit('error', error)
+    return false
   } finally {
     creatingProfileId.value = ''
+    if (generation !== workspaceGeneration && props.open && !props.workspaceActivating) void loadWorkspace()
   }
 }
 
 async function closeTerminal(terminalId) {
-  if (!terminalId || closingTerminalId.value) return
+  if (!terminalId || closingTerminalId.value) return false
+  const generation = workspaceGeneration
+  const sessionId = props.sessionId
+  const workspace = normalizedWorkspace(props.workspace)
   closingTerminalId.value = terminalId
   const index = terminals.value.findIndex(item => item.id === terminalId)
   try {
-    await closeSessionTerminal({ sessionId: props.sessionId, terminalId })
+    await closeSessionTerminal({ sessionId, terminalId })
+    if (generation !== workspaceGeneration || workspace !== normalizedWorkspace(props.workspace)) return false
+    // Do not let an older workspace snapshot re-add the terminal after close.
+    loadRequest += 1
+    loading.value = false
     disposeTerminalView(terminalId)
     terminals.value = terminals.value.filter(item => item.id !== terminalId)
     if (activeTerminalId.value === terminalId) {
@@ -315,10 +383,12 @@ async function closeTerminal(terminalId) {
         fitActiveTerminal(true)
       }
     }
+    return true
   } catch (error) {
-    emit('error', error)
+    if (generation === workspaceGeneration) emit('error', error)
+    return false
   } finally {
-    closingTerminalId.value = ''
+    if (closingTerminalId.value === terminalId) closingTerminalId.value = ''
   }
 }
 
@@ -397,11 +467,40 @@ function closeProfileMenu(event) {
   if (profileMenuOpen.value && !event.target.closest('.terminal-panel__create-wrap')) profileMenuOpen.value = false
 }
 
-watch(() => [props.sessionId, props.open], () => {
-  if (props.open) void loadWorkspace()
-}, { immediate: true })
+watch(
+  () => [props.sessionId, props.open, props.workspaceRevision, props.workspace, props.workspaceActivating],
+  ([, open, , workspace, activating], previous = []) => {
+    // Session IDs and activation revisions can change while the canonical
+    // working directory stays the same. Keep the live xterm views in that case;
+    // the backend terminal manager is already scoped by canonical directory.
+    const workspaceChanged = previous.length > 0
+      && normalizedWorkspace(previous[3]) !== normalizedWorkspace(workspace)
+    if (!open || workspaceChanged) {
+      workspaceGeneration += 1
+      loadRequest += 1
+      disposeAllTerminalViews()
+      terminals.value = []
+      profiles.value = []
+      activeTerminalId.value = ''
+      workspaceKey.value = ''
+      workspaceRoot.value = ''
+    }
+    if (open && !activating) void loadWorkspace()
+  },
+  { immediate: true }
+)
 
 watch(activeTerminalId, () => nextTick(() => fitActiveTerminal(true)))
+
+// 最小化只隐藏面板，所有终端视图保持存活；恢复后重新适配尺寸。
+watch(() => props.minimized, minimized => {
+  if (minimized) {
+    if (stopPanelResize) stopPanelResize(false)
+    profileMenuOpen.value = false
+  } else {
+    nextTick(() => fitActiveTerminal(true))
+  }
+})
 
 onMounted(() => {
   panelHeight.value = clampPanelHeight(panelHeight.value)
@@ -416,6 +515,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  workspaceGeneration += 1
   loadRequest += 1
   if (offData) offData()
   if (offExit) offExit()
@@ -431,7 +531,6 @@ onBeforeUnmount(() => {
 
 <template>
   <section
-    v-show="open"
     ref="panel"
     class="terminal-panel"
     :class="{ 'terminal-panel--resizing': panelResizing }"
@@ -501,7 +600,22 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-        <button class="terminal-panel__action" type="button" :title="t.terminalHide" :aria-label="t.terminalHide" @click="emit('close')">
+        <button
+          class="terminal-panel__action"
+          type="button"
+          :title="t.terminalMinimize"
+          :aria-label="t.terminalMinimize"
+          @click="emit('update:minimized', true)"
+        >
+          <Minus :size="15" />
+        </button>
+        <button
+          class="terminal-panel__action"
+          type="button"
+          :title="t.terminalClose"
+          :aria-label="t.terminalClose"
+          @click="emit('close')"
+        >
           <X :size="15" />
         </button>
       </div>
@@ -521,10 +635,14 @@ onBeforeUnmount(() => {
         v-for="terminal in terminals"
         v-show="terminal.id === activeTerminalId"
         :key="terminal.id"
-        :ref="element => setTerminalContainer(terminal.id, element)"
         class="terminal-panel__viewport"
         role="tabpanel"
-      ></div>
+      >
+        <div
+          :ref="element => setTerminalContainer(terminal.id, element)"
+          class="terminal-panel__host"
+        ></div>
+      </div>
     </div>
   </section>
 </template>

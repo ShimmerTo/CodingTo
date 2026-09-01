@@ -66,9 +66,20 @@ type GitCommit struct {
 	Deleted     int             `json:"deleted,omitempty"`
 }
 
+// GitStash describes one named stash entry in the repository reflog.
+type GitStash struct {
+	Hash      string `json:"hash"`
+	Ref       string `json:"ref"`
+	Name      string `json:"name"`
+	Branch    string `json:"branch,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Timestamp int64  `json:"timestamp,omitempty"`
+}
+
 // GitRepositoryView contains the data required by the Git management dialog.
 type GitRepositoryView struct {
 	IsRepository  bool            `json:"isRepository"`
+	Warming       bool            `json:"warming,omitempty"`
 	Root          string          `json:"root,omitempty"`
 	WorktreePath  string          `json:"worktreePath,omitempty"`
 	CurrentBranch string          `json:"currentBranch,omitempty"`
@@ -84,24 +95,30 @@ type GitRepositoryView struct {
 	Remotes       []GitRemote     `json:"remotes"`
 	Branches      []GitBranch     `json:"branches"`
 	Commits       []GitCommit     `json:"commits"`
+	Stashes       []GitStash      `json:"stashes"`
 }
 
 // GitRepositoryOperationRequest describes one bounded repository operation.
 type GitRepositoryOperationRequest struct {
-	SessionID  int64  `json:"sessionId"`
-	Op         string `json:"op"`
-	Language   string `json:"language,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	StartPoint string `json:"startPoint,omitempty"`
-	Remote     string `json:"remote,omitempty"`
-	Commit     string `json:"commit,omitempty"`
+	SessionID  int64    `json:"sessionId"`
+	Op         string   `json:"op"`
+	Language   string   `json:"language,omitempty"`
+	Message    string   `json:"message,omitempty"`
+	Branch     string   `json:"branch,omitempty"`
+	StartPoint string   `json:"startPoint,omitempty"`
+	Remote     string   `json:"remote,omitempty"`
+	Commit     string   `json:"commit,omitempty"`
+	StashHash  string   `json:"stashHash,omitempty"`
+	Paths      []string `json:"paths,omitempty"`
 }
 
 // GitOperationResult is returned after a successful repository operation.
 type GitOperationResult struct {
-	Message string `json:"message"`
-	Output  string `json:"output,omitempty"`
+	Message      string          `json:"message"`
+	Output       string          `json:"output,omitempty"`
+	HasConflicts bool            `json:"hasConflicts,omitempty"`
+	StashKept    bool            `json:"stashKept,omitempty"`
+	Conflicts    []GitFileChange `json:"conflicts,omitempty"`
 }
 
 // GetSessionGitAvailability checks whether a conversation workspace is a Git repository.
@@ -113,36 +130,40 @@ func (a *App) GetSessionGitAvailability(id int64) (GitAvailability, error) {
 		}
 		return GitAvailability{}, err
 	}
+	if a.gitMonitor != nil {
+		// The monitor preloads workspaces in the background. A cache miss returns
+		// immediately so startup and workspace switches never run Git commands on
+		// the caller's path; git:workspace delivers the fresh availability.
+		if cached, ok := a.gitMonitor.Availability(workspace); ok {
+			return cached, nil
+		}
+		return GitAvailability{}, nil
+	}
+	return readGitAvailability(workspace), nil
+}
+
+func readGitAvailability(workspace string) GitAvailability {
 	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
 	defer cancel()
 	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return GitAvailability{}, nil
+		return GitAvailability{}
 	}
 	root := filepath.Clean(strings.TrimSpace(rootText))
 	branch := gitTrimmed(ctx, root, "branch", "--show-current")
-	base := gitUpstreamOrBase(ctx, root)
-	ahead := 0
-	if base != "" {
-		_, ahead = gitAheadBehind(ctx, root, base, "HEAD")
-	}
+	outgoing := resolveGitOutgoingRevision(ctx, root)
+	ahead := outgoing.Ahead
 	statusBytes, statusErr := runGitBytes(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if statusErr != nil {
 		applog.Errorf("read Git sidebar status failed: root=%q", root)
-		return GitAvailability{IsRepository: true, Root: root, CurrentBranch: branch, Ahead: ahead}, nil
+		return GitAvailability{IsRepository: true, Root: root, CurrentBranch: branch, Ahead: ahead}
 	}
 	files := parseGitStatus(string(statusBytes))
-	availability := GitAvailability{
-		IsRepository:  true,
-		Root:          root,
-		CurrentBranch: branch,
-		ChangeCount:   len(files),
-		Ahead:         ahead,
-	}
+	availability := GitAvailability{IsRepository: true, Root: root, CurrentBranch: branch, ChangeCount: len(files), Ahead: ahead}
 	for _, file := range files {
 		availability.HasConflicts = availability.HasConflicts || file.Conflicted
 	}
-	return availability, nil
+	return availability
 }
 
 // GetSessionGitRepository returns the complete lightweight Git dialog model.
@@ -151,6 +172,40 @@ func (a *App) GetSessionGitRepository(id int64) (GitRepositoryView, error) {
 	if err != nil {
 		return GitRepositoryView{}, err
 	}
+	if a.gitMonitor != nil {
+		if cached, ok := a.gitMonitor.Repository(workspace); ok {
+			return cached, nil
+		}
+		a.gitMonitor.Ensure(workspace)
+		return GitRepositoryView{
+			Warming:   true,
+			Conflicts: []GitFileChange{},
+			Worktree:  GitChangeSet{Files: []GitFileChange{}},
+			Remotes:   []GitRemote{},
+			Branches:  []GitBranch{},
+			Commits:   []GitCommit{},
+			Stashes:   []GitStash{},
+		}, nil
+	}
+	return readGitRepositoryView(workspace), nil
+}
+
+// RefreshSessionGitRepository rebuilds the cached Git model for a conversation
+// workspace and notifies the UI through the git:workspace event. It exists so an
+// open dialog can revalidate a cache that file events may have missed, instead of
+// overlaying a partial read on top of cached data.
+func (a *App) RefreshSessionGitRepository(id int64) {
+	if a.gitMonitor == nil {
+		return
+	}
+	workspace, err := a.sessionGitWorkspace(id)
+	if err != nil {
+		return
+	}
+	a.gitMonitor.RefreshNow(workspace, true)
+}
+
+func readGitRepositoryView(workspace string) GitRepositoryView {
 	snapshot := readGitSnapshot(workspace, "")
 	view := GitRepositoryView{
 		IsRepository:  snapshot.IsRepository,
@@ -162,9 +217,10 @@ func (a *App) GetSessionGitRepository(id int64) (GitRepositoryView, error) {
 		Remotes:       []GitRemote{},
 		Branches:      []GitBranch{},
 		Commits:       []GitCommit{},
+		Stashes:       []GitStash{},
 	}
 	if !snapshot.IsRepository {
-		return view, nil
+		return view
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
 	defer cancel()
@@ -173,11 +229,8 @@ func (a *App) GetSessionGitRepository(id int64) (GitRepositoryView, error) {
 	view.CurrentBranch = rawBranch
 	view.Head = gitTrimmed(ctx, view.Root, "rev-parse", "--short", "HEAD")
 	view.Upstream = gitTrimmed(ctx, view.Root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-	// When a branch has no configured upstream yet, compare against its
-	// remote-tracking branch (e.g. origin/main) so a first push is still detected.
-	if base := gitUpstreamOrBase(ctx, view.Root); base != "" {
-		view.Behind, view.Ahead = gitAheadBehind(ctx, view.Root, base, "HEAD")
-	}
+	outgoing := resolveGitOutgoingRevision(ctx, view.Root)
+	view.Behind, view.Ahead = outgoing.Behind, outgoing.Ahead
 	view.State = detectGitRepositoryState(ctx, view.Root)
 	for _, file := range view.Worktree.Files {
 		if file.Conflicted {
@@ -188,11 +241,12 @@ func (a *App) GetSessionGitRepository(id int64) (GitRepositoryView, error) {
 	view.Remotes = listGitRemotes(ctx, view.Root)
 	view.Branches = listGitBranches(ctx, view.Root)
 	view.Commits = listGitCommits(ctx, view.Root)
-	return view, nil
+	view.Stashes = listGitStashes(ctx, view.Root)
+	return view
 }
 
-// GetSessionGitOutgoingCommits returns every commit that is ahead of the
-// current branch's configured upstream, including per-commit file statistics.
+// GetSessionGitOutgoingCommits returns every commit that has not reached the
+// current branch's push destination, including per-commit file statistics.
 func (a *App) GetSessionGitOutgoingCommits(id int64) ([]GitCommit, error) {
 	workspace, err := a.sessionGitWorkspace(id)
 	if err != nil {
@@ -206,11 +260,11 @@ func (a *App) GetSessionGitOutgoingCommits(id int64) ([]GitCommit, error) {
 		return nil, errors.New("failed to locate the Git repository")
 	}
 	root := filepath.Clean(strings.TrimSpace(rootText))
-	base := gitUpstreamOrBase(ctx, root)
-	if base == "" {
+	outgoing := resolveGitOutgoingRevision(ctx, root)
+	if len(outgoing.Args) == 0 {
 		return []GitCommit{}, nil
 	}
-	commits, err := listGitOutgoingCommits(ctx, root, base)
+	commits, err := listGitOutgoingCommits(ctx, root, outgoing.Args)
 	if err != nil {
 		applog.Errorf("read outgoing Git commits failed: session=%d root=%q", id, root)
 		return nil, errors.New("failed to read outgoing Git commits")
@@ -236,6 +290,9 @@ func (a *App) RunSessionGitOperation(req GitRepositoryOperationRequest) (GitOper
 	root := filepath.Clean(strings.TrimSpace(rootText))
 	op := strings.TrimSpace(req.Op)
 	var output string
+	var resultMessage string
+	var hasConflicts bool
+	var stashKept bool
 	switch op {
 	case "stage_all":
 		output, err = runGit(ctx, root, "add", "-A", "--", ".")
@@ -274,7 +331,17 @@ func (a *App) RunSessionGitOperation(req GitRepositoryOperationRequest) (GitOper
 		if gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", "@{upstream}") == "" {
 			return GitOperationResult{}, gitLocalizedError(req.Language, "当前分支尚未设置上游分支，请先 Push 发布分支", "The current branch has no upstream; push it to publish the branch first")
 		}
-		output, err = runGit(ctx, root, "pull", "--ff-only")
+		output, hasConflicts, stashKept, err = runGitPullWithAutoStash(ctx, root, req.Language)
+		if hasConflicts {
+			if err != nil {
+				resultMessage = gitLocalizedText(req.Language, "Pull 未完成，恢复本地改动时产生了冲突；原搁置已保留，请先解决冲突", "Pull did not complete, and restoring local changes caused conflicts. The original stash was kept; resolve the conflicts first")
+				err = nil
+			} else {
+				resultMessage = gitLocalizedText(req.Language, "Pull 已完成，但恢复本地改动时产生了冲突；原搁置已保留，请先解决冲突", "Pull completed, but restoring local changes caused conflicts. The original stash was kept; resolve the conflicts first")
+			}
+		} else if stashKept && err == nil {
+			resultMessage = gitLocalizedText(req.Language, "Pull 已完成并恢复本地改动；自动搁置仍保留，可稍后删除", "Pull completed and local changes were restored. The automatic stash was kept and can be deleted later")
+		}
 	case "push":
 		branch := gitTrimmed(ctx, root, "branch", "--show-current")
 		if branch == "" {
@@ -293,12 +360,39 @@ func (a *App) RunSessionGitOperation(req GitRepositoryOperationRequest) (GitOper
 			}
 			output, err = runGit(ctx, root, "push", "--set-upstream", remote, branch)
 		}
+	case "stash_create":
+		if detectGitRepositoryState(ctx, root) != "" {
+			return GitOperationResult{}, gitLocalizedError(req.Language, "当前 Git 操作尚未完成，请先解决冲突或中止操作", "The current Git operation is incomplete; resolve its conflicts or abort it first")
+		}
+		message, messageErr := validateGitStashMessage(req.Message, req.Language)
+		if messageErr != nil {
+			return GitOperationResult{}, messageErr
+		}
+		paths, pathErr := normalizeGitStashPaths(root, req.Paths)
+		if pathErr != nil {
+			return GitOperationResult{}, gitLocalizedError(req.Language, "请选择要搁置的有效文件", "Select valid files to stash")
+		}
+		output, _, err = createGitStash(ctx, root, message, paths)
+	case "stash_apply":
+		if detectGitRepositoryState(ctx, root) != "" {
+			return GitOperationResult{}, gitLocalizedError(req.Language, "当前 Git 操作尚未完成，请先解决冲突或中止操作", "The current Git operation is incomplete; resolve its conflicts or abort it first")
+		}
+		output, hasConflicts, stashKept, err = applyAndDropGitStash(ctx, root, req.StashHash)
+		if hasConflicts {
+			resultMessage = gitLocalizedText(req.Language, "搁置已恢复，但产生了冲突；原搁置已保留，请先解决冲突", "The stash was restored with conflicts. The original stash was kept; resolve the conflicts first")
+		} else if stashKept && err == nil {
+			resultMessage = gitLocalizedText(req.Language, "改动已恢复，但搁置未能自动删除，可稍后手动删除", "Changes were restored, but the stash could not be deleted automatically; you can delete it later")
+		}
+	case "stash_drop":
+		output, err = dropGitStash(ctx, root, req.StashHash)
 	case "checkout":
 		branch := strings.TrimSpace(req.Branch)
 		if !validLocalGitBranch(ctx, root, branch) {
 			return GitOperationResult{}, gitLocalizedError(req.Language, "本地分支不存在", "The local branch does not exist")
 		}
-		output, err = runGit(ctx, root, "checkout", branch)
+		output, hasConflicts, stashKept, err = runGitBranchOperationWithAutoStash(ctx, root, op, branch, req.Language, func() (string, error) {
+			return runGit(ctx, root, "checkout", branch)
+		})
 	case "checkout_remote":
 		branch := strings.TrimSpace(req.Branch)
 		if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsRune(branch, '\x00') || strings.HasSuffix(branch, "/HEAD") {
@@ -311,11 +405,12 @@ func (a *App) RunSessionGitOperation(req GitRepositoryOperationRequest) (GitOper
 		if slash := strings.Index(branch, "/"); slash >= 0 && slash+1 < len(branch) {
 			localName = branch[slash+1:]
 		}
-		if validLocalGitBranch(ctx, root, localName) && gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", localName+"@{upstream}") == branch {
-			output, err = runGit(ctx, root, "checkout", localName)
-		} else {
-			output, err = runGit(ctx, root, "checkout", "--track", branch)
-		}
+		output, hasConflicts, stashKept, err = runGitBranchOperationWithAutoStash(ctx, root, op, branch, req.Language, func() (string, error) {
+			if validLocalGitBranch(ctx, root, localName) && gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", localName+"@{upstream}") == branch {
+				return runGit(ctx, root, "checkout", localName)
+			}
+			return runGit(ctx, root, "checkout", "--track", branch)
+		})
 	case "create_branch":
 		branch := strings.TrimSpace(req.Branch)
 		if _, checkErr := runGit(ctx, root, "check-ref-format", "--branch", branch); checkErr != nil {
@@ -331,7 +426,9 @@ func (a *App) RunSessionGitOperation(req GitRepositoryOperationRequest) (GitOper
 		if _, verifyErr := runGit(ctx, root, "rev-parse", "--verify", startPoint+"^{commit}"); verifyErr != nil {
 			return GitOperationResult{}, gitLocalizedError(req.Language, "新分支的起点不存在", "The new branch start point does not exist")
 		}
-		output, err = runGit(ctx, root, "checkout", "-b", branch, startPoint)
+		output, hasConflicts, stashKept, err = runGitBranchOperationWithAutoStash(ctx, root, op, branch, req.Language, func() (string, error) {
+			return runGit(ctx, root, "checkout", "-b", branch, startPoint)
+		})
 	case "reset_mixed", "reset_hard":
 		if detectGitRepositoryState(ctx, root) != "" {
 			return GitOperationResult{}, gitLocalizedError(req.Language, "当前 Git 操作尚未完成，请先解决冲突或中止操作", "The current Git operation is incomplete; resolve its conflicts or abort it first")
@@ -369,21 +466,39 @@ func (a *App) RunSessionGitOperation(req GitRepositoryOperationRequest) (GitOper
 	default:
 		return GitOperationResult{}, gitLocalizedError(req.Language, "不支持的 Git 操作", "Unsupported Git operation")
 	}
+	if hasConflicts && resultMessage == "" && (op == "checkout" || op == "checkout_remote" || op == "create_branch") {
+		resultMessage = gitLocalizedText(req.Language, "分支已切换，当前改动已恢复但存在冲突；原搁置已保留", "The branch was switched and the changes were restored with conflicts. The original stash was kept")
+	} else if stashKept && resultMessage == "" && (op == "checkout" || op == "checkout_remote" || op == "create_branch") {
+		resultMessage = gitLocalizedText(req.Language, "分支已切换，当前改动已恢复；自动搁置仍保留，可稍后删除", "The branch was switched and changes were restored. The automatic stash was kept and can be deleted later")
+	}
 	if err != nil {
 		applog.Errorf("Git repository operation failed: op=%q root=%q category=%q", op, root, gitOperationErrorCategory(err))
+		if a.gitMonitor != nil {
+			a.gitMonitor.RefreshNow(workspace, true)
+		}
 		return GitOperationResult{}, friendlyGitOperationError(op, req.Language, err)
 	}
 	if op == "fetch" || op == "pull" || op == "push" {
 		output = ""
 	}
-	return GitOperationResult{Message: gitOperationSuccessMessage(op, req.Language), Output: strings.TrimSpace(output)}, nil
+	if a.gitMonitor != nil {
+		a.gitMonitor.RefreshNow(workspace, true)
+	}
+	if resultMessage == "" {
+		resultMessage = gitOperationSuccessMessage(op, req.Language)
+	}
+	conflicts := []GitFileChange{}
+	if hasConflicts {
+		conflicts = gitCurrentConflictFiles(ctx, root)
+	}
+	return GitOperationResult{Message: resultMessage, Output: strings.TrimSpace(output), HasConflicts: hasConflicts, StashKept: stashKept, Conflicts: conflicts}, nil
 }
 
 func runGitInput(ctx context.Context, root, input string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", root}, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
 	configureGitProcess(command)
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
 	command.Stdin = strings.NewReader(input)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -404,29 +519,46 @@ func gitTrimmed(ctx context.Context, root string, args ...string) string {
 	return strings.TrimSpace(output)
 }
 
-// gitUpstreamOrBase resolves the reference used to count "commits to push".
-// It prefers the configured upstream; when the branch has no upstream yet, it
-// falls back to the current branch's remote-tracking branch under the preferred
-// remote (e.g. origin/main). This lets a locally committed but not-yet-tracked
-// first push still be detected instead of being reported as "nothing to push".
-func gitUpstreamOrBase(ctx context.Context, root string) string {
+type gitOutgoingRevision struct {
+	Args   []string
+	Ahead  int
+	Behind int
+}
+
+// resolveGitOutgoingRevision resolves the bounded revision set used by every
+// "commits to push" view. A new branch without a remote counterpart contains
+// commits reachable from HEAD but absent from every ref of the push remote.
+func resolveGitOutgoingRevision(ctx context.Context, root string) gitOutgoingRevision {
 	upstream := gitTrimmed(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
 	if upstream != "" {
-		return upstream
+		behind, ahead := gitAheadBehind(ctx, root, upstream, "HEAD")
+		return gitOutgoingRevision{Args: []string{"--end-of-options", upstream + "..HEAD"}, Ahead: ahead, Behind: behind}
 	}
 	branch := gitTrimmed(ctx, root, "branch", "--show-current")
 	if branch == "" {
-		return ""
+		return gitOutgoingRevision{}
 	}
 	remote := preferredGitRemote(ctx, root)
 	if remote == "" {
-		return ""
+		return gitOutgoingRevision{}
 	}
 	remoteBranch := remote + "/" + branch
 	if _, err := runGit(ctx, root, "show-ref", "--verify", "--quiet", "refs/remotes/"+remoteBranch); err == nil {
-		return remoteBranch
+		behind, ahead := gitAheadBehind(ctx, root, remoteBranch, "HEAD")
+		return gitOutgoingRevision{Args: []string{"--end-of-options", remoteBranch + "..HEAD"}, Ahead: ahead, Behind: behind}
 	}
-	return ""
+
+	args := []string{"HEAD", "--not", "--remotes=" + remote}
+	return gitOutgoingRevision{Args: args, Ahead: gitRevisionCount(ctx, root, args)}
+}
+
+func gitRevisionCount(ctx context.Context, root string, revisions []string) int {
+	args := append([]string{"rev-list", "--count"}, revisions...)
+	count, err := strconv.Atoi(gitTrimmed(ctx, root, args...))
+	if err != nil || count < 0 {
+		return 0
+	}
+	return count
 }
 
 func gitAheadBehind(ctx context.Context, root, left, right string) (int, int) {
@@ -544,10 +676,12 @@ func listGitCommits(ctx context.Context, root string) []GitCommit {
 	return commits
 }
 
-func listGitOutgoingCommits(ctx context.Context, root, upstream string) ([]GitCommit, error) {
-	rangeSpec := upstream + "..HEAD"
+func listGitOutgoingCommits(ctx context.Context, root string, revisions []string) ([]GitCommit, error) {
 	format := "%x1e%H%x00%h%x00%P%x00%an%x00%ae%x00%at%x00%s%x00%B%x00"
-	statusOutput, err := runGit(ctx, root, "log", "--date-order", "--pretty=format:"+format, "--name-status", "-z", "--no-renames", "--end-of-options", rangeSpec, "--")
+	statusArgs := []string{"log", "--date-order", "--pretty=format:" + format, "--name-status", "-z", "--no-renames"}
+	statusArgs = append(statusArgs, revisions...)
+	statusArgs = append(statusArgs, "--")
+	statusOutput, err := runGit(ctx, root, statusArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +691,10 @@ func listGitOutgoingCommits(ctx context.Context, root, upstream string) ([]GitCo
 	}
 
 	statFormat := "%x1e%H%x00"
-	statOutput, err := runGit(ctx, root, "log", "--date-order", "--pretty=format:"+statFormat, "--numstat", "-z", "--no-renames", "--end-of-options", rangeSpec, "--")
+	statArgs := []string{"log", "--date-order", "--pretty=format:" + statFormat, "--numstat", "-z", "--no-renames"}
+	statArgs = append(statArgs, revisions...)
+	statArgs = append(statArgs, "--")
+	statOutput, err := runGit(ctx, root, statArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -706,6 +843,18 @@ func validLocalGitBranch(ctx context.Context, root, branch string) bool {
 func friendlyGitOperationError(op, language string, err error) error {
 	message := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(message, "invalid stash hash") || strings.Contains(message, "stash entry not found"):
+		return gitLocalizedError(language, "该搁置已不存在，请刷新后重试", "The stash no longer exists; refresh and try again")
+	case strings.Contains(message, "no selected changes were stashed"):
+		return gitLocalizedError(language, "所选文件没有可搁置的改动", "The selected files have no changes to stash")
+	case strings.Contains(message, "automatic stash restore failed"):
+		return gitLocalizedError(language, "分支已切换，但自动恢复改动失败；改动仍安全保存在搁置中", "The branch was switched, but changes could not be restored automatically. They remain safely stored in the stash")
+	case strings.Contains(message, "automatic pull stash restore failed after pull completed"):
+		return gitLocalizedError(language, "Pull 已完成，但自动恢复本地改动失败；改动仍安全保存在搁置中", "Pull completed, but local changes could not be restored automatically. They remain safely stored in the stash")
+	case strings.Contains(message, "automatic pull stash restore failed after pull failure"):
+		return gitLocalizedError(language, "Pull 未完成，自动恢复本地改动时发生冲突或失败；原改动仍安全保存在搁置中", "Pull did not complete, and restoring local changes caused conflicts or failed. The original changes remain safely stored in the stash")
+	case strings.Contains(message, "automatic pull stash kept after pull failure"):
+		return gitLocalizedError(language, "Pull 未完成，本地改动已恢复；自动搁置仍保留，可稍后删除", "Pull did not complete. Local changes were restored, and the automatic stash was kept and can be deleted later")
 	case strings.Contains(message, "non-fast-forward") || strings.Contains(message, "not possible to fast-forward") || strings.Contains(message, "divergent"):
 		return gitLocalizedError(language, "本地与远端分支已经分叉，已停止操作；请让 Agent 检查后选择 merge 或 rebase", "The local and remote branches have diverged. Ask the Agent to inspect them and choose merge or rebase")
 	case strings.Contains(message, "conflict") || strings.Contains(message, "unmerged"):
@@ -752,12 +901,14 @@ func gitOperationSuccessMessage(op, language string) string {
 		"stage_all": "已暂存全部变更", "unstage_all": "已取消全部暂存", "commit": "提交已创建",
 		"fetch": "远端信息已更新", "pull": "已拉取最新提交", "push": "提交已推送",
 		"checkout": "已切换分支", "checkout_remote": "已创建跟踪分支并切换", "create_branch": "分支已创建并切换", "abort": "已中止当前 Git 操作",
+		"stash_create": "改动已搁置", "stash_apply": "搁置已恢复到当前分支", "stash_drop": "搁置已删除",
 		"reset_mixed": "已回退到所选提交，后续改动已保留在工作区", "reset_hard": "已回退到所选提交并清空已跟踪改动",
 	}
 	enMessages := map[string]string{
 		"stage_all": "All changes staged", "unstage_all": "All changes unstaged", "commit": "Commit created",
 		"fetch": "Remote refs updated", "pull": "Latest commits pulled", "push": "Commits pushed",
 		"checkout": "Branch switched", "checkout_remote": "Tracking branch created and checked out", "create_branch": "Branch created and checked out", "abort": "Git operation aborted",
+		"stash_create": "Changes stashed", "stash_apply": "Stash restored to the current branch", "stash_drop": "Stash deleted",
 		"reset_mixed": "Reset to the selected commit; later changes were kept in the worktree", "reset_hard": "Reset to the selected commit and discarded later changes",
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(language)), "en") {

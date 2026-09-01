@@ -1,18 +1,18 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue'
 import {
-  Archive, Blocks, Bot, Brain, Folder, LoaderCircle, Maximize2,
-  Minus, Network, Plus, Settings, Smartphone, Sparkles,
+  Archive, Blocks, Bot, Brain, Folder, LoaderCircle,
+  Network, Plus, Settings, Smartphone, Sparkles,
   X
 } from 'lucide-vue-next'
 import { Call } from '@wailsio/runtime'
 import { extensionIcon } from './extensionIcons'
 import {
-  abortPrompt, chooseSessionDir, chooseWorkspace, closeWindow, createSession, deleteAgent,
-  chatgptAccount, chatgptUsage,
-  getBootstrap, getProviderBalance, getProviderUsage, getSessionChanges, getSessionHistory, getSessionRuntimeState, getStewardProfile, listSessions, minimise, onEvent,
+  abortPrompt, activateWorkspace, chooseSessionDir, chooseWorkspace, createSession, deleteAgent,
+  chatgptAccount,
+  getBootstrap, getSessionChanges, getSessionHistory, getSessionRuntimeState, getStewardProfile, listSessions, onEvent,
   getExtensions, getAgentExtensions, installPi, manageExtension, restartAgent, saveConfig,
-  saveFigmaConfig, sendAgentCommand, startPrompt, testModel, toggleMaximise,
+  saveFigmaConfig, sendAgentCommand, startPrompt, testModel,
   saveBrowserProfile,
   respondSubagentUI, ackSubagentUI,
   setSessionDcgDisabled, getSessionDcgDisabled,
@@ -27,22 +27,12 @@ import {
   installAgentExtension as beInstallAgentExtension,
   uninstallAgentExtension as beUninstallAgentExtension,
   deleteAgentExtensionDir as beDeleteAgentExtensionDir,
-  listBotChannels, getSessionGitAvailability,
-  testDBConnection, getDBAuditLogs,
-  testSSHConnection, chooseSSHKeyFile
+  listBotChannels, getSessionGitAvailability
 } from './backend'
 import { buildT } from './i18n'
-import { reconcileSshConfigResult } from './utils/sshConfig'
-import {
-  fetchProviderQuota,
-  getProviderQuotaCache,
-  normalizeChatGPTUsage,
-  normalizeOpenCodeUsage,
-  PROVIDER_QUOTA_CACHE_MS
-} from './utils/providerQuota'
 import ChatView from './ChatView.vue'
-import logo from './assets/logo.png?no-inline'
 import AppDialogs from './components/AppDialogs.vue'
+import AppTitleBar from './components/app/AppTitleBar.vue'
 import PiInstallGate from './components/PiInstallGate.vue'
 // 页面组件按需懒加载：每个菜单页独立 chunk，仅首次打开时加载，减小首屏主包体积。
 // 菜单页以模态浮层打开，本地文件加载开销可忽略，切换无感知。
@@ -62,10 +52,40 @@ const SkillsPage = defineAsyncComponent(() => import('./components/pages/SkillsP
 const StewardPage = defineAsyncComponent(() => import('./components/pages/StewardPage.vue'))
 const TasksPage = defineAsyncComponent(() => import('./components/pages/TasksPage.vue'))
 import { BROWSER_IDENTITY_DIALOG_TITLE, isPlanConfirmationDialog, shouldAbortAfterExtensionResponse } from './components/chat/extensionDialog'
+import {
+  toAttachmentInputs
+} from './components/chat/attachmentTypes'
 import { mergeSubagentRuntime, parseSubagentEvent } from './components/chat/subagentRuntime'
 import { completeCompactionMessage, createCompactionMessage } from './components/chat/compactionMessages'
+import {
+  messageText,
+  parsePlanItems,
+  parsePlanLines,
+  parsePlanStepsFromMessage,
+  stripPlanStepsMarker
+} from './components/chat/planMessages'
+import { buildSessionGroups } from './components/chat/sessionGroups'
 import { appContextKey } from './composables/appContext'
+import { useSidebarLayout } from './composables/app/useSidebarLayout'
+import { useToasts } from './composables/app/useToasts'
+import { useChatAttachments } from './composables/chat/useChatAttachments'
+import { useCurrentProviderQuota } from './composables/models/useCurrentProviderQuota'
+import { useDatabaseConnections } from './composables/environment/useDatabaseConnections'
+import { useSshConnections } from './composables/environment/useSshConnections'
 import { requestConciseToggleFocus } from './utils/settingsNav'
+import { localizeError, safeClone } from './utils/appHelpers'
+import {
+  compatBooleanValue,
+  compatStringValue,
+  formatCompat,
+  modelRequestRoute,
+  normalizeProvider,
+  piCompatBooleanFields,
+  piThinkingFormats,
+  piThinkingLevels,
+  setCompatBoolean,
+  setCompatString
+} from './utils/modelConfig'
 import { defaultThinkingLevelForModel } from './modelThinking'
 import { isResolvedStewardPermission, stewardPermissionMatchesDialog } from './stewardState.js'
 import { sendSystemNotification } from './systemNotifications'
@@ -106,7 +126,7 @@ const showGlobalPromptConfig = ref(false)
 function openMemoryConfig() { showMemoryConfig.value = true }
 function openPlanConfig() { showPlanConfig.value = true }
 function openGlobalPromptConfig() { showGlobalPromptConfig.value = true }
-const sidebarOpen = ref(true)
+const { sidebarOpen, sidebarWidth, sidebarResizing, startSidebarResize } = useSidebarLayout()
 // 后端发出 app:shutting-down 后置为 true：覆盖全屏"正在关闭中"蒙层，
 // 让后台清理（关闭 agent 进程、steward 渠道等，最多数秒）期间有即时反馈，
 // 避免界面看起来像卡死。
@@ -135,45 +155,6 @@ async function refreshResidentSessionId() {
 watch(activePage, (page) => {
   if (page === 'steward') void refreshResidentSessionId()
 })
-// 左侧主菜单栏宽度：可拖拽调整（min 160 / max 420 / 默认 224px），宽度持久化到 localStorage。
-const SIDEBAR_MIN = 160
-const SIDEBAR_MAX = 420
-const SIDEBAR_WIDTH_KEY = 'codingto:left-sidebar-width'
-function loadSidebarWidth() {
-  try {
-    const raw = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
-    if (Number.isFinite(raw) && raw >= SIDEBAR_MIN && raw <= SIDEBAR_MAX) return raw
-  } catch { /* 存储不可用时回退默认宽度 */ }
-  return 224
-}
-function persistSidebarWidth(value) {
-  try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(value)) } catch { /* ignore */ }
-}
-const sidebarWidth = ref(loadSidebarWidth())
-const sidebarResizing = ref(false)
-// 按住右缘手柄左右拖动：向右加宽、向左收窄；释放时保存宽度（拖动过程不写存储）。
-function startSidebarResize(event) {
-  if (!sidebarOpen.value) return
-  event.preventDefault()
-  sidebarResizing.value = true
-  const startX = event.clientX
-  const startWidth = sidebarWidth.value
-  const onMove = (moveEvent) => {
-    sidebarWidth.value = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + (moveEvent.clientX - startX)))
-  }
-  const onUp = () => {
-    document.removeEventListener('pointermove', onMove)
-    document.removeEventListener('pointerup', onUp)
-    document.body.style.cursor = ''
-    document.body.style.userSelect = ''
-    sidebarResizing.value = false
-    persistSidebarWidth(sidebarWidth.value)
-  }
-  document.addEventListener('pointermove', onMove)
-  document.addEventListener('pointerup', onUp)
-  document.body.style.cursor = 'col-resize'
-  document.body.style.userSelect = 'none'
-}
 const bootstrap = ref(null)
 // 客户端自身更新：启动后后台检查一次，有新版本时为 true，用于设置菜单红点。
 const appUpdateAvailable = ref(false)
@@ -193,6 +174,9 @@ const config = reactive({
   systemNotificationEnabled: true
 })
 const draft = ref('')
+// The active working directory is process-local. It starts at
+// ~/.codingto/tempwork and is never saved as a default workspace.
+const currentWorkDir = ref('')
 // 「添加到对话」功能最近一次新建并仍在使用的对话 id。当用户从 Git 管理
 // 文件列表反复添加时，只要当前仍停留在该对话就复用而非重复新建。
 const addToChatSessionId = ref('')
@@ -212,7 +196,6 @@ const thinkingLevel = ref('off')
 const sessionDcgDisabled = ref(false)
 const selectedSkill = ref(null)
 const promptImages = ref([])
-const attachmentReadsPending = ref(0)
 const selectedPreset = ref('')
 const providerEditorOpen = ref(false)
 const providerDraft = ref(null)
@@ -471,15 +454,7 @@ const agentEditorOpen = ref(false)
 const editingNewAgent = ref(false)
 // 独立配置页面当前正在编辑的 agent id；返回列表时清空并刷新。
 const editingAgentId = ref('')
-const toasts = ref([])
-let toastSeq = 0
-function pushToast(type, text, timeout = 2800) {
-  const id = ++toastSeq
-  toasts.value.push({ id, type, text })
-  window.setTimeout(() => {
-    toasts.value = toasts.value.filter(item => item.id !== id)
-  }, timeout)
-}
+const { toasts, pushToast } = useToasts()
 // 启动时自动清理过期会话数据的提示横幅：后端异步清理完成后展示，叉掉即关闭。
 // 仅在实际清理掉会话或失败时展示；没有可清理的会话时静默，不打扰用户。
 // 既监听后端广播事件，也在启动后主动拉取一次，避免清理先于前端监听完成时丢失提示。
@@ -508,7 +483,65 @@ const tasks = ref([])
 const activeTaskId = ref('')
 const gitDialogOpen = ref(false)
 const gitAvailability = ref({ isRepository: false, root: '', currentBranch: '', changeCount: 0, ahead: 0, hasConflicts: false })
+const gitWorkspaceRevision = ref(0)
+const runtimeWorkspaceRevision = ref(0)
+const workspaceActivating = ref(false)
 let gitAvailabilityRequest = 0
+let workspaceActivationRequest = 0
+let workspaceActivationQueue = Promise.resolve()
+
+function environmentWorkDir(environmentId = config.activeEnvId) {
+  return config.environments.find(environment => environment.id === environmentId)?.path || ''
+}
+
+function normalizedWorkDir(value) {
+  const normalized = String(value || '').replaceAll('\\', '/').replace(/\/$/, '')
+  return bootstrap.value?.os === 'windows' ? normalized.toLowerCase() : normalized
+}
+
+async function initializeWorkspace(environmentId = '') {
+  const requestedId = String(environmentId || '')
+  const request = ++workspaceActivationRequest
+  const previousId = String(config.activeEnvId || '')
+  const previousRoot = currentWorkDir.value
+  config.activeEnvId = requestedId
+  currentWorkDir.value = environmentWorkDir(requestedId) || bootstrap.value?.defaultWorkDir || config.lastEnvironment || ''
+  workspaceActivating.value = true
+
+  const activation = workspaceActivationQueue
+    .catch(() => {})
+    .then(() => activateWorkspace(requestedId))
+  workspaceActivationQueue = activation
+  try {
+    const result = await activation
+    if (request !== workspaceActivationRequest || String(config.activeEnvId || '') !== requestedId) return false
+    currentWorkDir.value = result?.root || currentWorkDir.value
+    config.lastEnvironment = currentWorkDir.value
+    workspaceActivating.value = false
+    runtimeWorkspaceRevision.value += 1
+    void refreshGitAvailability()
+    return true
+  } catch (cause) {
+    if (request !== workspaceActivationRequest || String(config.activeEnvId || '') !== requestedId) return false
+    config.activeEnvId = previousId
+    currentWorkDir.value = previousRoot || bootstrap.value?.defaultWorkDir || ''
+    workspaceActivating.value = false
+    runtimeWorkspaceRevision.value += 1
+    pushToast('error', localizeError(String(cause)))
+    return false
+  }
+}
+
+function applyGitWorkspaceUpdate(payload) {
+  if (!payload?.availability) return
+  if (normalizedWorkDir(payload.workspace) !== normalizedWorkDir(currentWorkDir.value)) return
+  gitAvailability.value = {
+    isRepository: false, root: '', currentBranch: '', changeCount: 0, ahead: 0, hasConflicts: false,
+    ...payload.availability,
+  }
+  gitWorkspaceRevision.value += 1
+  if (!gitAvailability.value.isRepository) gitDialogOpen.value = false
+}
 
 async function refreshGitAvailability() {
   const sessionId = Number(activeTaskId.value) || 0
@@ -588,6 +621,7 @@ const extensionDeleteBusy = ref(false)
 const extensionLoading = ref(false)
 const extensionNotice = ref(null)
 const extensionRestartPending = ref('')
+let extensionsRefreshRequest = 0
 const figmaAuthorizationsDraft = ref([])
 const figmaActiveAuthorizationIdDraft = ref('')
 const showFigmaConfig = ref(false)
@@ -606,6 +640,7 @@ let offStewardStatus
 let offStewardPermission
 let offMaximised
 let offUnmaximised
+let offGitWorkspace
 let changeRefreshTimer
 let changeRefreshRequest = 0
 // Detached subagent events can race ahead of the parent tool message. Keep a
@@ -613,6 +648,7 @@ let changeRefreshRequest = 0
 const pendingSubagentEvents = new Map()
 
 const t = computed(() => buildT(config.preferences.language || 'zh-CN'))
+const { attachments, attachmentReadsPending, onAddAttachments, onRemoveAttachment } = useChatAttachments({ t, pushToast })
 const activeTaskRunning = computed(() => (
   activeTaskId.value !== ''
   && (runningTaskIds.has(String(activeTaskId.value)) || !!extensionDialog.value)
@@ -807,107 +843,18 @@ const selectedModelValue = computed({
 })
 const selectedModelUnavailable = computed(() => modelOptions.value.find(option => option.value === selectedModelValue.value)?.disabled === true)
 
-// 左侧“模型”主菜单只展示当前对话 provider 的额度。缓存与模型页共享，
-// 避免切换对话或反复打开模型页时高频访问服务商接口。
-const currentProviderQuota = ref(null)
-let providerQuotaTimer = null
-const currentQuotaProvider = computed(() => {
-  const option = modelOptions.value.find(item => item.value === selectedModelValue.value)
-  return config.providers.find(provider => provider.name === option?.provider) || null
+const {
+  currentProviderQuotaText,
+  refreshCurrentProviderQuota,
+  startProviderQuotaRefresh
+} = useCurrentProviderQuota({
+  activeTaskId,
+  config,
+  isOpenAICodexProvider,
+  modelOptions,
+  selectedModelValue,
+  t
 })
-
-function providerQuotaKind(provider) {
-  if (isOpenAICodexProvider(provider)) return 'chatgpt'
-  if (/opencode\.ai\/zen\/go/i.test(provider?.baseUrl || '')) return 'opencode'
-  if (/^https:\/\/api\.deepseek\.com(?:[/:]|$)/i.test((provider?.baseUrl || '').trim())) return 'deepseek'
-  return ''
-}
-
-async function queryProviderQuota(provider, kind) {
-  if (kind === 'chatgpt') {
-    const usage = normalizeChatGPTUsage(await chatgptUsage())
-    return usage ? { kind, ...usage } : null
-  }
-  if (kind === 'opencode') {
-    const usage = normalizeOpenCodeUsage(await getProviderUsage(provider.name))
-    return usage?.rolling && usage?.weekly && usage?.monthly
-      ? { kind, rolling: usage.rolling, weekly: usage.weekly, monthly: usage.monthly }
-      : null
-  }
-  if (kind === 'deepseek') {
-    const balance = await getProviderBalance(provider.name)
-    return balance?.available && balance?.balances?.length
-      ? { ...balance, kind }
-      : null
-  }
-  return null
-}
-
-const currentProviderQuotaText = computed(() => {
-  const quota = currentProviderQuota.value
-  const percent = window => {
-    const value = Number(window?.percent)
-    return Number.isFinite(value) ? `${Math.max(0, Math.min(100, Math.round(value)))}%` : ''
-  }
-  if (quota?.kind === 'chatgpt') {
-    const windows = [
-      ...(quota.planType === 'plus' ? [[t.value.providerQuotaFiveHours, percent(quota.rolling)]] : []),
-      [t.value.providerQuotaWeek, percent(quota.weekly)]
-    ].filter(([, value]) => value)
-    return windows.map(([label, value]) => `${label} ${value}`).join(' · ')
-  }
-  if (quota?.kind === 'opencode') {
-    const windows = [
-      [t.value.providerQuotaFiveHours, percent(quota.rolling)],
-      [t.value.providerQuotaWeek, percent(quota.weekly)],
-      [t.value.providerQuotaMonth, percent(quota.monthly)]
-    ].filter(([, value]) => value)
-    return windows.map(([label, value]) => `${label} ${value}`).join(' · ')
-  }
-  if (quota?.kind === 'deepseek') {
-    const balances = (quota.balances || []).flatMap(balance => {
-      const amount = Number(balance?.totalBalance)
-      if (!Number.isFinite(amount)) return []
-      const value = amount.toLocaleString(config.preferences.language || undefined, {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-      })
-      return [`${balance.currency || ''} ${value}`.trim()]
-    })
-    return balances.length ? `${t.value.providerQuotaBalance} ${balances.join(' · ')}` : ''
-  }
-  return ''
-})
-
-async function refreshCurrentProviderQuota({ force = false } = {}) {
-  const provider = currentQuotaProvider.value
-  const kind = providerQuotaKind(provider)
-  if (!provider || !kind) {
-    currentProviderQuota.value = null
-    return
-  }
-
-  const cached = getProviderQuotaCache(kind, provider.name)
-  currentProviderQuota.value = cached?.data ?? null
-  if (!force && cached?.expiresAt > Date.now()) return
-
-  const data = await fetchProviderQuota({
-    kind,
-    providerName: provider.name,
-    force,
-    fetcher: () => queryProviderQuota(provider, kind)
-  })
-  const latestProvider = currentQuotaProvider.value
-  if (latestProvider?.name === provider.name && providerQuotaKind(latestProvider) === kind) {
-    currentProviderQuota.value = data
-  }
-}
-
-watch(
-  () => `${activeTaskId.value}\u0000${currentQuotaProvider.value?.name || ''}\u0000${selectedModelValue.value}`,
-  () => { void refreshCurrentProviderQuota() },
-  { immediate: true }
-)
 
 function applyTheme() {
   const pref = config.preferences.theme
@@ -1018,14 +965,20 @@ async function load() {
   config.sshConfigs ||= []
   config.sshConfigs.forEach(normalizeSsh)
   config.environments.forEach(normalizeWorkspace)
-  if (config.environments.length && !config.environments.some(ws => ws.id === config.activeEnvId)) config.activeEnvId = config.environments[0].id
-  selectedWorkspaceId.value = config.activeEnvId || config.environments[0]?.id || ''
-  // 恢复当前工作空间的未发送草稿：刷新页面后重新把这句话显示出来。
-  draft.value = loadDraftForEnv(config.activeEnvId)
+  // The active workspace is process-local. Startup selects the first workspace
+  // shown in the conversation list; tempwork is only the no-workspace fallback.
+  config.activeEnvId = ''
+  currentWorkDir.value = bootstrap.value?.defaultWorkDir || config.lastEnvironment || ''
+  selectedWorkspaceId.value = ''
+  draft.value = loadDraftForEnv('')
   // 清理已不存在的工作空间缓存（折叠/排序），避免残留幽灵项。
   const envIds = new Set(config.environments.map(ws => ws.id))
   for (const id of [...collapsedWorkspaceIds]) if (!envIds.has(id)) collapsedWorkspaceIds.delete(id)
   workspaceOrder.value = workspaceOrder.value.filter(id => envIds.has(id))
+  const initialWorkspaceId = workspaceOrder.value[0] || config.environments[0]?.id || ''
+  selectedWorkspaceId.value = initialWorkspaceId
+  await initializeWorkspace(initialWorkspaceId)
+  draft.value = loadDraftForEnv(initialWorkspaceId)
   const request = ++sessionRefreshRequest
   const requestedVersions = new Map(taskRuntimeVersions)
   const initialTasks = (await listSessions()) || []
@@ -1044,6 +997,7 @@ async function load() {
   await refreshSkills()
   applyTheme()
   connected.value = true
+  void refreshGitAvailability()
 }
 
 // 启动后静默检查一次新版本，用于设置菜单红点。Wails 桥接在 onMounted 时可能
@@ -1088,9 +1042,11 @@ async function refreshSkills() {
 
 
 async function refreshExtensions({ showLoading = false } = {}) {
+  const requestId = ++extensionsRefreshRequest
   if (showLoading) extensionLoading.value = true
   try {
     const snapshot = await getExtensions()
+    if (requestId !== extensionsRefreshRequest) return
     snapshot.tools ||= []
     snapshot.figma ||= { installed: false, enabled: false, running: false, pid: 0, hasToken: false, version: '' }
     snapshot.builtinCatalog ||= []
@@ -1105,9 +1061,11 @@ async function refreshExtensions({ showLoading = false } = {}) {
     // operations and replace only its backing snapshot when fresh data arrives.
     extensionSnapshot.value = snapshot
   } catch (err) {
-    extensionNotice.value = { error: true, text: String(err) }
+    if (requestId === extensionsRefreshRequest) {
+      extensionNotice.value = { error: true, text: String(err) }
+    }
   } finally {
-    if (showLoading) extensionLoading.value = false
+    if (requestId === extensionsRefreshRequest) extensionLoading.value = false
   }
 }
 
@@ -1211,328 +1169,65 @@ function normalizeWorkspace(ws) {
 }
 
 // --- SSH config ---
+const {
+  captureSshSaveState,
+  closeSshEditor,
+  confirmDeleteSsh,
+  editingNewSsh,
+  newSshId,
+  normalizeSsh,
+  openSshEditor,
+  pendingDeleteSsh,
+  persistSshChange,
+  pickSshKeyFile,
+  reconcileSshSaveResult,
+  requestDeleteSsh,
+  saveNewSsh,
+  sshBusy,
+  sshDraft,
+  sshEditorOpen,
+  sshTestStates,
+  testSsh
+} = useSshConnections({
+  config,
+  getWorkspaceDraft: () => wsDraft.value,
+  normalizeWorkspace,
+  persist,
+  pushToast,
+  t
+})
 
-const sshDraft = ref(null)
-const editingNewSsh = ref(false)
-const newSshId = ref('')
-const sshEditorOpen = ref(false)
-const pendingDeleteSsh = ref(null)
-const sshBusy = ref(false)
-// 卡片内联测试状态：{ [sshId]: { busy, ok, message } }。
-const sshTestStates = reactive({})
 const pendingExtensionDelete = ref(null)
-let sshEditRevision = 0
 
-function defaultSsh() {
-  return { id: `ssh-${crypto.randomUUID().slice(0, 8)}`, name: `SSH ${config.sshConfigs.length + 1}`, address: '', port: 22, username: '', authMode: 'password', password: '', privateKey: '', privateKeyPassphrase: '', hostKeyFingerprint: '', remark: '', policy: { preset: 'safe', overrides: [] }, customCapabilities: [] }
-}
-function normalizeSsh(ssh) {
-  ssh.id ||= `ssh-${crypto.randomUUID().slice(0, 8)}`
-  ssh.name ||= ''
-  ssh.address ||= ''
-  ssh.port = Number(ssh.port) || 22
-  ssh.username ||= ''
-  ssh.authMode = ssh.authMode === 'key' ? 'key' : 'password'
-  ssh.password ||= ''
-  ssh.privateKey ||= ''
-  ssh.privateKeyPassphrase ||= ''
-  ssh.hostKeyFingerprint ||= ''
-  ssh.remark ||= ''
-  ssh.policy ||= { preset: 'safe', overrides: [] }
-  ssh.policy.preset ||= 'safe'
-  ssh.policy.overrides ||= []
-  ssh.customCapabilities ||= []
-  return ssh
-}
-function openSshEditor(ssh) {
-  sshDraft.value = ssh ? normalizeSsh(ssh) : defaultSsh()
-  sshEditRevision = 0
-  editingNewSsh.value = !ssh
-  newSshId.value = ssh ? '' : sshDraft.value.id
-  sshEditorOpen.value = true
-}
-function closeSshEditor() {
-  if (editingNewSsh.value) {
-    newSshId.value = ''
-    editingNewSsh.value = false
-  }
-  sshEditRevision++
-  sshDraft.value = null
-  sshEditorOpen.value = false
-}
-function persistSshChange() {
-  sshEditRevision++
-  if (!newSshId.value) void persist()
-}
-async function saveNewSsh() {
-  const ssh = sshDraft.value
-  if (!ssh || sshBusy.value) return
-  if (!ssh.address.trim()) { pushToast('error', t.value.sshAddressRequired); return }
-  if (!Number.isInteger(Number(ssh.port)) || Number(ssh.port) < 1 || Number(ssh.port) > 65535) { pushToast('error', t.value.sshPortRequired); return }
-  ssh.port = Number(ssh.port)
-  if (!ssh.username.trim()) { pushToast('error', t.value.sshUsernameRequired); return }
-  if (ssh.authMode === 'key') {
-    if (!ssh.privateKey.trim()) { pushToast('error', t.value.sshPrivateKeyRequired); return }
-  } else if (!ssh.password) { pushToast('error', t.value.sshPasswordRequired); return }
-  sshBusy.value = true
-  config.sshConfigs.push(ssh)
-  const ok = await persist()
-  if (ok) {
-    newSshId.value = ''
-    sshDraft.value = null
-    editingNewSsh.value = false
-    sshEditorOpen.value = false
-    pushToast('success', t.value.sshCreated)
-  } else {
-    config.sshConfigs = config.sshConfigs.filter(item => item.id !== ssh.id)
-    pushToast('error', t.value.sshCreateFailed)
-  }
-  sshBusy.value = false
-}
-function requestDeleteSsh(ssh) { if (sshBusy.value) return; pendingDeleteSsh.value = ssh }
-async function confirmDeleteSsh() {
-  const ssh = pendingDeleteSsh.value
-  if (!ssh || sshBusy.value) return
-  sshBusy.value = true
-  const index = config.sshConfigs.indexOf(ssh)
-  config.sshConfigs.splice(index, 1)
-  const previousRemotes = config.environments.map(ws => safeClone(ws.remotes || []))
-  const previousDraftRemotes = wsDraft.value ? safeClone(wsDraft.value.remotes || []) : null
-  for (const ws of config.environments) {
-    ws.remotes = (ws.remotes || []).filter(remote => remote.sshConfigId !== ssh.id)
-    normalizeWorkspace(ws)
-  }
-  if (wsDraft.value) {
-    wsDraft.value.remotes = (wsDraft.value.remotes || []).filter(remote => remote.sshConfigId !== ssh.id)
-    normalizeWorkspace(wsDraft.value)
-  }
-  const ok = await persist()
-  if (ok) {
-    pendingDeleteSsh.value = null
-    pushToast('success', t.value.sshDeleted)
-  } else {
-    config.sshConfigs.splice(index, 0, ssh)
-    config.environments.forEach((ws, wsIndex) => { ws.remotes = previousRemotes[wsIndex] })
-    if (wsDraft.value && previousDraftRemotes) wsDraft.value.remotes = previousDraftRemotes
-    pushToast('error', t.value.sshCreateFailed)
-  }
-  sshBusy.value = false
-}
-
-// 卡片内联测试 SSH 连接：结果就地展示，不阻断其它操作。
-// 后端 TestSSHConnection 依赖 net.DialTimeout + SetDeadline 兜底，但实测在
-// 某些场景（Windows 下静默丢包的地址、握手阶段不回包）仍可能悬挂；前端再加
-// 30 秒硬超时，超时后清掉 busy 状态，避免按钮一直转圈。
-const SSH_TEST_TIMEOUT_MS = 30000
-async function testSsh(ssh) {
-  if (!ssh) return
-  // 注意：不能用 `sshTestStates[ssh.id] ||= {...}` —— 赋值表达式返回的是原始对象，
-  // 后续对 state 的修改不经过响应式代理，busy=false 时模板不会更新，按钮会永远停在
-  // “测试中”。必须先写入容器再读取，拿到响应式代理。
-  if (!sshTestStates[ssh.id]) sshTestStates[ssh.id] = { busy: false, ok: null, message: '' }
-  const state = sshTestStates[ssh.id]
-  if (state.busy) {
-    console.warn('[testSsh] busy, skip', ssh.id)
-    return
-  }
-  state.busy = true
-  state.message = ''
-  console.log('[testSsh] start', ssh.id, ssh.address)
-  try {
-    const result = await withTimeout(testSSHConnection(safeClone(ssh)), SSH_TEST_TIMEOUT_MS, t.value.sshTestTimeout)
-    console.log('[testSsh] result', ssh.id, result)
-    state.ok = !!result?.ok
-    state.message = String(result?.message || (result?.ok ? t.value.sshTestPassed : t.value.sshTestFailed))
-  } catch (err) {
-    console.warn('[testSsh] error', ssh.id, err)
-    state.ok = false
-    state.message = localizeError(String(err))
-  } finally {
-    console.log('[testSsh] finally', ssh.id)
-    state.busy = false
-  }
-}
-
-// 选择密钥文件：读取内容填入 sshDraft.privateKey（私钥仍以内容形式随配置保存）。
-async function pickSshKeyFile() {
-  if (!sshDraft.value || sshBusy.value) return
-  try {
-    const result = await chooseSSHKeyFile()
-    if (!result || !result.content) return
-    sshDraft.value.privateKey = result.content
-    persistSshChange()
-    pushToast('success', t.value.sshKeyFileLoaded)
-  } catch (err) {
-    pushToast('error', localizeError(String(err)))
-  }
-}
-
-// --- DB connections ---
-// 数据库连接与其连接级权限策略：数据随整体配置保存（SaveConfig），密码已
-// 脱敏下发、空密码=不修改；测试连接与审计日志是独立的按需接口。
-const dbDraft = ref(null)
-const editingNewDb = ref(false)
-const newDbId = ref('')
-const dbEditorOpen = ref(false)
-const pendingDeleteDb = ref(null)
-const dbBusy = ref(false)
-// 卡片内联测试状态：{ [connectionId]: { busy, ok, message } }。
-const dbTestStates = reactive({})
-const dbAuditRows = ref([])
-const dbAuditLoading = ref(false)
-
-function defaultDbConnection() {
-  return {
-    id: `db-${crypto.randomUUID().slice(0, 8)}`,
-    name: `Database ${config.extensions.db.connections.length + 1}`,
-    kind: 'mysql',
-    host: '', port: 3306, database: '', path: '', username: '', password: '', sslMode: '', sshConfigId: '',
-    policy: { preset: 'safe', overrides: [] },
-    queryTimeoutSeconds: 0, maxRows: 0
-  }
-}
-function normalizeDbConnection(conn) {
-  conn.id ||= `db-${crypto.randomUUID().slice(0, 8)}`
-  conn.name ||= ''
-  conn.kind ||= 'mysql'
-  conn.host ||= ''
-  conn.port = Number(conn.port) || (conn.kind === 'postgres' ? 5432 : 3306)
-  conn.database ||= ''
-  conn.path ||= ''
-  conn.username ||= ''
-  conn.password ||= ''
-  conn.sslMode ||= ''
-  conn.sshConfigId ||= ''
-  conn.policy ||= { preset: 'safe', overrides: [] }
-  conn.policy.preset ||= 'safe'
-  conn.policy.overrides ||= []
-  return conn
-}
-function openDbEditor(conn) {
-  dbDraft.value = conn ? safeClone(normalizeDbConnection(conn)) : defaultDbConnection()
-  editingNewDb.value = !conn
-  newDbId.value = conn ? '' : dbDraft.value.id
-  dbAuditRows.value = []
-  dbEditorOpen.value = true
-  if (conn) void loadDbAudit(conn.id)
-}
-function closeDbEditor() {
-  if (editingNewDb.value) {
-    dbDraft.value = null
-    newDbId.value = ''
-    editingNewDb.value = false
-  }
-  dbEditorOpen.value = false
-}
-function persistDbChange() {
-  if (newDbId.value) return
-  // 弹窗编辑的是草稿副本：变更时同步回配置再整体保存（与 persistWsChange 同模式）。
-  if (dbDraft.value) {
-    const connections = config.extensions.db.connections
-    const idx = connections.findIndex(conn => conn.id === dbDraft.value.id)
-    if (idx >= 0) connections[idx] = safeClone(dbDraft.value)
-  }
-  persist()
-}
-async function saveNewDb() {
-  const conn = dbDraft.value
-  if (!conn || dbBusy.value) return
-  if (!conn.name.trim()) { pushToast('error', t.value.dbNameRequired); return }
-  if (conn.kind === 'sqlite') {
-    if (!conn.path.trim()) { pushToast('error', t.value.dbPathRequired); return }
-  } else {
-    if (!conn.host.trim()) { pushToast('error', t.value.dbHostRequired); return }
-    const port = Number(conn.port)
-    if (!Number.isInteger(port) || port < 1 || port > 65535) { pushToast('error', t.value.dbPortRequired); return }
-    conn.port = port
-  }
-  dbBusy.value = true
-  config.extensions.db.connections.push(conn)
-  const ok = await persist()
-  if (ok) {
-    newDbId.value = ''
-    dbDraft.value = null
-    editingNewDb.value = false
-    dbEditorOpen.value = false
-    pushToast('success', t.value.dbCreated)
-  } else {
-    config.extensions.db.connections = config.extensions.db.connections.filter(item => item.id !== conn.id)
-    pushToast('error', t.value.dbCreateFailed)
-  }
-  dbBusy.value = false
-}
-function requestDeleteDb(conn) { if (dbBusy.value) return; pendingDeleteDb.value = conn }
-async function confirmDeleteDb() {
-  const conn = pendingDeleteDb.value
-  if (!conn || dbBusy.value) return
-  dbBusy.value = true
-  const connections = config.extensions.db.connections
-  const index = connections.indexOf(conn)
-  connections.splice(index, 1)
-  const previousChecks = config.environments.map(ws => [...(ws.dbConnections || [])])
-  const previousDraftChecks = wsDraft.value ? [...(wsDraft.value.dbConnections || [])] : null
-  for (const ws of config.environments) {
-    ws.dbConnections = (ws.dbConnections || []).filter(id => id !== conn.id)
-  }
-  if (wsDraft.value) wsDraft.value.dbConnections = (wsDraft.value.dbConnections || []).filter(id => id !== conn.id)
-  const ok = await persist()
-  if (ok) {
-    pendingDeleteDb.value = null
-    pushToast('success', t.value.dbDeleted)
-  } else {
-    connections.splice(index, 0, conn)
-    config.environments.forEach((ws, wsIndex) => { ws.dbConnections = previousChecks[wsIndex] })
-    if (wsDraft.value && previousDraftChecks) wsDraft.value.dbConnections = previousDraftChecks
-    pushToast('error', t.value.dbCreateFailed)
-  }
-  dbBusy.value = false
-}
-// 卡片内联测试连接：结果就地展示，不阻断其它操作。
-// 后端 TestDBConnection 用子进程 + context.WithTimeout(10s) 兜底，前端再
-// 加 30 秒硬超时作为最后一道防线，避免任何意外悬挂让按钮永远转圈。
-const DB_TEST_TIMEOUT_MS = 30000
-async function testDb(conn) {
-  // 与 testSsh 同理：先写入容器再读取，确保 state 是响应式代理。
-  if (!dbTestStates[conn.id]) dbTestStates[conn.id] = { busy: false, ok: null, message: '' }
-  const state = dbTestStates[conn.id]
-  if (state.busy) return
-  state.busy = true
-  state.message = ''
-  try {
-    const result = await withTimeout(testDBConnection(safeClone(conn)), DB_TEST_TIMEOUT_MS, t.value.dbTestTimeout)
-    state.ok = !!result?.ok
-    state.message = String(result?.message || (result?.ok ? t.value.dbTestPassed : t.value.dbTestFailed))
-  } catch (err) {
-    state.ok = false
-    state.message = localizeError(String(err))
-  } finally {
-    state.busy = false
-  }
-}
-// 审计记录纯按需：仅在连接编辑弹窗打开时拉取最近少量条目。
-async function loadDbAudit(connectionId) {
-  dbAuditLoading.value = true
-  try {
-    dbAuditRows.value = (await getDBAuditLogs(connectionId, 20)) || []
-  } catch {
-    dbAuditRows.value = []
-  } finally {
-    dbAuditLoading.value = false
-  }
-}
-// 工作空间编辑器的 DB 勾选：结果写 wsDraft.dbConnections，经 persistWsChange 持久化。
-function toggleWorkspaceDb(connectionId, checked) {
-  if (!wsDraft.value) return
-  const set = new Set(wsDraft.value.dbConnections || [])
-  if (checked) set.add(connectionId)
-  else set.delete(connectionId)
-  wsDraft.value.dbConnections = [...set]
-  persistWsChange()
-}
-function workspaceDbConnections(ws) {
-  const connections = config.extensions?.db?.connections || []
-  return (ws?.dbConnections || []).map(id => connections.find(conn => conn.id === id)).filter(Boolean)
-}
+const {
+  closeDbEditor,
+  confirmDeleteDb,
+  normalizeDbConnection,
+  dbAuditLoading,
+  dbAuditRows,
+  dbBusy,
+  dbDraft,
+  dbEditorOpen,
+  dbTestStates,
+  editingNewDb,
+  loadDbAudit,
+  newDbId,
+  openDbEditor,
+  pendingDeleteDb,
+  persistDbChange,
+  requestDeleteDb,
+  saveNewDb,
+  testDb,
+  toggleWorkspaceDb,
+  workspaceDbConnections
+} = useDatabaseConnections({
+  config,
+  getWorkspaceDraft: () => wsDraft.value,
+  persist,
+  persistWorkspaceChange: persistWsChange,
+  pushToast,
+  t
+})
 
 // --- Agent extension removal confirmation ---
 function requestDeleteExtension(payload) {
@@ -1639,15 +1334,9 @@ async function saveNewWs() {
   if (selectedRemotes.some(remote => !remote.remotePath?.trim())) { pushToast('error', t.value.wsRemoteRequired); return }
   if (new Set(selectedRemotes.map(remote => remote.sshConfigId)).size !== selectedRemotes.length) { pushToast('error', t.value.wsSshDuplicate); return }
   ws.remotes = selectedRemotes.length ? selectedRemotes : [defaultRemote()]
-  const previousActiveId = config.activeEnvId
-  const previousEnvironment = config.lastEnvironment
   const previousWorkspaceOrder = [...workspaceOrder.value]
   config.environments.push(ws)
   selectedWorkspaceId.value = ws.id
-  if (!previousActiveId) {
-    config.activeEnvId = ws.id
-    config.lastEnvironment = ws.path
-  }
   const ok = await persist()
   if (ok) {
     // 新环境创建后立即加入主菜单排序首位，避免被已有环境列表挤到末尾。
@@ -1662,21 +1351,8 @@ async function saveNewWs() {
     workspaceOrder.value = previousWorkspaceOrder
     persistWorkspaceOrder()
     selectedWorkspaceId.value = ''
-    config.activeEnvId = previousActiveId
-    config.lastEnvironment = previousEnvironment
     pushToast('error', t.value.wsCreateFailed)
   }
-}
-async function setActiveWorkspace(ws) {
-  if (wsBusy.value || ws.id === config.activeEnvId) return
-  // 切换工作空间时，仅当处于首页模式才保存/载入草稿；历史会话视图下
-  // 输入框为空，不覆盖目标工作空间已保存的未发送草稿。
-  if (isHomeMode.value) persistDraftForEnv(config.activeEnvId, draft.value)
-  config.activeEnvId = ws.id
-  config.lastEnvironment = ws.path
-  draft.value = isHomeMode.value ? loadDraftForEnv(ws.id) : ''
-  await persist()
-  pushToast('success', t.value.wsChanged)
 }
 function requestDeleteWs(ws) { if (config.environments.length <= 1 || wsBusy.value) return; pendingDeleteWs.value = ws }
 async function confirmDeleteWs() {
@@ -1686,8 +1362,8 @@ async function confirmDeleteWs() {
   const index = config.environments.indexOf(ws)
   config.environments.splice(index, 1)
   if (config.activeEnvId === ws.id) {
-    config.activeEnvId = config.environments[Math.min(index, config.environments.length - 1)]?.id || ''
-    config.lastEnvironment = config.environments.find(w => w.id === config.activeEnvId)?.path || ''
+    const nextWorkspaceId = workspaceOrder.value.find(id => config.environments.some(item => item.id === id)) || config.environments[0]?.id || ''
+    void initializeWorkspace(nextWorkspaceId)
   }
   if (selectedWorkspaceId.value === ws.id) {
     selectedWorkspaceId.value = config.environments[Math.min(index, config.environments.length - 1)]?.id || ''
@@ -1724,8 +1400,6 @@ async function pickWorkspacePath() {
     if (!wsDraft.value.name) {
       wsDraft.value.name = extractDirName(path)
     }
-  } else {
-    config.lastEnvironment = path
   }
 }
 
@@ -2234,22 +1908,6 @@ function removeFigmaAuthorization(id) {
   }
 }
 
-function safeClone(value) {
-  return JSON.parse(JSON.stringify(value))
-}
-
-// withTimeout 给任意 Promise 加一个硬超时：超时后 reject 给定 message，
-// 避免后端调用意外悬挂时前端永远 await（如 SSH/DB 测试连接卡死场景）。
-function withTimeout(promise, ms, timeoutMessage) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(timeoutMessage)), ms)
-    Promise.resolve(promise).then(
-      (v) => { clearTimeout(timer); resolve(v) },
-      (e) => { clearTimeout(timer); reject(e) },
-    )
-  })
-}
-
 // 思考区的默认展开状态按“最后一轮问题”计算：历史记录中，最后一条
 // 用户消息之前的思考全部折叠，最后一条用户消息之后的思考保持展开。
 function initializeThinkingVisibility(messages) {
@@ -2335,6 +1993,9 @@ async function refreshSessionChanges() {
     const changes = await getSessionChanges(Number(taskId))
     if (requestId === changeRefreshRequest && String(activeTaskId.value) === String(taskId)) {
       sessionChanges.value = { root: '', nodes: [], files: [], added: 0, deleted: 0, ...(changes || {}) }
+      if (!currentTask()?.environmentId && sessionChanges.value.root) {
+        currentWorkDir.value = sessionChanges.value.root
+      }
       hydrateMessageAttachments()
     }
   } catch {
@@ -2405,45 +2066,55 @@ async function ensureConversation(title, options = {}) {
 }
 
 // 「添加到对话」：在当前会话绑定的工作空间中新建对话（标题为“新对话”），
-// 并把文件相对路径写入输入框。若当前已停留在本次添加任务打开的对话，
-// 则直接复用并继续追加；追加前输入框已有内容用分号分隔，避免拼接成不可
-// 解析的路径串。全程不关闭 Git 管理弹窗。
-async function addFileToChat(filePath) {
-  const normalized = String(filePath || '').replaceAll('\\', '/').trim()
-  if (!normalized) return
+// 并把内容写入输入框。若当前已停留在本次添加任务打开的对话，则直接复用
+// 并继续追加；追加前输入框已有内容按内容类型分隔（文件路径用分号、文本
+// 用换行），避免拼接成不可解析的串。全程不关闭 Git 管理弹窗。
+async function ensureAddToChatSession() {
   // 只有在当前查看的正是本次添加任务打开的对话时才复用，避免误合并到
   // 用户手动切到的其他会话。
   const reusable = !!addToChatSessionId.value && String(activeTaskId.value) === String(addToChatSessionId.value)
-  if (!reusable) {
-    await ensureConversation(t.value.chatNewSession, {
-      forceNew: true,
-      environmentId: currentTask()?.environmentId || config.activeEnvId,
-    })
-    addToChatSessionId.value = activeTaskId.value
-    // 把界面切到该新建对话并重置为空对话状态，输入框随后写入文件路径。
-    thinkingLevel.value = defaultThinkingLevelForModel(selectedModel.value)
-    sessionDcgDisabled.value = false
-    changeRefreshRequest += 1
-    messagesList.value = []
-    sessionChanges.value = { root: '', nodes: [], files: [], added: 0, deleted: 0 }
-    sessionChangesLoading.value = false
-    activeAssistant = null
-    error.value = ''
-    pendingPrompts.value = []
-    selectedSkill.value = null
-    promptImages.value = []
-    attachments.value = []
-    tokenStats.value = { input: 0, cached: 0, cacheWrite: 0, output: 0, total: 0 }
-    contextUsage.value = { tokens: 0, contextWindow: contextWindow.value, percent: 0 }
-    executionElapsedMs.value = 0
-    executionRunning.value = false
-    planItems.value = []
-    executionPlan.value = []
-    extensionDialog.value = null
-    draft.value = ''
-    goHome()
-  }
+  if (reusable) return
+  await ensureConversation(t.value.chatNewSession, {
+    forceNew: true,
+    environmentId: currentTask()?.environmentId || config.activeEnvId,
+  })
+  addToChatSessionId.value = activeTaskId.value
+  // 把界面切到该新建对话并重置为空对话状态，输入框随后写入内容。
+  thinkingLevel.value = defaultThinkingLevelForModel(selectedModel.value)
+  sessionDcgDisabled.value = false
+  changeRefreshRequest += 1
+  messagesList.value = []
+  sessionChanges.value = { root: '', nodes: [], files: [], added: 0, deleted: 0 }
+  sessionChangesLoading.value = false
+  activeAssistant = null
+  error.value = ''
+  pendingPrompts.value = []
+  selectedSkill.value = null
+  promptImages.value = []
+  attachments.value = []
+  tokenStats.value = { input: 0, cached: 0, cacheWrite: 0, output: 0, total: 0 }
+  contextUsage.value = { tokens: 0, contextWindow: contextWindow.value, percent: 0 }
+  executionElapsedMs.value = 0
+  executionRunning.value = false
+  planItems.value = []
+  executionPlan.value = []
+  extensionDialog.value = null
+  draft.value = ''
+  goHome()
+}
+
+async function addFileToChat(filePath) {
+  const normalized = String(filePath || '').replaceAll('\\', '/').trim()
+  if (!normalized) return
+  await ensureAddToChatSession()
   draft.value = draft.value.trim() ? `${draft.value.trim()};${normalized}` : normalized
+}
+
+async function addTextToChat(text) {
+  const normalized = String(text || '').trim()
+  if (!normalized) return
+  await ensureAddToChatSession()
+  draft.value = draft.value.trim() ? `${draft.value.trim()}\n${normalized}` : normalized
 }
 
 // 后端列表已合并权威运行时状态，可用于修复漏收终态事件后残留的 running。
@@ -2588,42 +2259,15 @@ function toggleWorkspaceCollapse(envId) {
 }
 
 const sessionGroups = computed(() => {
-  const groups = config.environments.map(ws => ({
-    id: ws.id,
-    name: ws.name || ws.path,
-    env: ws,
-    all: [],
-    visible: [],
-    remaining: 0,
-  }))
-  const orphan = { id: '', name: t.value.ungrouped || '未分类', env: null, all: [], visible: [], remaining: 0 }
-  for (const task of tasks.value) {
-    if (archivedTaskIds.has(task.id)) continue
-    // 常驻管家会话不进入左侧会话列表（在管家设置页"消息"页签查看详情）。
-    if (task.isSteward) continue
-    const group = groups.find(g => g.id === task.environmentId) || orphan
-    group.all.push(task)
-  }
-  const ordered = [...groups]
-  if (orphan.all.length) ordered.push(orphan)
-  // 依 workspaceOrder（被置顶者优先）重排工作空间分组，其余保持原顺序。
-  if (workspaceOrder.value.length) {
-    const byId = new Map(ordered.map(g => [g.id, g]))
-    const top = []
-    for (const id of workspaceOrder.value) {
-      const g = byId.get(id)
-      if (g) { top.push(g); byId.delete(id) }
-    }
-    ordered.length = 0
-    ordered.push(...top, ...byId.values())
-  }
-  for (const group of ordered) {
-    group.all.sort((a, b) => (Number(b.updatedAt) || Number(b.createdAt) || 0) - (Number(a.updatedAt) || Number(a.createdAt) || 0))
-    const limit = visibleSessionCounts[group.id] || SESSION_PAGE_SIZE
-    group.visible = group.all.slice(0, limit)
-    group.remaining = group.all.length - group.visible.length
-  }
-  return ordered
+  return buildSessionGroups({
+    environments: config.environments,
+    tasks: tasks.value,
+    archivedTaskIds,
+    workspaceOrder: workspaceOrder.value,
+    visibleSessionCounts,
+    pageSize: SESSION_PAGE_SIZE,
+    ungroupedLabel: t.value.ungrouped || '未分类'
+  })
 })
 
 function showMoreSessions(envId) {
@@ -2694,76 +2338,6 @@ function applySessionStats(data) {
   }
 }
 
-function messageText(message) {
-  if (!message) return ''
-  if (typeof message.content === 'string') return message.content
-  if (!Array.isArray(message.content)) return ''
-  return message.content
-    .filter(block => block?.type === 'text')
-    .map(block => block.text || '')
-    .join('\n')
-}
-
-function parsePlanItems(text) {
-  if (!text) return []
-  const lines = String(text).split(/\r?\n/)
-  const items = []
-  let inPlan = false
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/\*\*/g, '').trim()
-    if (/^(plan|计划(?:步骤)?)\s*[:：]/i.test(line)) {
-      inPlan = true
-      continue
-    }
-    const match = line.match(/^(\d+)[.)、]\s*(?:[☐☑✓○]\s*)?(.+)$/)
-    if (match && (inPlan || /[☐☑✓○]/.test(line))) {
-      items.push({
-        step: Number(match[1]),
-        text: match[2].replace(/^~~|~~$/g, '').trim(),
-        completed: /[☑✓]/.test(line) || /~~.+~~/.test(line)
-      })
-    } else if (inPlan && items.length && line && !/^[-*]\s/.test(line)) {
-      break
-    }
-  }
-  return items
-}
-
-function parsePlanLines(lines) {
-  if (!Array.isArray(lines)) return []
-  return lines.map((line, index) => ({
-    step: index + 1,
-    text: String(line).replace(/^[☐☑✓○]\s*/, '').replace(/^~~|~~$/g, '').trim(),
-    completed: /^[☑✓]/.test(String(line)) || /~~.+~~/.test(String(line))
-  }))
-}
-// 后端 plan 扩展会在确认弹窗消息尾部内嵌结构化计划步骤（双保险）：即使
-// setWidget('plan-todos') 事件延迟或丢失，确认弹窗也自带完整计划，前端无需
-// 依赖 plan-todos 到达即可渲染，彻底消除确认弹窗与计划 Widget 的竞态。
-const PLAN_STEPS_IN_MESSAGE = '__CODINGTO_PLAN_STEPS__'
-function parsePlanStepsFromMessage(message) {
-  if (!message) return null
-  const index = String(message).indexOf(PLAN_STEPS_IN_MESSAGE)
-  if (index < 0) return null
-  try {
-    const raw = JSON.parse(String(message).slice(index + PLAN_STEPS_IN_MESSAGE.length))
-    if (!Array.isArray(raw) || raw.length === 0) return null
-    const steps = raw
-      .map(s => ({
-        step: Number(s?.index ?? 0),
-        text: String(s?.text ?? '').trim(),
-        completed: Boolean(s?.completed)
-      }))
-      .filter(s => s.step > 0 && s.text)
-    return steps.length ? steps : null
-  } catch {
-    return null
-  }
-}
-function stripPlanStepsMarker(message) {
-  const index = String(message || '').indexOf(PLAN_STEPS_IN_MESSAGE)
-  return index >= 0 ? String(message).slice(0, index).trim() : message
-}
 function updatePlanFromWidget(lines) {
   planItems.value = parsePlanLines(lines)
 }
@@ -3565,7 +3139,7 @@ async function runPrompt({ message, images, attachments: promptAttachments, skil
       // 避免把空 provider/model 发到后端去触发全局 openai 默认。
       fallbackProvider: selectedAgent.value?.defaultProvider || config.defaultProvider,
       fallbackModel: selectedAgent.value?.defaultModel || config.defaultModel,
-      workDir: workDir || config.lastEnvironment,
+      workDir: workDir || currentWorkDir.value,
       mode: promptMode || mode.value,
       thinkingLevel: promptThinking || thinkingLevel.value,
       skillPath: skillPath || '',
@@ -3658,7 +3232,7 @@ async function sendPrompt() {
     // 有效服务商，避免 runPrompt 用旧 provider 覆盖新建会话的落库模型。
     provider: task?.provider || resolveProviderName(selectedAgent.value?.defaultProvider, selectedAgent.value?.defaultModel) || config.defaultProvider,
     model: task?.model || selectedAgent.value?.defaultModel || config.defaultModel,
-    workDir: config.lastEnvironment,
+    workDir: currentWorkDir.value,
     mode: mode.value,
     thinkingLevel: thinkingLevel.value,
     skillPath: selectedSkill.value?.agents?.find(agent => agent.id === selectedAgent.value?.id)?.path || '',
@@ -3722,11 +3296,6 @@ async function stop() {
   }
 }
 
-async function pickWorkspace() {
-  const value = await chooseWorkspace()
-  if (value) config.lastEnvironment = value
-}
-
 async function pickSessionDirectory() {
   const value = await chooseSessionDir()
   if (value) config.sessionDir = value
@@ -3737,6 +3306,9 @@ async function pickSessionDirectory() {
 async function chatNewSession() {
   syncCurrentTask()
   activeTaskId.value = ''
+  // Even before the first message, this workspace is considered in use and
+  // its Git cache/watcher is initialized in the background.
+  void initializeWorkspace(config.activeEnvId)
   // 新建对话默认选中该工作空间的默认智能体；未配置时回退第一个智能体。
   const envAgentId = envDefaultAgentId(config.activeEnvId)
   currentAgentId.value = envAgentId
@@ -3788,8 +3360,14 @@ async function selectTask(task) {
   // 历史会话的输入框不显示该草稿。
   if (isHomeMode.value) persistDraftForEnv(config.activeEnvId, draft.value)
   syncCurrentTask()
-  // 先切到对话框并展示加载动画，再异步拉取历史，避免点击后长时间无反应
+  // 先切到对话框并展示加载动画，同时立即预热该对话工作目录的 Git 缓存。
   activeTaskId.value = task.id
+  const taskEnvironmentId = task.environmentId && config.environments.some(env => env.id === task.environmentId)
+    ? task.environmentId
+    : ''
+  config.activeEnvId = taskEnvironmentId
+  currentWorkDir.value = environmentWorkDir(taskEnvironmentId) || bootstrap.value?.defaultWorkDir || currentWorkDir.value
+  void initializeWorkspace(taskEnvironmentId)
   draft.value = ''
   sessionChanges.value = { root: '', nodes: [], files: [], added: 0, deleted: 0 }
   refreshSessionChanges()
@@ -3832,10 +3410,6 @@ async function selectTask(task) {
     executionElapsedMs.value = Number(history?.runtime?.execDurationMs ?? task.execDurationMs) || 0
     executionRunning.value = activeTaskRunning.value
     if (task.agentId && config.agents.some(agent => agent.id === task.agentId)) currentAgentId.value = task.agentId
-    if (task.environmentId && config.environments.some(env => env.id === task.environmentId)) {
-      config.activeEnvId = task.environmentId
-      config.lastEnvironment = config.environments.find(env => env.id === task.environmentId)?.path || config.lastEnvironment
-    }
     if (task.provider && config.providers.some(provider => provider.name === task.provider)) {
       config.defaultProvider = task.provider
       config.defaultModel = task.model || config.defaultModel
@@ -3860,12 +3434,12 @@ async function selectTask(task) {
 }
 
 function chatSelectEnvironment(env) {
-  if (env?.id === config.activeEnvId) return
-  // 切换工作空间时，仅当处于首页模式才保存/载入草稿；历史会话视图下
-  // 输入框为空，不覆盖目标工作空间已保存的未发送草稿。
+  if (!env?.id) return
+  if (env.id === config.activeEnvId) return
+  // Switching workspaces is process-local and never saves the global config.
   if (isHomeMode.value) persistDraftForEnv(config.activeEnvId, draft.value)
   config.activeEnvId = env.id
-  config.lastEnvironment = env.path
+  currentWorkDir.value = env.path
   draft.value = isHomeMode.value ? loadDraftForEnv(env.id) : ''
   // 恢复目标工作空间的默认智能体；未配置时回退第一个智能体，
   // 保证切换过来后直接发消息 / 新建对话都使用该工作空间的智能体。
@@ -3882,7 +3456,7 @@ function chatSelectEnvironment(env) {
       config.defaultModel = first?.models?.[0]?.id || ''
     }
   }
-  persist()
+  void initializeWorkspace(env.id)
 }
 
 function chatSelectAgent(agent) {
@@ -3981,8 +3555,7 @@ function onAddImages(images) {
 async function persist(options = {}) {
   saving.value = true
   saved.value = false
-  const activeSshDraft = sshEditorOpen.value ? sshDraft.value : null
-  const sshRevisionAtSave = sshEditRevision
+  const sshSaveState = captureSshSaveState()
   try {
     // 若已没有任何服务商（或没有任何模型），清空默认模型指向，避免后端校验拦截。
     const hasAnyProvider = (config.providers || []).length > 0
@@ -3996,8 +3569,7 @@ async function persist(options = {}) {
     if (!Array.isArray(result.environments)) {
       result.environments = config.environments
     }
-    const currentSshDraft = sshEditorOpen.value ? sshDraft.value : null
-    result.sshConfigs = reconcileSshConfigResult(result.sshConfigs, currentSshDraft, activeSshDraft, sshRevisionAtSave, sshEditRevision, normalizeSsh)
+    result.sshConfigs = reconcileSshSaveResult(result.sshConfigs, sshSaveState)
     Object.assign(config, result)
     saved.value = true
     setTimeout(() => { saved.value = false }, 1800)
@@ -4013,81 +3585,6 @@ async function persist(options = {}) {
   }
 }
 
-// 后端返回的错误可能仍是英文，按关键词做最小化中文化兜底。
-function localizeError(raw) {
-  if (!raw) return raw
-  const map = [
-    [/duplicate agent id/i, 'Agent ID 重复'],
-    [/no enabled model providers/i, '没有启用的服务商'],
-    [/invalid base URL/i, '基础域名无效'],
-    [/requires a base URL/i, '需要填写基础域名'],
-    [/unsupported API protocol/i, '不支持的 API 协议'],
-    [/does not exist or its provider is disabled/i, '默认模型不存在或所属服务商已停用'],
-    [/maximum concurrent task limit reached/i, '并发任务已达到上限（4）'],
-    [/empty (ID|key)/i, '存在空的名称或标识'],
-    [/API key environment variable (\w+) is not set for provider (.+)/i, '所选模型缺少 API Key 环境变量，请先在模型设置中配置'],
-    [/exceeded the \d+ second execution limit/i, '工具执行超过时长限制，已自动中止'],
-  ]
-  for (const [re, text] of map) {
-    if (re.test(raw)) return text
-  }
-  return raw
-}
-
-const piCompatBooleanFields = [
-  { key: 'supportsStore', hint: 'compatSupportsStore' },
-  { key: 'supportsDeveloperRole', hint: 'compatSupportsDeveloperRole' },
-  { key: 'supportsReasoningEffort', hint: 'compatSupportsReasoningEffort' },
-  { key: 'supportsUsageInStreaming', hint: 'compatSupportsUsageInStreaming' },
-  { key: 'requiresToolResultName', hint: 'compatRequiresToolResultName' },
-  { key: 'requiresAssistantAfterToolResult', hint: 'compatRequiresAssistantAfterToolResult' },
-  { key: 'requiresThinkingAsText', hint: 'compatRequiresThinkingAsText' },
-  { key: 'requiresReasoningContentOnAssistantMessages', hint: 'compatRequiresReasoningContent' },
-  { key: 'zaiToolStream', hint: 'compatZaiToolStream' },
-  { key: 'supportsStrictMode', hint: 'compatSupportsStrictMode' },
-  { key: 'sendSessionAffinityHeaders', hint: 'compatSendSessionAffinityHeaders' },
-  { key: 'sendSessionIdHeader', hint: 'compatSendSessionIdHeader' },
-  { key: 'supportsLongCacheRetention', hint: 'compatSupportsLongCacheRetention' }
-]
-
-const piThinkingFormats = [
-  'openai', 'openrouter', 'deepseek', 'together', 'zai',
-  'qwen', 'chat-template', 'qwen-chat-template', 'string-thinking', 'ant-ling'
-]
-
-const piThinkingLevels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-
-function ensureCompat(target) {
-  if (!target.compat || Array.isArray(target.compat) || typeof target.compat !== 'object') target.compat = {}
-  return target.compat
-}
-
-function compatBooleanValue(target, key) {
-  const value = target?.compat?.[key]
-  return typeof value === 'boolean' ? String(value) : ''
-}
-
-function setCompatBoolean(target, key, value) {
-  const compat = ensureCompat(target)
-  if (value === '') delete compat[key]
-  else compat[key] = value === 'true'
-}
-
-function compatStringValue(target, key) {
-  const value = target?.compat?.[key]
-  return typeof value === 'string' ? value : ''
-}
-
-function setCompatString(target, key, value) {
-  const compat = ensureCompat(target)
-  if (value === '') delete compat[key]
-  else compat[key] = value
-}
-
-function formatCompat(target) {
-  return JSON.stringify(target?.compat || {}, null, 2)
-}
-
 function updateCompatJson(target, event) {
   const raw = String(event?.target?.value || '').trim()
   try {
@@ -4099,47 +3596,6 @@ function updateCompatJson(target, event) {
     if (event?.target) event.target.value = formatCompat(target)
     pushToast('error', t.value.piCompatInvalidJson)
   }
-}
-
-function protocolEndpoint(api) {
-  if (api === 'openai-responses') return 'responses'
-  if (api === 'openai-codex-responses') return 'responses'
-  if (api === 'azure-openai-responses') return 'responses'
-  if (api === 'anthropic-messages') return 'messages'
-  if (api === 'google-generative-ai') return 'models/{model}:streamGenerateContent'
-  if (api === 'google-vertex') return 'models/{model}:streamGenerateContent'
-  return 'chat/completions'
-}
-
-function effectiveModelBaseUrl(provider, model) {
-  const providerBase = String(provider?.baseUrl || '').trim().replace(/\/+$/, '')
-  const modelBase = String(model?.baseUrl || '').trim()
-  if (!modelBase) return providerBase
-  if (/^https?:\/\//i.test(modelBase)) return modelBase.replace(/\/+$/, '')
-  if (!providerBase) return modelBase
-  return `${providerBase}/${modelBase.replace(/^\/+/, '')}`.replace(/\/+$/, '')
-}
-
-function modelRequestRoute(provider, model) {
-  const base = effectiveModelBaseUrl(provider, model) || '—'
-  return base === '—' ? base : `${base}/${protocolEndpoint(model?.api)}`
-}
-
-function normalizeProvider(provider) {
-  provider.enabled ??= true
-  const legacyApi = provider.api || (provider.type === 'anthropic' ? 'anthropic-messages' : provider.type === 'google' ? 'google-generative-ai' : provider.type === 'openai-responses' ? 'openai-responses' : 'openai-completions')
-  ensureCompat(provider)
-  provider.models ||= []
-  provider.models.forEach(model => {
-    model.api ||= legacyApi
-    model.baseUrl ||= ''
-    model.input ||= ['text']
-    model.maxTokens ||= 16384
-    model.capabilities ||= { toolCall: true }
-    ensureCompat(model)
-  })
-  provider.api = ''
-  return provider
 }
 
 // formatTokens 把 token 数压缩为带 K / M 的简短形式，例如 128000 → 128K。
@@ -4354,151 +3810,6 @@ async function confirmDeleteProvider() {
 
 // ---- Attachment upload (design §A2) ----
 // Each attachment is { path?, name, mimeType, data?, kind, size, imagePreview? }.
-// Picker items carry a real OS path; drag-drop items carry base64 data.
-const attachments = ref([])
-
-function attachmentKindFromMime(mime) {
-  if (!mime) return 'other'
-  if (mime.startsWith('image/')) return 'image'
-  if (mime.startsWith('audio/')) return 'audio'
-  if (mime.startsWith('video/')) return 'video'
-  if (mime.startsWith('text/') || /(pdf|word|excel|powerpoint|spreadsheet|presentation|officedocument|opendocument)/i.test(mime)) return 'document'
-  return 'other'
-}
-
-function attachmentMime(file) {
-  const supplied = String(file?.type || file?.mimeType || '').toLowerCase()
-  if (supplied) return supplied
-  const ext = String(file?.name || '').split('.').pop()?.toLowerCase()
-  const known = {
-    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-    webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', avif: 'image/avif',
-    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
-    json: 'application/json', doc: 'application/msword',
-    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    xls: 'application/vnd.ms-excel',
-    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    ppt: 'application/vnd.ms-powerpoint',
-    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4',
-    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime'
-  }
-  return known[ext] || 'application/octet-stream'
-}
-
-function isNativePathAttachment(file) {
-  return typeof file?.path === 'string' && file.path.trim() !== ''
-}
-
-async function onAddAttachments(files) {
-  if (!files || !files.length) return
-  const acceptedFiles = []
-  const maxCount = 10
-  const maxBytes = 50 * 1024 * 1024
-  const maxTotal = 100 * 1024 * 1024
-  let total = attachments.value.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
-  for (const file of Array.from(files)) {
-    if (attachments.value.length + acceptedFiles.length >= maxCount) {
-      pushToast('error', t.value.attachmentErrorCount?.replace('{count}', String(maxCount)) || `最多 ${maxCount} 个附件`)
-      break
-    }
-    if (file.size > maxBytes) {
-      pushToast('error', t.value.attachmentErrorSize?.replace('{name}', file.name) || `${file.name} 超过大小限制`)
-      continue
-    }
-    if (total + file.size > maxTotal) {
-      pushToast('error', t.value.attachmentErrorTotal || '附件总大小超过限制')
-      break
-    }
-    acceptedFiles.push(file)
-    total += file.size
-  }
-  if (!acceptedFiles.length) return
-
-  // Materialize lightweight preview entries before reading the full payload so
-  // the composer responds immediately, even for several large files.
-  const pendingItems = acceptedFiles.map((file) => {
-    const mimeType = attachmentMime(file)
-    const kind = attachmentKindFromMime(mimeType)
-    const nativePath = isNativePathAttachment(file)
-    return {
-      id: crypto.randomUUID(),
-      path: nativePath ? file.path : '',
-      name: file.name,
-      mimeType,
-      kind,
-      size: file.size,
-      data: '',
-      reading: !nativePath,
-      imagePreview: !nativePath && kind === 'image' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
-        ? URL.createObjectURL(file)
-        : ''
-    }
-  })
-  attachments.value = attachments.value.concat(pendingItems)
-  const reads = []
-  for (let index = 0; index < acceptedFiles.length; index++) {
-    const file = acceptedFiles[index]
-    const pending = pendingItems[index]
-    if (isNativePathAttachment(file)) continue
-    reads.push(new Promise((resolve) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const dataUrl = String(reader.result || '')
-        const comma = dataUrl.indexOf(',')
-        const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
-        resolve({
-          id: pending.id,
-          data,
-          reading: false,
-          imagePreview: pending.kind === 'image' ? `data:${pending.mimeType};base64,${data}` : ''
-        })
-      }
-      reader.onerror = () => resolve({ id: pending.id, error: true })
-      reader.readAsDataURL(file)
-    }))
-  }
-  if (!reads.length) return
-
-  attachmentReadsPending.value += 1
-  try {
-    const results = await Promise.all(reads)
-    for (const pending of pendingItems) {
-      if (pending.imagePreview.startsWith('blob:')) URL.revokeObjectURL(pending.imagePreview)
-    }
-    const byID = new Map(results.map((item) => [item.id, item]))
-    attachments.value = attachments.value.flatMap((item) => {
-      const result = byID.get(item.id)
-      if (!result) return [item]
-      if (result.error) return []
-      return [{ ...item, ...result }]
-    })
-    if (results.some((item) => item.error)) {
-      pushToast('error', t.value.attachmentReadError || '无法读取部分附件')
-    }
-  } finally {
-    attachmentReadsPending.value = Math.max(0, attachmentReadsPending.value - 1)
-  }
-}
-
-function onRemoveAttachment(index) {
-  if (index >= 0 && index < attachments.value.length) {
-    const preview = attachments.value[index]?.imagePreview
-    if (String(preview || '').startsWith('blob:')) URL.revokeObjectURL(preview)
-    attachments.value.splice(index, 1)
-    attachments.value = attachments.value.slice()
-  }
-}
-
-function toAttachmentInputs(list) {
-  return list.map((a) => ({
-    path: a.path || '',
-    name: a.name,
-    mimeType: a.mimeType,
-    data: a.data || ''
-  }))
-}
-
 function removeProvider(index) {
   config.providers.splice(index, 1)
 }
@@ -4646,7 +3957,6 @@ provide(appContextKey, {
   workspaceDragOverId: dragOverWorkspaceId,
   workspaceRemotes,
   remoteSsh,
-  setActiveWorkspace,
   requestDeleteSsh,
   testSsh,
   pickSshKeyFile,
@@ -4720,10 +4030,9 @@ onMounted(async () => {
     if (files.length) void onAddAttachments(files)
   })
   offCleanupEvent = onEvent('session-cleanup:done', applySessionCleanupResult)
+  offGitWorkspace = onEvent('git:workspace', applyGitWorkspaceUpdate)
   await load()
-  providerQuotaTimer = window.setInterval(() => {
-    void refreshCurrentProviderQuota({ force: true })
-  }, PROVIDER_QUOTA_CACHE_MS)
+  startProviderQuotaRefresh()
   // 启动异步清理会话数据的结果通常在 window 渲染后不久就绪，主动拉取一次并展示。
   void fetchSessionCleanupNotice()
   void refreshStewardConnected()
@@ -4796,8 +4105,6 @@ document.addEventListener('click', closeArchivePop)
 
 onBeforeUnmount(() => {
   window.clearTimeout(changeRefreshTimer)
-  window.clearInterval(providerQuotaTimer)
-  providerQuotaTimer = null
   offEvent?.()
   offSubagentEvent?.()
   offState?.()
@@ -4805,6 +4112,7 @@ onBeforeUnmount(() => {
   offAttachmentDrop?.()
   offShuttingDown?.()
   offCleanupEvent?.()
+  offGitWorkspace?.()
   offExtensionsChanged?.()
   offStewardStatus?.()
   offStewardPermission?.()
@@ -4816,18 +4124,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell" :class="{ 'window--maximised': isMaximised }">
-    <header class="titlebar">
-      <div class="titlebar__drag">
-        <img class="brand-mark" :src="logo" alt="CodingTo" />
-        <span class="brand-name">CodingTo</span>
-        <span v-if="running" class="run-pill"><span></span>{{ t.statusRunning }}</span>
-      </div>
-      <div class="window-controls">
-        <button @click="minimise" aria-label="Minimize"><Minus :size="15" /></button>
-        <button @click="toggleMaximise" aria-label="Maximize"><Maximize2 :size="13" /></button>
-        <button class="window-close" @click="closeWindow" aria-label="Close"><X :size="16" /></button>
-      </div>
-    </header>
+    <AppTitleBar :running="running" :running-label="t.statusRunning" />
 
     <div class="workspace-shell">
       <aside class="sidebar" :class="{ 'sidebar--closed': !sidebarOpen, 'sidebar--resizing': sidebarResizing }" :style="sidebarOpen ? { width: sidebarWidth + 'px', flexBasis: sidebarWidth + 'px' } : null">
@@ -4877,6 +4174,7 @@ onBeforeUnmount(() => {
                     <span :title="group.env?.path || group.name">{{ group.name }}</span>
                   </button>
                   <div class="sidebar-group__actions">
+                    <span v-if="group.all.length > 0" class="sidebar-group__count">{{ group.all.length }}</span>
                     <button class="sidebar-group__add" :title="t.chatNewSession" @click.stop="chatNewSessionFor(group)">
                       <Plus :size="15" :stroke-width="2.5" />
                     </button>
@@ -4959,6 +4257,9 @@ onBeforeUnmount(() => {
             :running="activeTaskRunning"
             :stopping="activeTaskStopping"
             :connected="connected"
+            :current-work-dir="currentWorkDir"
+            :workspace-revision="runtimeWorkspaceRevision"
+            :workspace-activating="workspaceActivating"
             :selected-agent="selectedAgent"
             :dcg-status="(extensionSnapshot?.recommended?.[selectedAgent?.id] || []).find(tool => tool.key === 'dcg') || null"
             :session-dcg-disabled="sessionDcgDisabled"
@@ -5041,6 +4342,8 @@ onBeforeUnmount(() => {
       :session-id="Number(activeTaskId) || 0"
       :language="config.preferences.language || 'zh-CN'"
       :agent-running="activeTaskRunning"
+      :workspace="currentWorkDir"
+      :workspace-revision="gitWorkspaceRevision"
       :model-options="modelOptions"
       :selected-model-value="selectedModelValue"
       :t="t"
@@ -5048,6 +4351,7 @@ onBeforeUnmount(() => {
       @updated="updateGitAvailability"
       @resolve-conflicts="requestAgentConflictResolution"
       @add-to-chat="addFileToChat"
+      @add-selection-to-chat="addTextToChat"
     />
 
     <div v-if="shuttingDown" class="shutdown-overlay" role="status" aria-live="polite">

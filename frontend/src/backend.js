@@ -9,7 +9,7 @@ const fallback = {
     preferences: { theme: 'system', language: 'zh-CN', accentColor: '#d9a441', chatLayout: 'left', showIdentity: true, diffMode: 'unified', conciseChat: false },
     defaultProvider: 'openai',
     defaultModel: 'gpt-5.6-terra',
-    lastEnvironment: '',
+    lastEnvironment: 'C:\\Users\\asus\\.codingto\\tempwork',
     sessionDir: 'C:\\Users\\asus\\.codingto\\sessions',
     memory: { projectHistoryLimit: 100 },
     recordApiDetails: false,
@@ -51,7 +51,8 @@ const fallback = {
   piInstalled: false,
   piPath: '',
   configDir: '',
-  version: '0.1.0'
+  version: '0.1.0',
+  defaultWorkDir: 'C:\\Users\\asus\\.codingto\\tempwork'
 }
 
 function isWails() {
@@ -489,6 +490,29 @@ export async function getSessionGitSnapshot(id, baseBranch = '') {
   return git
 }
 
+export async function compareSessionGitBranches(id, left = '', right = '') {
+  if (isWails()) return App.CompareSessionGitBranches({ sessionId: Number(id), left, right })
+  const snapshot = await getSessionGitSnapshot(id, right)
+  const branch = snapshot.branch || { files: [], added: 0, deleted: 0 }
+  return {
+    isRepository: snapshot.isRepository,
+    root: snapshot.root,
+    left: left || snapshot.currentBranch,
+    right: right || snapshot.baseBranch,
+    ahead: left ? 2 : snapshot.ahead,
+    behind: left ? 1 : snapshot.behind,
+    files: branch.files,
+    added: branch.added,
+    deleted: branch.deleted,
+  }
+}
+
+export async function activateWorkspace(environmentId = '') {
+  if (isWails()) return App.ActivateWorkspace(String(environmentId || ''))
+  const environment = fallback.config.environments.find(item => item.id === environmentId)
+  return { environmentId: environment?.id || '', root: environment?.path || fallback.defaultWorkDir }
+}
+
 export async function getSessionGitAvailability(id) {
   if (isWails()) return Call.ByName('codingto/internal/app.App.GetSessionGitAvailability', Number(id))
   const repository = await getSessionGitRepository(id)
@@ -529,6 +553,11 @@ export async function closeSessionTerminal(request) {
   if (isWails()) return Call.ByName('codingto/internal/app.App.CloseSessionTerminal', request)
 }
 
+export async function refreshSessionGitRepository(id) {
+  if (!isWails()) return
+  await Call.ByName('codingto/internal/app.App.RefreshSessionGitRepository', Number(id))
+}
+
 export async function getSessionGitRepository(id) {
   if (isWails()) return Call.ByName('codingto/internal/app.App.GetSessionGitRepository', Number(id))
   const snapshot = await getSessionGitSnapshot(id)
@@ -561,6 +590,9 @@ export async function getSessionGitRepository(id) {
     commits: [
       { hash: 'a18f2d789f', shortHash: 'a18f2d7', parents: ['72be104'], author: 'CodingTo', timestamp: Date.now() - 3600000, subject: '完善 Git 变更预览', decorations: 'HEAD -> feature/git-sidebar' },
       { hash: '72be104830', shortHash: '72be104', parents: [], author: 'CodingTo', timestamp: Date.now() - 86400000, subject: '发布 0.1.9', decorations: 'origin/main, main' },
+    ],
+    stashes: [
+      { hash: '1538675309abcdef1538675309abcdef15386753', ref: 'stash@{0}', name: '登录页调整', branch: 'feature/git-sidebar', timestamp: Date.now() - 1800000 },
     ],
   }
 }
@@ -753,6 +785,15 @@ export async function getSessionGitCommitFileDetail(sessionId, commit, path, lan
     })
   }
   return getSessionGitFileDetail(sessionId, 'branch', path, '')
+}
+
+export async function getSessionGitCompareFileDetail(sessionId, left, right, path) {
+  if (isWails()) {
+    return Call.ByName('codingto/internal/app.App.GetSessionGitCompareFileDetail', {
+      sessionId: Number(sessionId), left, right, path
+    })
+  }
+  return getSessionGitFileDetail(sessionId, 'compare', path, '')
 }
 
 export async function deleteSession(id) {
@@ -1145,8 +1186,8 @@ export async function deleteAgentExtensionDir(agentId, key) {
   return App.DeleteAgentExtensionDir({ agentId, key })
 }
 
-// Subscribe to the start of a streamed install. The handler receives a payload
-// with { agentId, title }. Returns an unsubscribe function.
+// Subscribe to the start of a streamed install/uninstall. The handler receives
+// a payload with { agentId, title, operation }. Returns an unsubscribe function.
 export function onInstallStart(handler) {
   if (!isWails()) return () => {}
   return Events.On('install:start', event => handler(event?.data))
@@ -1160,8 +1201,8 @@ export function onInstallLog(handler) {
   return Events.On('install:log', event => handler(event?.data))
 }
 
-// Subscribe to the final outcome of a streamed install. The handler receives a
-// payload with { agentId, success }. Returns an unsubscribe function.
+// Subscribe to the final outcome of a streamed install/uninstall. The handler
+// receives { agentId, success, operation }. Returns an unsubscribe function.
 export function onInstallDone(handler) {
   if (!isWails()) return () => {}
   return Events.On('install:done', event => handler(event?.data))

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -29,6 +30,11 @@ const (
 )
 
 var changeTrackerMu sync.Mutex
+
+// errPathOutsideWorkspace marks a captured path outside the workspace root.
+// The Pi extension skips such paths instead of blocking; the reader must skip
+// them too so a stale record cannot fail the whole node merge.
+var errPathOutsideWorkspace = errors.New("path outside active workspace")
 
 // changeNodeManifest is one user prompt and the edits performed before the
 // matching agent_end event. A mandatory Pi extension captures before/after
@@ -569,6 +575,9 @@ func mergeChangeCaptureJournal(nodeDir string, manifest *changeNodeManifest, fin
 		}
 		absolutePath, relativePath, err := resolveTrackedPath(manifest.Root, meta.Path)
 		if err != nil {
+			if errors.Is(err, errPathOutsideWorkspace) {
+				continue
+			}
 			return fmt.Errorf("resolve captured path %q: %w", meta.Path, err)
 		}
 		if changeCapturePathKey(relativePath) != entry.Name() {
@@ -772,7 +781,7 @@ func resolveTrackedPath(root, toolPath string) (string, string, error) {
 		return "", "", err
 	}
 	if relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(os.PathSeparator)) {
-		return "", "", fmt.Errorf("edited file is outside the active workspace: %s", toolPath)
+		return "", "", errPathOutsideWorkspace
 	}
 	return filepath.Clean(absolutePath), filepath.ToSlash(relativePath), nil
 }

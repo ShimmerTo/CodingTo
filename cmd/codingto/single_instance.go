@@ -29,7 +29,10 @@ func acquireSingleInstance() (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	pid := os.Getpid()
+	return acquireSingleInstanceAt(lockPath, os.Getpid(), pidAlive)
+}
+
+func acquireSingleInstanceAt(lockPath string, pid int, isPIDAlive func(int) bool) (func(), error) {
 	open := func() (*os.File, error) {
 		return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	}
@@ -40,7 +43,7 @@ func acquireSingleInstance() (func(), error) {
 		if readErr == nil {
 			ownerPID, _ = strconv.Atoi(strings.TrimSpace(string(data)))
 		}
-		if ownerPID > 0 && pidAlive(ownerPID) {
+		if ownerPID > 0 && isPIDAlive(ownerPID) {
 			return nil, fmt.Errorf("已有 CodingTo 实例在运行（pid=%d）", ownerPID)
 		}
 		// Stale lock from a dead instance: reclaim it.
@@ -57,6 +60,11 @@ func acquireSingleInstance() (func(), error) {
 	}
 	return func() {
 		_ = f.Close()
-		_ = os.Remove(lockPath)
+		// Remove only the lock still owned by this process. This prevents a late
+		// or repeated release from deleting a replacement owner's lock.
+		data, readErr := os.ReadFile(lockPath)
+		if readErr == nil && strings.TrimSpace(string(data)) == strconv.Itoa(pid) {
+			_ = os.Remove(lockPath)
+		}
 	}, nil
 }

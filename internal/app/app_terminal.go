@@ -111,7 +111,12 @@ func (a *App) WriteSessionTerminal(req TerminalInputRequest) error {
 		return a.terminalUserError(err)
 	}
 	if err := a.terminal.Write(context.root, req.TerminalID, req.Data); err != nil {
-		applog.Errorf("write terminal %s for session %d: %v", req.TerminalID, req.SessionID, err)
+		// A queued xterm input can race with a workspace switch or terminal close.
+		// It is an expected stale request, not a runtime failure worth a full
+		// Wails call stack in the application log.
+		if !errors.Is(err, terminaldomain.ErrTerminalNotFound) {
+			applog.Errorf("write terminal %s for session %d: %v", req.TerminalID, req.SessionID, err)
+		}
 		return a.localizedTerminalError("无法写入终端", "Could not write to the terminal")
 	}
 	return nil
@@ -127,7 +132,9 @@ func (a *App) ResizeSessionTerminal(req TerminalResizeRequest) error {
 		return a.terminalUserError(err)
 	}
 	if err := a.terminal.Resize(context.root, req.TerminalID, req.Columns, req.Rows); err != nil {
-		applog.Errorf("resize terminal %s for session %d: %v", req.TerminalID, req.SessionID, err)
+		if !errors.Is(err, terminaldomain.ErrTerminalNotFound) {
+			applog.Errorf("resize terminal %s for session %d: %v", req.TerminalID, req.SessionID, err)
+		}
 		return a.localizedTerminalError("无法调整终端大小", "Could not resize the terminal")
 	}
 	return nil
@@ -143,7 +150,9 @@ func (a *App) CloseSessionTerminal(req TerminalCloseRequest) error {
 		return a.terminalUserError(err)
 	}
 	if err := a.terminal.CloseTerminal(context.root, req.TerminalID); err != nil {
-		applog.Errorf("close terminal %s for session %d: %v", req.TerminalID, req.SessionID, err)
+		if !errors.Is(err, terminaldomain.ErrTerminalNotFound) {
+			applog.Errorf("close terminal %s for session %d: %v", req.TerminalID, req.SessionID, err)
+		}
 		return a.localizedTerminalError("无法关闭终端", "Could not close the terminal")
 	}
 	return nil
@@ -177,15 +186,11 @@ func (a *App) terminalSessionContext(sessionID int64) (terminalSessionContext, e
 			}
 		}
 	} else {
-		// New conversation: terminals are a working-directory concern, so resolve
-		// the currently active workspace.
-		environment = cfg.environmentByID(cfg.ActiveEnvID)
-		if environment != nil {
-			root = strings.TrimSpace(environment.Path)
-		}
-		if root == "" {
-			root = strings.TrimSpace(cfg.LastEnvironment)
-		}
+		// New conversation: use the process-local selection. It starts at
+		// ~/.codingto/tempwork and changes without persisting a default workspace.
+		runtimeWorkspace := a.runtimeWorkspace()
+		environment = cfg.environmentByID(runtimeWorkspace.EnvironmentID)
+		root = strings.TrimSpace(runtimeWorkspace.Root)
 	}
 	if root == "" {
 		return terminalSessionContext{}, a.localizedTerminalError("无法定位当前工作区", "Could not resolve the current workspace")

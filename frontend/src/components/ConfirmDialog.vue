@@ -8,6 +8,7 @@ const props = defineProps({
   title: { type: String, required: true },
   description: { type: String, default: '' },
   busy: { type: Boolean, default: false },
+  confirmDisabled: { type: Boolean, default: false },
   confirmLabel: { type: String, default: '' },
   confirmBusyLabel: { type: String, default: '' },
   cancelLabel: { type: String, default: '' },
@@ -40,7 +41,7 @@ function requestConfirm() {
       <slot />
       <div class="confirm-dialog__actions">
         <button type="button" class="secondary-button" :disabled="busy" @click="requestClose">{{ resolvedCancel }}</button>
-        <button type="button" class="primary-button" :disabled="busy" @click="requestConfirm">
+        <button type="button" class="primary-button" :disabled="busy || confirmDisabled" @click="requestConfirm">
           <RefreshCw v-if="busy" class="spin" :size="14" />
           {{ busy ? resolvedConfirmBusy : resolvedConfirm }}
         </button>

@@ -484,10 +484,7 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 	}
 	displayImages := append([]ImageInput(nil), req.Images...)
 	if req.WorkDir == "" {
-		req.WorkDir = cfg.LastEnvironment
-	}
-	if req.WorkDir == "" {
-		req.WorkDir, _ = os.Getwd()
+		req.WorkDir = DefaultWorkDir()
 	}
 	if info, err := os.Stat(req.WorkDir); err != nil || !info.IsDir() {
 		return fmt.Errorf("environment directory does not exist: %s", req.WorkDir)
@@ -643,12 +640,6 @@ func (s *AgentService) startPromptSingle(req PromptRequest) error {
 		return err
 	}
 	s.armFirstResponseWatchdogLocked(req.SessionID, changeNodeID)
-	if cfg.LastEnvironment != req.WorkDir || cfg.DefaultProvider != req.Provider || cfg.DefaultModel != req.Model {
-		cfg.LastEnvironment = req.WorkDir
-		cfg.DefaultProvider = req.Provider
-		cfg.DefaultModel = req.Model
-		_ = s.store.Save(cfg)
-	}
 	application.Get().Event.Emit("agent:state", map[string]any{
 		"running": true, "processRunning": true, "codingToSessionId": req.SessionID,
 	})

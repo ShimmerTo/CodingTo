@@ -7,7 +7,6 @@ const props = defineProps({
   title: { type: String, default: '' },
   sessionId: { type: Number, default: 0 },
   createdAt: { type: Number, default: 0 },
-  connected: { type: Boolean, default: false },
   executionElapsedMs: { type: Number, default: 0 },
   executionRunning: { type: Boolean, default: false },
   t: { type: Object, required: true }
@@ -30,12 +29,10 @@ const createdAtTooltip = computed(() => createdAtLabel.value ? `${props.t.chatSe
       <span>{{ title || t.chatSelectOrCreate }}</span>
     </div>
     <div class="chat-main__head-actions">
-      <span v-if="title" class="execution-time" :class="{ 'execution-time--running': executionRunning }">
+      <span class="execution-time" :class="{ 'execution-time--running': executionRunning }">
         <Clock3 :size="13" />{{ t.execute }} {{ formatDuration(executionElapsedMs) }}
       </span>
-      <span class="chat-status" :class="{ 'chat-status--on': connected }">
-        <span class="chat-status__dot" />{{ connected ? t.chatConnected : t.chatDisconnected }}
-      </span>
+      <slot name="actions" />
     </div>
   </header>
 </template>

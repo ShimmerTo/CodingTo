@@ -16,11 +16,9 @@
 
       <div class="ilm-footer">
         <span class="ilm-state" :class="{ running, ok: !running && success, fail: !running && !success }">
-          <template v-if="running">{{ t.installLogRunning }}</template>
-          <template v-else-if="success">{{ t.installLogDone }}</template>
-          <template v-else>{{ t.installLogFailed }}</template>
+          {{ statusText }}
         </span>
-        <span class="ilm-hint">{{ t.installLogHint }}</span>
+        <span v-if="hintText" class="ilm-hint">{{ hintText }}</span>
       </div>
     </div>
   </div>
@@ -40,14 +38,28 @@ const running = ref(false)
 const success = ref(false)
 const title = ref('')
 const installId = ref('')
+const operation = ref('install')
 const lines = ref([])
 const logBox = ref(null)
 
 const displayText = computed(() => (lines.value.length ? lines.value.join('\n') : t.value.installLogEmpty))
+const statusText = computed(() => {
+  if (operation.value === 'uninstall') {
+    if (running.value) return t.value.uninstallLogRunning
+    return success.value ? t.value.uninstallLogDone : t.value.uninstallLogFailed
+  }
+  if (running.value) return t.value.installLogRunning
+  return success.value ? t.value.installLogDone : t.value.installLogFailed
+})
+const hintText = computed(() => {
+  if (operation.value === 'uninstall') return success.value ? '' : t.value.uninstallLogHint
+  return t.value.installLogHint
+})
 
 function open(payload) {
   installId.value = payload.installId || payload.agentId || ''
   title.value = payload.title || ''
+  operation.value = payload.operation === 'uninstall' ? 'uninstall' : 'install'
   lines.value = []
   running.value = true
   success.value = false
@@ -92,6 +104,7 @@ onMounted(async () => {
     const payload = event?.data
     const payloadInstallId = payload?.installId || payload?.agentId || ''
     if (payloadInstallId !== installId.value) return
+    if (payload?.operation === 'uninstall') operation.value = 'uninstall'
     running.value = false
     success.value = !!payload?.success
   })

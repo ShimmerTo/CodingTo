@@ -121,8 +121,9 @@
 .selected-skill-chip button { display: grid; place-items: center; padding: 1px; border: 0; border-radius: 4px; color: inherit; background: transparent; cursor: pointer; }
 .selected-skill-chip button:hover { background: var(--surface-3); }
 .thinking-select-wrap::after { content: ''; position: absolute; right: 10px; top: 50%; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-70%) rotate(45deg); pointer-events: none; }
-.composer-stats { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: 0 1 auto; }
-.context-usage { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; }
+.composer-stats { min-width: 0; max-width: 46%; display: flex; align-items: center; gap: 10px; margin-left: auto; flex: 0 1 auto; }
+.composer-workdir { min-width: 0; overflow: hidden; color: var(--faint); font: var(--fs-12) "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.context-usage { flex: 0 0 20px; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; }
 .context-usage:hover { background: var(--surface-2); }
 .context-usage__ring { width: 16px; height: 16px; transform: rotate(-90deg); }
 .context-usage__track, .context-usage__value { fill: none; stroke-width: 2.5; }
@@ -204,6 +205,7 @@
    toolbar labels never collapse into vertical text. */
 @container (max-width: 900px) {
   .token-stats { display: none; }
+  .composer-stats { max-width: 38%; }
 }
 @container (max-width: 700px) {
   .composer-stats { display: none; }

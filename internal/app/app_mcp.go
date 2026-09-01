@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
 
+	"codingto/internal/applog"
 	"codingto/internal/extensions"
 	"codingto/internal/piagent"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -119,14 +121,19 @@ func (a *App) RemoveGlobalPackage(req GlobalPackageInstallRequest) (extensions.A
 	app.Event.Emit("install:start", map[string]any{
 		"installId": installID,
 		"scope":     "global",
+		"operation": "uninstall",
 		"title":     installTerminalName() + " · 全局卸载 · " + packageName,
 	})
 	app.Event.Emit("install:log", map[string]any{"installId": installID, "line": "> npm uninstall -g " + packageName})
-	_, uninstallErr := a.extensions.UninstallGlobalPackage(packageName, func(line string) {
+	result, uninstallErr := a.extensions.UninstallGlobalPackage(packageName, func(line string) {
 		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": line})
 	})
 	if uninstallErr != nil {
-		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": "warn: " + uninstallErr.Error()})
+		message := "全局插件卸载失败，插件仍保留在列表中，请查看应用日志"
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": message})
+		app.Event.Emit("install:done", map[string]any{"installId": installID, "operation": "uninstall", "success": false})
+		result.Message = message
+		return result, errors.New(message)
 	}
 	cfg := a.store.Get()
 	if scope == "mcp" {
@@ -135,14 +142,17 @@ func (a *App) RemoveGlobalPackage(req GlobalPackageInstallRequest) (extensions.A
 		cfg.Extensions.GlobalPlugins = removeGlobalPackage(cfg.Extensions.GlobalPlugins, packageName)
 	}
 	if err := a.store.Save(cfg); err != nil {
-		return extensions.ActionResult{}, err
+		applog.Errorf("save global package removal %s/%s: %v", scope, packageName, err)
+		message := "插件已从系统卸载，但列表状态保存失败，请刷新后重试"
+		app.Event.Emit("install:log", map[string]any{"installId": installID, "line": message})
+		app.Event.Emit("install:done", map[string]any{"installId": installID, "operation": "uninstall", "success": false})
+		app.Event.Emit("extensions:changed", map[string]any{"key": packageName, "action": "uninstall"})
+		return extensions.ActionResult{Message: message, Command: result.Command, Output: result.Output}, errors.New(message)
 	}
-	app.Event.Emit("install:done", map[string]any{"installId": installID, "success": true})
+	app.Event.Emit("install:done", map[string]any{"installId": installID, "operation": "uninstall", "success": true})
 	app.Event.Emit("extensions:changed", map[string]any{"key": packageName, "action": "uninstall"})
-	if uninstallErr != nil {
-		return extensions.ActionResult{Message: "已从列表移除（全局卸载失败：" + uninstallErr.Error() + "）", Command: "npm uninstall -g " + packageName}, nil
-	}
-	return extensions.ActionResult{Message: "已从列表移除并卸载", Command: "npm uninstall -g " + packageName}, nil
+	result.Message = "已从列表移除并卸载"
+	return result, nil
 }
 
 func removeGlobalPackage(items []extensions.GlobalPackage, name string) []extensions.GlobalPackage {

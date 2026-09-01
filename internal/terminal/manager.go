@@ -89,6 +89,10 @@ type managedSession struct {
 
 var fallbackTerminalID atomic.Uint64
 
+// ErrTerminalNotFound indicates that a stale UI request referenced a terminal
+// which is no longer owned by the selected workspace.
+var ErrTerminalNotFound = errors.New("terminal not found in this workspace")
+
 // NewManager creates an empty workspace-scoped terminal manager.
 func NewManager(emit Emitter, logError ErrorLogger) *Manager {
 	return &Manager{
@@ -314,7 +318,7 @@ func (m *Manager) session(root, terminalID string) (*managedSession, error) {
 	session := m.groups[key][terminalID]
 	m.mu.Unlock()
 	if session == nil {
-		return nil, errors.New("terminal not found in this workspace")
+		return nil, ErrTerminalNotFound
 	}
 	return session, nil
 }

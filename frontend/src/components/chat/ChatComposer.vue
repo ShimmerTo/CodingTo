@@ -34,6 +34,7 @@ const props = defineProps({
   tokenStats: { type: Object, required: true },
   contextWindow: { type: Number, default: 0 },
   contextUsage: { type: Object, required: true },
+  currentWorkDir: { type: String, default: '' },
   planItems: { type: Array, default: () => [] },
   executionPlan: { type: Array, default: () => [] },
   extensionDialog: { type: Object, default: null },
@@ -540,6 +541,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocumentPointe
         </div>
 
         <div class="composer-stats">
+          <span v-if="currentWorkDir" class="composer-workdir" :title="`${t.currentWorkspace}: ${currentWorkDir}`">{{ currentWorkDir }}</span>
           <div class="context-usage" :title="contextUsageTitle" :aria-label="contextUsageTitle">
             <svg class="context-usage__ring" viewBox="0 0 24 24" aria-hidden="true">
               <circle class="context-usage__track" cx="12" cy="12" r="9" />

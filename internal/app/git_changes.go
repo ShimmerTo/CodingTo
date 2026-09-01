@@ -49,6 +49,41 @@ type GitSnapshot struct {
 	Worktree      GitChangeSet `json:"worktree"`
 	Branch        GitChangeSet `json:"branch"`
 	Error         string       `json:"error,omitempty"`
+	// CompareLeft and CompareRight are the two refs used by the "compare"
+	// scope; they are never serialized to the frontend.
+	CompareLeft  string `json:"-"`
+	CompareRight string `json:"-"`
+}
+
+// GitBranchCompareRequest selects two refs to compare. Empty refs fall back to
+// the current branch (left) and the automatically detected base branch (right).
+type GitBranchCompareRequest struct {
+	SessionID int64  `json:"sessionId"`
+	Left      string `json:"left"`
+	Right     string `json:"right"`
+	Language  string `json:"language,omitempty"`
+}
+
+// GitBranchCompareResult is the two-sided diff between two branches.
+type GitBranchCompareResult struct {
+	IsRepository bool            `json:"isRepository"`
+	Root         string          `json:"root,omitempty"`
+	Left         string          `json:"left"`
+	Right        string          `json:"right"`
+	Ahead        int             `json:"ahead"`
+	Behind       int             `json:"behind"`
+	Files        []GitFileChange `json:"files"`
+	Added        int             `json:"added"`
+	Deleted      int             `json:"deleted"`
+}
+
+// GitCompareFileDetailRequest selects one file between two refs.
+type GitCompareFileDetailRequest struct {
+	SessionID int64  `json:"sessionId"`
+	Left      string `json:"left"`
+	Right     string `json:"right"`
+	Path      string `json:"path"`
+	Language  string `json:"language,omitempty"`
 }
 
 type GitChangeSet struct {
@@ -116,14 +151,14 @@ type GitFileVersion struct {
 }
 
 func readGitSnapshot(workspace, preferredBase string) GitSnapshot {
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+
 	snapshot := GitSnapshot{
 		BaseBranches: []string{},
 		Worktree:     GitChangeSet{Files: []GitFileChange{}},
 		Branch:       GitChangeSet{Files: []GitFileChange{}},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
-	defer cancel()
-
 	root, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
 	if err != nil {
 		snapshot.Error = strings.TrimSpace(err.Error())
@@ -184,6 +219,53 @@ func readGitSnapshot(workspace, preferredBase string) GitSnapshot {
 		}
 	}
 	return snapshot
+}
+
+// readGitWorktreeSnapshot reads only the live checkout state: repository
+// location, current branch and the status/numstat of the worktree versus HEAD.
+// It never queries refs or history, so ordinary file events can refresh the
+// worktree view without re-reading branches, remotes and commits.
+func readGitWorktreeSnapshot(workspace string) (GitSnapshot, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+
+	snapshot := GitSnapshot{
+		BaseBranches: []string{},
+		Worktree:     GitChangeSet{Files: []GitFileChange{}},
+		Branch:       GitChangeSet{Files: []GitFileChange{}},
+	}
+	root, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		snapshot.Error = strings.TrimSpace(err.Error())
+		return snapshot, false
+	}
+	snapshot.IsRepository = true
+	snapshot.Root = filepath.Clean(strings.TrimSpace(root))
+	snapshot.WorktreePath = snapshot.Root
+
+	branch, _ := runGit(ctx, snapshot.Root, "branch", "--show-current")
+	snapshot.CurrentBranch = strings.TrimSpace(branch)
+	if snapshot.CurrentBranch == "" {
+		shortSHA, _ := runGit(ctx, snapshot.Root, "rev-parse", "--short", "HEAD")
+		snapshot.CurrentBranch = strings.TrimSpace(shortSHA)
+	}
+
+	statusBytes, statusErr := runGitBytes(ctx, snapshot.Root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if statusErr != nil {
+		return snapshot, false
+	}
+	snapshot.Worktree.Files = parseGitStatus(string(statusBytes))
+	markGitIgnoredFiles(ctx, snapshot.Root, snapshot.Worktree.Files)
+	if numstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", "HEAD", "--"); diffErr == nil {
+		applyGitNumstat(&snapshot.Worktree, string(numstat))
+	}
+	if stagedNumstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--cached", "--numstat", "-z", "--no-renames", "--"); diffErr == nil {
+		applyGitScopedNumstat(&snapshot.Worktree, string(stagedNumstat), true)
+	}
+	if unstagedNumstat, diffErr := runGitBytes(ctx, snapshot.Root, "diff", "--numstat", "-z", "--no-renames", "--"); diffErr == nil {
+		applyGitScopedNumstat(&snapshot.Worktree, string(unstagedNumstat), false)
+	}
+	return snapshot, true
 }
 
 // markGitIgnoredFiles annotates worktree changes that match an ignore rule,
@@ -274,9 +356,13 @@ func (a *App) ApplyGitFileOperation(req GitFileOperationRequest) error {
 			applog.Errorf("add Git ignore path failed: root=%q path=%q directory=%t: %v", root, req.Path, req.IsDirectory, err)
 			return errors.New("failed to add the selected item to the Git ignore list")
 		}
-		return nil
+	} else if err := applyGitFileOperation(ctx, root, req.Op, req.Path); err != nil {
+		return err
 	}
-	return applyGitFileOperation(ctx, root, req.Op, req.Path)
+	if a.gitMonitor != nil {
+		a.gitMonitor.RefreshNow(workspace, false)
+	}
+	return nil
 }
 
 // ApplyGitFileOperations applies one validated Git action to multiple paths.
@@ -296,7 +382,13 @@ func (a *App) ApplyGitFileOperations(req GitFileOperationsRequest) error {
 		return errors.New("workspace is not a Git repository")
 	}
 	root := filepath.Clean(strings.TrimSpace(rootText))
-	return applyGitFileOperations(ctx, root, req.Op, req.Paths)
+	if err := applyGitFileOperations(ctx, root, req.Op, req.Paths); err != nil {
+		return err
+	}
+	if a.gitMonitor != nil {
+		a.gitMonitor.RefreshNow(workspace, false)
+	}
+	return nil
 }
 
 // addPathToGitIgnore adds one repository-relative path to the root ignore file.
@@ -663,11 +755,18 @@ func (a *App) GetSessionGitFileDetail(id int64, scope, path, baseBranch string) 
 	if err != nil {
 		return GitFileDetail{}, err
 	}
+	scope = strings.TrimSpace(scope)
+	baseBranch = strings.TrimSpace(baseBranch)
+	if a.gitMonitor != nil && scope != "branch" {
+		if detail, detailErr, ready := a.gitMonitor.FileDetail(workspace, scope, path, baseBranch); ready {
+			return detail, detailErr
+		}
+		return GitFileDetail{}, errors.New("Git repository cache is still warming")
+	}
 	snapshot := readGitSnapshot(workspace, strings.TrimSpace(baseBranch))
 	if !snapshot.IsRepository {
 		return GitFileDetail{}, errors.New("workspace is not a Git repository")
 	}
-	scope = strings.TrimSpace(scope)
 	var set GitChangeSet
 	switch scope {
 	case "worktree", "staged", "unstaged", "untracked":
@@ -699,6 +798,47 @@ func (a *App) GetSessionGitFileDetail(id int64, scope, path, baseBranch string) 
 	return readGitFileDetail(snapshot, scope, *change)
 }
 
+func readGitFileDetailFromRepository(view GitRepositoryView, scope, path, baseBranch string) (GitFileDetail, error) {
+	if !view.IsRepository || strings.TrimSpace(view.Root) == "" {
+		return GitFileDetail{}, errors.New("workspace is not a Git repository")
+	}
+	scope = strings.TrimSpace(scope)
+	if scope != "worktree" && scope != "staged" && scope != "unstaged" && scope != "untracked" {
+		return GitFileDetail{}, fmt.Errorf("invalid Git comparison scope: %s", scope)
+	}
+	path = filepath.ToSlash(path)
+	var change *GitFileChange
+	for index := range view.Worktree.Files {
+		if view.Worktree.Files[index].Path == path {
+			change = &view.Worktree.Files[index]
+			break
+		}
+	}
+	if change == nil {
+		return GitFileDetail{}, fmt.Errorf("Git change not found: %s", path)
+	}
+	if scope == "staged" && (!change.Staged || change.Conflicted) {
+		return GitFileDetail{}, fmt.Errorf("staged Git change not found: %s", path)
+	}
+	if scope == "unstaged" && (!change.Unstaged || change.Untracked || change.Conflicted) {
+		return GitFileDetail{}, fmt.Errorf("unstaged Git change not found: %s", path)
+	}
+	if scope == "untracked" && (!change.Untracked || change.Conflicted) {
+		return GitFileDetail{}, fmt.Errorf("untracked Git change not found: %s", path)
+	}
+	snapshot := GitSnapshot{
+		IsRepository:  true,
+		Root:          view.Root,
+		WorktreePath:  view.WorktreePath,
+		CurrentBranch: view.CurrentBranch,
+		BaseBranch:    strings.TrimSpace(baseBranch),
+		BaseBranches:  []string{},
+		Worktree:      view.Worktree,
+		Branch:        GitChangeSet{Files: []GitFileChange{}},
+	}
+	return readGitFileDetail(snapshot, scope, *change)
+}
+
 // GetSessionGitCommitFileDetail returns the selected commit's file content compared with its first parent.
 func (a *App) GetSessionGitCommitFileDetail(req GitCommitFileDetailRequest) (GitFileDetail, error) {
 	workspace, err := a.sessionGitWorkspace(req.SessionID)
@@ -709,22 +849,36 @@ func (a *App) GetSessionGitCommitFileDetail(req GitCommitFileDetailRequest) (Git
 	if !validGitCommitHash(commit) {
 		return GitFileDetail{}, gitLocalizedError(req.Language, "提交标识不合法", "The Git commit is invalid")
 	}
+	if a.gitMonitor != nil {
+		detail, detailErr, ready := a.gitMonitor.CommitFileDetail(workspace, commit, req.Path, func(root, path string) (GitFileDetail, error) {
+			return readGitCommitFileDetailRequest(root, commit, path, req.Language)
+		})
+		if ready {
+			return detail, detailErr
+		}
+		return GitFileDetail{}, gitLocalizedError(req.Language, "Git 仓库缓存仍在预热", "The Git repository cache is still warming")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
 	defer cancel()
 	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return GitFileDetail{}, gitLocalizedError(req.Language, "当前工作区不是 Git 仓库", "The current workspace is not a Git repository")
 	}
-	root := filepath.Clean(strings.TrimSpace(rootText))
+	return readGitCommitFileDetailRequest(filepath.Clean(strings.TrimSpace(rootText)), commit, req.Path, req.Language)
+}
+
+func readGitCommitFileDetailRequest(root, commit, requestedPath, language string) (GitFileDetail, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
 	resolved := strings.TrimSpace(gitTrimmed(ctx, root, "rev-parse", "--verify", commit+"^{commit}"))
 	if resolved == "" || !strings.EqualFold(resolved, commit) {
-		return GitFileDetail{}, gitLocalizedError(req.Language, "找不到该提交", "The Git commit was not found")
+		return GitFileDetail{}, gitLocalizedError(language, "找不到该提交", "The Git commit was not found")
 	}
 	statusRaw, err := runGit(ctx, root, "diff-tree", "--root", "--no-commit-id", "-r", "--name-status", "-z", "--no-renames", commit, "--")
 	if err != nil {
-		return GitFileDetail{}, gitLocalizedError(req.Language, "读取该提交的文件变更失败", "Failed to read the Git commit changes")
+		return GitFileDetail{}, gitLocalizedError(language, "读取该提交的文件变更失败", "Failed to read the Git commit changes")
 	}
-	path := filepath.ToSlash(req.Path)
+	path := filepath.ToSlash(requestedPath)
 	var change *GitFileChange
 	for _, item := range parseGitNameStatus(statusRaw) {
 		if item.Path == path {
@@ -734,9 +888,138 @@ func (a *App) GetSessionGitCommitFileDetail(req GitCommitFileDetailRequest) (Git
 		}
 	}
 	if change == nil {
-		return GitFileDetail{}, gitLocalizedError(req.Language, "该文件不在此提交的变更中", "The file is not part of this Git commit")
+		return GitFileDetail{}, gitLocalizedError(language, "该文件不在此提交的变更中", "The file is not part of this Git commit")
 	}
 	return readGitCommitFileDetail(ctx, root, commit, *change)
+}
+
+// CompareSessionGitBranches returns the two-sided diff between two refs.
+// Empty refs default to the current branch (left) and the automatically
+// detected base branch (right), so a freshly opened compare tab works without
+// any selection. The diff direction is left → right: status added means the
+// file exists only on the right side, deleted means only on the left.
+func (a *App) CompareSessionGitBranches(req GitBranchCompareRequest) (GitBranchCompareResult, error) {
+	workspace, err := a.sessionGitWorkspace(req.SessionID)
+	if err != nil {
+		return GitBranchCompareResult{}, gitLocalizedError(req.Language, "当前工作区不是 Git 仓库", "The current workspace is not a Git repository")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return GitBranchCompareResult{}, gitLocalizedError(req.Language, "当前工作区不是 Git 仓库", "The current workspace is not a Git repository")
+	}
+	root := filepath.Clean(strings.TrimSpace(rootText))
+	left := strings.TrimSpace(req.Left)
+	right := strings.TrimSpace(req.Right)
+	if left == "" {
+		left = gitCurrentBranchRef(ctx, root)
+	}
+	if right == "" {
+		right = detectGitBaseBranch(ctx, root, left, "", listGitBaseBranches(ctx, root))
+	}
+	if left == "" || right == "" {
+		return GitBranchCompareResult{}, gitLocalizedError(req.Language, "未找到可对比的分支", "No branch is available to compare")
+	}
+	if err := verifyGitCommitRefs(ctx, root, left, right); err != nil {
+		return GitBranchCompareResult{}, gitLocalizedError(req.Language, "对比的分支不存在", "The branch to compare does not exist")
+	}
+	result := GitBranchCompareResult{
+		IsRepository: true,
+		Root:         root,
+		Left:         left,
+		Right:        right,
+		Files:        []GitFileChange{},
+	}
+	if names, namesErr := runGitBytes(ctx, root, "diff", "--name-status", "-z", "--no-renames", left, right, "--"); namesErr == nil {
+		result.Files = parseGitNameStatus(string(names))
+	}
+	set := GitChangeSet{Files: result.Files}
+	if numstat, numstatErr := runGitBytes(ctx, root, "diff", "--numstat", "-z", "--no-renames", left, right, "--"); numstatErr == nil {
+		applyGitNumstat(&set, string(numstat))
+	}
+	result.Files, result.Added, result.Deleted = set.Files, set.Added, set.Deleted
+	if counts, countErr := runGit(ctx, root, "rev-list", "--left-right", "--count", left+"..."+right); countErr == nil {
+		fields := strings.Fields(counts)
+		if len(fields) == 2 {
+			result.Ahead, _ = strconv.Atoi(fields[0])
+			result.Behind, _ = strconv.Atoi(fields[1])
+		}
+	}
+	return result, nil
+}
+
+// GetSessionGitCompareFileDetail returns one file's before/after versions and
+// diff between two refs, reusing the standard text/image/binary rendering.
+func (a *App) GetSessionGitCompareFileDetail(req GitCompareFileDetailRequest) (GitFileDetail, error) {
+	workspace, err := a.sessionGitWorkspace(req.SessionID)
+	if err != nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "当前工作区不是 Git 仓库", "The current workspace is not a Git repository")
+	}
+	left, right := strings.TrimSpace(req.Left), strings.TrimSpace(req.Right)
+	if left == "" || right == "" {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "对比的分支不完整", "The branches to compare are incomplete")
+	}
+	path := filepath.ToSlash(strings.TrimSpace(req.Path))
+	if path == "" {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "请选择要对比的文件", "Select a file to compare")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitSnapshotTimeout)
+	defer cancel()
+	if err := verifyGitCommitRefs(ctx, workspace, left, right); err != nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "对比的分支不存在", "The branch to compare does not exist")
+	}
+	rootText, err := runGit(ctx, workspace, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "当前工作区不是 Git 仓库", "The current workspace is not a Git repository")
+	}
+	root := filepath.Clean(strings.TrimSpace(rootText))
+	statusRaw, err := runGitBytes(ctx, root, "diff", "--name-status", "-z", "--no-renames", left, right, "--")
+	if err != nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "读取分支对比失败", "Failed to read the branch comparison")
+	}
+	var change *GitFileChange
+	for _, item := range parseGitNameStatus(string(statusRaw)) {
+		if item.Path == path {
+			copy := item
+			change = &copy
+			break
+		}
+	}
+	if change == nil {
+		return GitFileDetail{}, gitLocalizedError(req.Language, "该文件不在分支对比的变更中", "The file is not part of the branch comparison")
+	}
+	snapshot := GitSnapshot{
+		IsRepository: true,
+		Root:         root,
+		WorktreePath: root,
+		CompareLeft:  left,
+		CompareRight: right,
+	}
+	return readGitFileDetail(snapshot, "compare", *change)
+}
+
+// gitCurrentBranchRef returns the checked out branch name, falling back to the
+// short HEAD SHA on a detached checkout.
+func gitCurrentBranchRef(ctx context.Context, root string) string {
+	branch, _ := runGit(ctx, root, "branch", "--show-current")
+	if value := strings.TrimSpace(branch); value != "" {
+		return value
+	}
+	shortSHA, _ := runGit(ctx, root, "rev-parse", "--short", "HEAD")
+	return strings.TrimSpace(shortSHA)
+}
+
+// verifyGitCommitRefs resolves both refs as commits, returning an error when
+// either cannot be resolved. Refs are passed as separate command arguments so
+// branch names can never be interpreted as flags or shell commands.
+func verifyGitCommitRefs(ctx context.Context, root, left, right string) error {
+	for _, ref := range []string{left, right} {
+		if strings.TrimSpace(gitTrimmed(ctx, root, "rev-parse", "--verify", ref+"^{commit}")) == "" {
+			return errors.New("Git ref not found: " + ref)
+		}
+	}
+	return nil
 }
 
 // sessionGitWorkspace resolves the Git working directory for a conversation.
@@ -772,16 +1055,10 @@ func (a *App) sessionGitWorkspace(id int64) (string, error) {
 	return "", errGitWorkspaceNotFound
 }
 
-// activeEnvironmentWorkspace returns the path of the app's currently active
-// environment (the working directory), falling back to the last used one.
+// activeEnvironmentWorkspace returns the process-local working directory for
+// a new conversation. The selection is never persisted as a default.
 func (a *App) activeEnvironmentWorkspace() string {
-	cfg := a.store.Get()
-	if env := cfg.environmentByID(cfg.ActiveEnvID); env != nil {
-		if path := strings.TrimSpace(env.Path); path != "" {
-			return path
-		}
-	}
-	return strings.TrimSpace(cfg.LastEnvironment)
+	return strings.TrimSpace(a.runtimeWorkspace().Root)
 }
 
 func (a *App) sessionWorkspace(environmentID, fallback string) string {
@@ -807,7 +1084,7 @@ func runGit(ctx context.Context, root string, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", root}, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
 	configureGitProcess(command)
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
@@ -955,6 +1232,12 @@ func readGitFileDetail(snapshot GitSnapshot, scope string, change GitFileChange)
 		}
 		beforeData, detail.Before = readGitBlobVersion(ctx, snapshot.Root, strings.TrimSpace(mergeBase), beforePath)
 		afterData, detail.After = readGitBlobVersion(ctx, snapshot.Root, "HEAD", change.Path)
+	case "compare":
+		if snapshot.CompareLeft == "" || snapshot.CompareRight == "" {
+			return GitFileDetail{}, errors.New("compare refs not found")
+		}
+		beforeData, detail.Before = readGitBlobVersion(ctx, snapshot.Root, snapshot.CompareLeft, beforePath)
+		afterData, detail.After = readGitBlobVersion(ctx, snapshot.Root, snapshot.CompareRight, change.Path)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return GitFileDetail{}, err
@@ -1112,7 +1395,7 @@ func runGitBytes(ctx context.Context, root string, args ...string) ([]byte, erro
 	commandArgs := append([]string{"-C", root}, args...)
 	command := exec.CommandContext(ctx, "git", commandArgs...)
 	configureGitProcess(command)
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
 	output, err := command.Output()
 	if err != nil {
 		return nil, err
